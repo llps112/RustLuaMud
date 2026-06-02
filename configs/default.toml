@@ -1,0 +1,23 @@
+[general]
+scroll_buffer = 5000
+log_dir = "logs"
+log_rotation_size_mb = 10
+log_rotation_count = 5
+
+[[connections]]
+name = "战士"
+host = "mud.example.com"
+port = 4000
+script = "scripts/warrior.lua"
+auto_connect = true
+auto_reconnect = true
+reconnect_delay_secs = 5
+
+[[connections]]
+name = "法师"
+host = "mud.example.com"
+port = 4000
+script = "scripts/mage.lua"
+auto_connect = true
+auto_reconnect = true
+reconnect_delay_secs = 5
