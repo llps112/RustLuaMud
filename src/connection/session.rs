@@ -58,6 +58,8 @@ pub struct Session {
     /// 登录凭证（注入 Lua 变量 char_name / char_password）
     pub username: Option<String>,
     pub password: Option<String>,
+    /// 是否自动连接
+    pub auto_connect: bool,
 
     // 发送命令的通道
     send_tx: Option<mpsc::Sender<String>>,
@@ -141,6 +143,7 @@ impl Session {
             script_path: config.script.clone(),
             username: config.username.clone(),
             password: config.password.clone(),
+            auto_connect: config.auto_connect,
             send_tx: None,
         }
     }

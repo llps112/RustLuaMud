@@ -142,7 +142,7 @@ impl LuaEngine {
         Ok(())
     }
 
-    /// 加载并执行 Lua 脚本文件
+    /// 加载并执行 Lua 脚本文件（要求 UTF-8 编码）
     pub fn load_script(&mut self, path: &str) -> Result<(), String> {
         let code = std::fs::read_to_string(path)
             .map_err(|e| format!("读取脚本失败 '{}': {}", path, e))?;
@@ -207,25 +207,42 @@ impl LuaEngine {
     pub fn process_input(&self, input: &str) -> bool {
         self.state.borrow_mut().pending_commands.clear();
 
-        // 收集匹配的别名
-        let matched: Vec<usize> = {
+        // 收集匹配的别名及其捕获组
+        let matches: Vec<(usize, Vec<String>)> = {
             let state = self.state.borrow();
-            state.aliases.iter().enumerate()
-                .filter(|(_, a)| a.enabled && a.pattern.is_match(input))
-                .map(|(i, _)| i)
-                .collect()
+            let mut result = Vec::new();
+            for (i, alias) in state.aliases.iter().enumerate() {
+                if !alias.enabled { continue; }
+                if let Some(caps) = alias.pattern.captures(input) {
+                    let caps_list: Vec<String> = caps.iter()
+                        .skip(1)
+                        .flatten()
+                        .map(|m| m.as_str().to_string())
+                        .collect();
+                    result.push((i, caps_list));
+                }
+            }
+            result
         };
 
-        if matched.is_empty() {
+        if matches.is_empty() {
             return false;
         }
 
-        for idx in matched {
+        // 逐个触发（与触发器一致，传 matches table）
+        for (idx, caps_list) in matches {
             let callback = {
                 let state = self.state.borrow();
                 state.aliases[idx].callback.clone()
             };
-            let _ = callback.call::<()>(input);
+            if let Ok(args_table) = self.lua.create_table() {
+                // matches[0] = 原始输入, matches[1] = 第一个捕获组, ...
+                let _ = args_table.set(0, input);
+                for (i, m) in caps_list.iter().enumerate() {
+                    let _ = args_table.set(i + 1, m.as_str());
+                }
+                let _ = callback.call::<()>(args_table);
+            }
         }
 
         true

@@ -1,10 +1,21 @@
 -- RustLuaMud Lua 脚本示例
 -- 适用于侠客行 MUD (ln.xkxmud.com:5555)
+--
+-- 正则语法：Rust regex（与 PCRE 大部分兼容，少数差异见下方）
+--   - PCRE 的 \d \w \s 等同样支持
+--   - PCRE 的 (?<name>...) 命名捕获支持
+--   - PCRE 的 \b 单词边界支持
+--   - 注意：Lua 的 % 不是正则转义符，用 \ 转义（如 \% 匹配 %）
+--
+-- 回调参数：
+--   trigger(pattern, callback)  → callback(matches)  matches[1]=第一个捕获组
+--   alias(pattern, callback)    → callback(matches)  matches[0]=原始输入, matches[1]=第一个捕获组
+--   timer(interval, callback)   → callback()
 
 -- ========== 触发器 ==========
 
 -- 自动回答 BIG5 编码询问
-trigger("Are you using BIG5 code%?", function()
+trigger("Are you using BIG5 code\\?", function()
     send("No")
     log("自动回答 BIG5 询问")
 end)
@@ -51,7 +62,7 @@ alias("^lh$", function()
     send("hp")
 end)
 
--- gs/gn/gw/ge = go south/north/west/east
+-- 方向快捷键
 alias("^gs$", function() send("go south") end)
 alias("^gn$", function() send("go north") end)
 alias("^gw$", function() send("go west") end)
@@ -59,11 +70,12 @@ alias("^ge$", function() send("go east") end)
 alias("^gu$", function() send("go up") end)
 alias("^gd$", function() send("go down") end)
 
--- sk = 查看技能
+-- sk = 查看技能, sc = 查看分数
 alias("^sk$", function() send("skills") end)
 alias("^sc$", function() send("score") end)
 
 -- 设置角色名和密码（用于自动登录）
+-- matches[0] = 原始输入, matches[1] = 第一个捕获组
 alias("^setname (.+)$", function(matches)
     set("char_name", matches[1])
     log("角色名已设置: " .. matches[1])

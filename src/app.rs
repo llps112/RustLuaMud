@@ -100,13 +100,12 @@ impl App {
     pub async fn run(&mut self) -> io::Result<()> {
         self.terminal.init_screen()?;
 
-        // 自动连接所有 auto_connect 的连接
-        let auto_connect_ids: Vec<usize> = self.config.connections.iter().enumerate()
-            .filter(|(_, c)| c.auto_connect)
-            .map(|(id, _)| id)
+        // 自动连接所有 auto_connect 的连接（包括从 profile 加载的）
+        let auto_connect_ids: Vec<usize> = (0..self.manager.sessions.len())
+            .filter(|&id| self.manager.sessions[id].auto_connect)
             .collect();
         for id in auto_connect_ids {
-            let name = self.config.connections[id].name.clone();
+            let name = self.manager.sessions[id].name.clone();
             match self.manager.connect_session(id).await {
                 Ok(()) => {
                     let msg = format!("[系统] 连接 {} ({}) 已建立", id + 1, name);
