@@ -106,6 +106,21 @@ impl ConnectionManager {
         self.event_rx.take()
     }
 
+    /// 彻底移除指定连接
+    pub fn remove_session(&mut self, id: usize) -> Result<String, String> {
+        if id >= self.sessions.len() {
+            return Err(format!("连接 {} 不存在", id + 1));
+        }
+        let name = self.sessions[id].name.clone();
+        self.sessions[id].disconnect();
+        self.sessions.remove(id);
+        // 如果移除的是前台连接或前台连接在它之后，调整 foreground_id
+        if self.foreground_id >= self.sessions.len() && !self.sessions.is_empty() {
+            self.foreground_id = self.sessions.len() - 1;
+        }
+        Ok(name)
+    }
+
     /// 获取前台连接名称
     pub fn foreground_name(&self) -> &str {
         if self.foreground_id < self.sessions.len() {

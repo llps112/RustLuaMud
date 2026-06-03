@@ -179,7 +179,7 @@ impl App {
             return Ok(());
         }
 
-        // Alt+1~9 / F1~F12: 切换连接
+        // Alt+1~9: 切换连接
         if key.modifiers.contains(KeyModifiers::ALT) {
             if let KeyCode::Char(c) = key.code {
                 if let Some(digit) = c.to_digit(10) {
@@ -189,17 +189,6 @@ impl App {
                     }
                     return Ok(());
                 }
-            }
-        }
-
-        // F1~F12 也支持切换连接（兼容不发送 Alt 的终端）
-        if key.modifiers.is_empty() {
-            if let KeyCode::F(n) = key.code {
-                let id = (n as usize) - 1;
-                if id < self.manager.sessions.len() {
-                    self.switch_foreground(id)?;
-                }
-                return Ok(());
             }
         }
 
@@ -308,6 +297,37 @@ impl App {
                 }
             }
 
+            "/close" => {
+                let target = if parts.len() >= 2 {
+                    match parts[1].parse::<usize>() {
+                        Ok(id) => id - 1,
+                        Err(_) => {
+                            self.terminal.append_output("[错误] 无效的编号")?;
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    self.manager.foreground_id
+                };
+                match self.manager.remove_session(target) {
+                    Ok(name) => {
+                        self.update_status_bar()?;
+                        // 如果移除的是前台连接，切换到新的前台
+                        if !self.manager.sessions.is_empty() {
+                            self.switch_foreground(self.manager.foreground_id)?;
+                        } else {
+                            self.terminal.replace_output(&Vec::new())?;
+                        }
+                        self.terminal.append_output(
+                            &format!("[系统] 已关闭连接 {} ({})", target + 1, name)
+                        )?;
+                    }
+                    Err(e) => {
+                        self.terminal.append_output(&format!("[错误] {}", e))?;
+                    }
+                }
+            }
+
             "/list" => {
                 for (i, s) in self.manager.sessions.iter().enumerate() {
                     let state_str = match s.state {
@@ -327,9 +347,10 @@ impl App {
                 self.terminal.append_output("内置命令:")?;
                 self.terminal.append_output("  /connect <名> <主机:端口>   添加并连接新角色")?;
                 self.terminal.append_output("  /connect <名> <主机> <端口> 同上")?;
-                self.terminal.append_output("  /disconnect [编号]           断开连接")?;
+                self.terminal.append_output("  /disconnect [编号]           断开连接（保留 session）")?;
+                self.terminal.append_output("  /close [编号]               彻底关闭并移除 session")?;
                 self.terminal.append_output("  /list                       列出所有连接")?;
-                self.terminal.append_output("  Alt+1~9 / F1~F12            切换前台连接")?;
+                self.terminal.append_output("  Alt+1~9                     切换前台连接")?;
             }
         }
         Ok(())
