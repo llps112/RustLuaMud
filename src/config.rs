@@ -8,6 +8,8 @@ pub struct GeneralConfig {
     pub scroll_buffer: usize,
     #[serde(default = "default_log_dir")]
     pub log_dir: String,
+    #[serde(default = "default_profile_dir")]
+    pub profile_dir: String,
     #[serde(default = "default_log_rotation_size_mb")]
     pub log_rotation_size_mb: u64,
     #[serde(default = "default_log_rotation_count")]
@@ -16,6 +18,7 @@ pub struct GeneralConfig {
 
 fn default_scroll_buffer() -> usize { 5000 }
 fn default_log_dir() -> String { "logs".to_string() }
+fn default_profile_dir() -> String { "profiles".to_string() }
 fn default_log_rotation_size_mb() -> u64 { 10 }
 fn default_log_rotation_count() -> usize { 5 }
 
@@ -24,6 +27,7 @@ impl Default for GeneralConfig {
         Self {
             scroll_buffer: default_scroll_buffer(),
             log_dir: default_log_dir(),
+            profile_dir: default_profile_dir(),
             log_rotation_size_mb: default_log_rotation_size_mb(),
             log_rotation_count: default_log_rotation_count(),
         }
@@ -45,6 +49,10 @@ pub struct ConnectionConfig {
     pub auto_reconnect: bool,
     #[serde(default = "default_reconnect_delay")]
     pub reconnect_delay_secs: u64,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 fn default_true() -> bool { true }
@@ -90,6 +98,53 @@ impl AppConfig {
         eprintln!("警告: 未找到配置文件 (已搜索: {})，使用默认配置",
             candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "));
         Self::default()
+    }
+
+    /// 从 profile 目录加载所有角色配置
+    /// 返回 (profiles, skipped_count)
+    pub fn load_profiles(profile_dir: &str) -> (Vec<ConnectionConfig>, usize) {
+        let dir = Path::new(profile_dir);
+        if !dir.exists() {
+            return (Vec::new(), 0);
+        }
+
+        let mut profiles = Vec::new();
+        let mut skipped = 0;
+
+        // 读取目录中的 .toml 文件，按文件名排序保证加载顺序稳定
+        let mut entries: Vec<_> = match fs::read_dir(dir) {
+            Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+            Err(_) => return (Vec::new(), 0),
+        };
+        entries.sort_by_key(|e| e.file_name());
+
+        for entry in entries {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+                continue;
+            }
+
+            match fs::read_to_string(&path) {
+                Ok(content) => {
+                    match toml::from_str::<ConnectionConfig>(&content) {
+                        Ok(config) => {
+                            eprintln!("已加载角色配置: {} ({})", config.name, path.display());
+                            profiles.push(config);
+                        }
+                        Err(e) => {
+                            eprintln!("警告: 角色配置 {} 格式错误: {}", path.display(), e);
+                            skipped += 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("警告: 无法读取 {}: {}", path.display(), e);
+                    skipped += 1;
+                }
+            }
+        }
+
+        (profiles, skipped)
     }
 }
 

@@ -50,6 +50,15 @@ pub struct Session {
     /// 该连接的输出缓冲区（前台切换时恢复用）
     pub output_lines: Vec<String>,
 
+    /// Lua 脚本引擎
+    pub lua_engine: Option<crate::lua::LuaEngine>,
+
+    /// Lua 脚本路径
+    pub script_path: Option<String>,
+    /// 登录凭证（注入 Lua 变量 char_name / char_password）
+    pub username: Option<String>,
+    pub password: Option<String>,
+
     // 发送命令的通道
     send_tx: Option<mpsc::Sender<String>>,
 }
@@ -128,6 +137,10 @@ impl Session {
             reconnect_delay_secs: config.reconnect_delay_secs,
             state: SessionState::Disconnected,
             output_lines: Vec::new(),
+            lua_engine: None,
+            script_path: config.script.clone(),
+            username: config.username.clone(),
+            password: config.password.clone(),
             send_tx: None,
         }
     }

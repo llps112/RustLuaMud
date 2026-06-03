@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod connection;
 mod log;
+mod lua;
 mod ui;
 
 use app::App;

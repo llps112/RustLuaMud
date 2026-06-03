@@ -12,3 +12,5 @@ serde = { version = "1", features = ["derive"] }
 chrono = "0.4"
 encoding_rs = "0.8"
 unicode-width = "0.2"
+mlua = { version = "0.10", features = ["luajit", "vendored", "serialize"] }
+regex = "1"

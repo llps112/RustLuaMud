@@ -14,7 +14,10 @@ pub enum ManagerEvent {
     Error(usize, String),
 }
 
-/// 连接管理器（Phase 1: 单连接基础版）
+/// 最大连接数（Alt+0~9 覆盖 10 个）
+const MAX_SESSIONS: usize = 10;
+
+/// 连接管理器
 pub struct ConnectionManager {
     pub sessions: Vec<Session>,
     pub foreground_id: usize,
@@ -34,15 +37,18 @@ impl ConnectionManager {
     }
 
     /// 从配置添加连接
-    pub fn add_connection(&mut self, config: &ConnectionConfig) -> usize {
+    pub fn add_connection(&mut self, config: &ConnectionConfig) -> Result<usize, String> {
+        if self.sessions.len() >= MAX_SESSIONS {
+            return Err(format!("已达最大连接数限制 ({})", MAX_SESSIONS));
+        }
         let id = self.sessions.len();
         let session = Session::new(id, config);
         self.sessions.push(session);
-        id
+        Ok(id)
     }
 
     /// 动态添加连接（运行时通过命令行添加）
-    pub fn add_connection_dynamic(&mut self, config: &ConnectionConfig) -> usize {
+    pub fn add_connection_dynamic(&mut self, config: &ConnectionConfig) -> Result<usize, String> {
         self.add_connection(config)
     }
 
