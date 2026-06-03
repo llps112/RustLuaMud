@@ -36,6 +36,8 @@ pub struct ConnectionConfig {
     pub host: String,
     pub port: u16,
     #[serde(default)]
+    pub encoding: Option<String>,
+    #[serde(default)]
     pub script: Option<String>,
     #[serde(default = "default_true")]
     pub auto_connect: bool,
@@ -64,14 +66,30 @@ impl AppConfig {
     }
 
     pub fn load_default() -> Self {
-        let path = Path::new("configs/default.toml");
-        match Self::load(path) {
-            Ok(config) => config,
-            Err(e) => {
-                eprintln!("警告: 加载配置文件失败 ({})，使用默认配置", e);
-                Self::default()
+        // 依次尝试：当前目录 → 可执行文件所在目录
+        let candidates = vec![
+            Path::new("configs/default.toml").to_path_buf(),
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|p| p.join("configs/default.toml")))
+                .unwrap_or_default(),
+        ];
+
+        for path in &candidates {
+            if path.exists() {
+                match Self::load(path) {
+                    Ok(config) => return config,
+                    Err(e) => {
+                        eprintln!("警告: 加载配置文件 {} 失败 ({})，使用默认配置", path.display(), e);
+                        return Self::default();
+                    }
+                }
             }
         }
+
+        eprintln!("警告: 未找到配置文件 (已搜索: {})，使用默认配置",
+            candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "));
+        Self::default()
     }
 }
 

@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 
 use crate::config::ConnectionConfig;
-use super::session::{Session, SessionEvent, SessionState};
+use super::session::{Session, SessionEvent, SessionInfo, SessionState};
 
 /// 连接管理器事件
 #[derive(Debug, Clone)]
@@ -39,6 +39,11 @@ impl ConnectionManager {
         let session = Session::new(id, config);
         self.sessions.push(session);
         id
+    }
+
+    /// 动态添加连接（运行时通过命令行添加）
+    pub fn add_connection_dynamic(&mut self, config: &ConnectionConfig) -> usize {
+        self.add_connection(config)
     }
 
     /// 连接指定会话
@@ -117,5 +122,13 @@ impl ConnectionManager {
         } else {
             &SessionState::Disconnected
         }
+    }
+
+    /// 获取所有连接的信息摘要
+    pub fn session_infos(&self) -> Vec<SessionInfo> {
+        self.sessions.iter().map(|s| SessionInfo {
+            name: s.name.clone(),
+            state: s.state.clone(),
+        }).collect()
     }
 }

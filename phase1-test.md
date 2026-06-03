@@ -40,7 +40,6 @@ port = 5555
 auto_connect = true
 auto_reconnect = true
 reconnect_delay_secs = 5
-encoding = "GBK"
 ```
 
 ---

@@ -6,8 +6,28 @@ use crossterm::{
     style::{self, Color, Print, SetForegroundColor},
     terminal::{self, ClearType},
 };
+use unicode_width::UnicodeWidthStr;
 
-use crate::connection::SessionState;
+/// 透传原始字符串，让终端原生处理制表符（\t）
+/// 终端驱动会按当前光标列位置执行 TAB 跳格，与 MushClient 行为一致
+fn expand_tabs(s: &str) -> String {
+    s.to_string()
+}
+
+/// 按显示宽度截取字符串，确保不超过 max_width 列
+fn truncate_to_width(s: &str, max_width: usize) -> String {
+    let mut result = String::new();
+    let mut width = 0;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + cw > max_width {
+            break;
+        }
+        result.push(ch);
+        width += cw;
+    }
+    result
+}
 
 /// 终端 UI 渲染器
 pub struct Terminal {
@@ -15,20 +35,22 @@ pub struct Terminal {
     output_lines: Vec<String>,
     /// 当前输入行内容
     input_buffer: String,
-    /// 输入光标位置
+    /// 输入光标位置（字符偏移）
     input_cursor: usize,
     /// 命令历史
     history: Vec<String>,
     /// 历史浏览位置
     history_pos: usize,
-    /// 终端宽度
+    /// 终端宽度（列数）
     width: u16,
-    /// 终端高度
+    /// 终端高度（行数）
     height: u16,
     /// 状态栏高度
     status_height: u16,
     /// 输入行高度
     input_height: u16,
+    /// 状态栏缓存（避免每次重新构建）
+    status_bar_cache: Option<String>,
 }
 
 impl Terminal {
@@ -45,6 +67,7 @@ impl Terminal {
             height,
             status_height: 1,
             input_height: 1,
+            status_bar_cache: None,
         })
     }
 
@@ -61,10 +84,15 @@ impl Terminal {
         Ok(())
     }
 
-    /// 完整刷新屏幕
+    /// 完整刷新屏幕（含状态栏）
     fn refresh_all(&self, stdout: &mut io::Stdout) -> io::Result<()> {
-        // 状态栏
-        queue!(stdout, cursor::MoveTo(0, 0))?;
+        // 重绘状态栏（从缓存）
+        if let Some(ref bar) = self.status_bar_cache {
+            queue!(stdout, cursor::MoveTo(0, 0))?;
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+            queue!(stdout, Print(bar))?;
+        }
+
         // 输出区
         let output_height = self.output_height() as usize;
         let start = if self.output_lines.len() > output_height {
@@ -75,9 +103,9 @@ impl Terminal {
         for (i, line) in self.output_lines[start..].iter().enumerate() {
             queue!(stdout, cursor::MoveTo(0, self.status_height + i as u16))?;
             queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-            // 截断超出宽度的行
-            let display: String = line.chars().take(self.width as usize).collect();
-            queue!(stdout, Print(&display))?;
+            // 展开制表符后直接输出，不截断——MUD 服务器已按固定宽度格式化
+            let expanded = expand_tabs(line);
+            queue!(stdout, Print(&expanded))?;
         }
         // 输入行
         self.draw_input_line(stdout)?;
@@ -85,32 +113,41 @@ impl Terminal {
         Ok(())
     }
 
-    /// 绘制状态栏
+    /// 绘制状态栏，显示所有连接状态（结果缓存供 refresh_all 使用）
     pub fn draw_status_bar(
-        &self,
+        &mut self,
         stdout: &mut io::Stdout,
-        session_name: &str,
-        session_state: &SessionState,
-        session_count: usize,
+        sessions: &[crate::connection::SessionInfo],
         foreground_id: usize,
     ) -> io::Result<()> {
-        let state_icon = match session_state {
-            SessionState::Connected => "●",
-            SessionState::Disconnected => "○",
-            SessionState::Connecting => "◎",
-            SessionState::Reconnecting => "⟳",
-        };
-        let status_text = format!(
-            " [{}]{} {}/{} RustLuaMud ",
-            foreground_id + 1,
-            session_name,
-            state_icon,
-            session_count,
-        );
+        let mut bar = String::new();
+        for (i, info) in sessions.iter().enumerate() {
+            let state_icon = match info.state {
+                crate::connection::SessionState::Connected => "\x1b[32m●\x1b[0m",   // green
+                crate::connection::SessionState::Disconnected => "\x1b[90m○\x1b[0m", // dark grey
+                crate::connection::SessionState::Connecting => "\x1b[33m◎\x1b[0m",  // yellow
+                crate::connection::SessionState::Reconnecting => "\x1b[35m⟳\x1b[0m",// magenta
+            };
+            if i == foreground_id {
+                bar.push_str(&format!("\x1b[33m[{}]{}\x1b[0m{} ", i + 1, info.name, state_icon));
+            } else {
+                bar.push_str(&format!("[{}]{}\x1b[0m{} ", i + 1, info.name, state_icon));
+            }
+        }
+        // 右侧 RustLuaMud
+        let right_text = "RustLuaMud";
+        let total_width = self.width as usize;
+        if bar.len() + right_text.len() + 2 < total_width {
+            let padding = total_width - bar.len() - right_text.len() - 2;
+            bar.extend(std::iter::repeat(' ').take(padding));
+            bar.push_str(&format!("\x1b[36m{}\x1b[0m", right_text)); // cyan
+        }
+
+        // 缓存并立即输出
+        self.status_bar_cache = Some(bar.clone());
         queue!(stdout, cursor::MoveTo(0, 0))?;
         queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-        queue!(stdout, SetForegroundColor(Color::Cyan), Print(status_text))?;
-        queue!(stdout, style::ResetColor)?;
+        queue!(stdout, Print(&bar))?;
         stdout.flush()?;
         Ok(())
     }
@@ -145,8 +182,8 @@ impl Terminal {
         queue!(stdout, SetForegroundColor(Color::Green), Print("> "))?;
         queue!(stdout, style::ResetColor)?;
 
-        // 只显示光标位置附近能放入终端宽度的内容
-        let prompt_len = 2; // "> "
+        // 输入行目前只处理 ASCII，字符偏移 = 显示列偏移
+        let prompt_len: usize = 2; // "> "
         let avail_width = self.width as usize - prompt_len;
         let display_start = if self.input_cursor > avail_width {
             self.input_cursor - avail_width + 1
@@ -287,6 +324,14 @@ impl Terminal {
         self.width = width;
         self.height = height;
         let _ = self.refresh_all(&mut io::stdout());
+    }
+
+    /// 替换整个输出缓冲区（切换前台连接时使用）
+    pub fn replace_output(&mut self, lines: &[String]) -> io::Result<()> {
+        self.output_lines = lines.to_vec();
+        let mut stdout = io::stdout();
+        self.refresh_all(&mut stdout)?;
+        Ok(())
     }
 }
 
