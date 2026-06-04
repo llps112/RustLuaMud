@@ -144,3 +144,177 @@ impl Default for AppConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_general_config_defaults() {
+        let config = GeneralConfig::default();
+        assert_eq!(config.scroll_buffer, 5000);
+        assert_eq!(config.log_dir, "logs");
+        assert_eq!(config.profile_dir, "profiles");
+        assert_eq!(config.log_rotation_size_mb, 10);
+        assert_eq!(config.log_rotation_count, 5);
+    }
+
+    #[test]
+    fn test_app_config_default() {
+        let config = AppConfig::default();
+        assert!(config.connections.is_empty());
+        assert_eq!(config.general.scroll_buffer, 5000);
+    }
+
+    #[test]
+    fn test_connection_config_deserialize() {
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.name, "test");
+        assert_eq!(config.host, "example.com");
+        assert_eq!(config.port, 4000);
+        assert!(config.auto_connect);
+        assert!(config.auto_reconnect);
+        assert_eq!(config.reconnect_delay_secs, 5);
+    }
+
+    #[test]
+    fn test_connection_config_with_optional_fields() {
+        let toml_str = r#"
+            name = "mud"
+            host = "mud.example.com"
+            port = 3000
+            encoding = "gbk"
+            script = "michen_xkx.lua"
+            auto_connect = false
+            auto_reconnect = false
+            reconnect_delay_secs = 10
+            username = "user1"
+            password = "pass1"
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.encoding.as_deref(), Some("gbk"));
+        assert_eq!(config.script.as_deref(), Some("michen_xkx.lua"));
+        assert!(!config.auto_connect);
+        assert!(!config.auto_reconnect);
+        assert_eq!(config.reconnect_delay_secs, 10);
+        assert_eq!(config.username.as_deref(), Some("user1"));
+        assert_eq!(config.password.as_deref(), Some("pass1"));
+    }
+
+    #[test]
+    fn test_load_profiles_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        let (profiles, skipped) = AppConfig::load_profiles(dir.path().to_str().unwrap());
+        assert!(profiles.is_empty());
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn test_load_profiles_nonexistent_dir() {
+        let (profiles, skipped) = AppConfig::load_profiles("/nonexistent/path");
+        assert!(profiles.is_empty());
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn test_load_profiles_skips_example() {
+        let dir = TempDir::new().unwrap();
+        let example_path = dir.path().join("example.toml");
+        let mut f = fs::File::create(&example_path).unwrap();
+        writeln!(f, r#"name = "example"
+host = "example.com"
+port = 4000"#).unwrap();
+
+        let (profiles, skipped) = AppConfig::load_profiles(dir.path().to_str().unwrap());
+        assert!(profiles.is_empty());
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn test_load_profiles_valid_config() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("mud.toml");
+        let mut f = fs::File::create(&config_path).unwrap();
+        writeln!(f, r#"name = "mud"
+host = "mud.example.com"
+port = 3000"#).unwrap();
+
+        let (profiles, skipped) = AppConfig::load_profiles(dir.path().to_str().unwrap());
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(skipped, 0);
+        assert_eq!(profiles[0].name, "mud");
+        assert_eq!(profiles[0].host, "mud.example.com");
+        assert_eq!(profiles[0].port, 3000);
+    }
+
+    #[test]
+    fn test_load_profiles_invalid_toml() {
+        let dir = TempDir::new().unwrap();
+        let bad_path = dir.path().join("bad.toml");
+        fs::write(&bad_path, "not valid toml {{{{").unwrap();
+
+        let (profiles, skipped) = AppConfig::load_profiles(dir.path().to_str().unwrap());
+        assert!(profiles.is_empty());
+        assert_eq!(skipped, 1);
+    }
+
+    #[test]
+    fn test_load_profiles_skips_non_toml() {
+        let dir = TempDir::new().unwrap();
+        let txt_path = dir.path().join("readme.txt");
+        fs::write(&txt_path, "not a config").unwrap();
+
+        let (profiles, skipped) = AppConfig::load_profiles(dir.path().to_str().unwrap());
+        assert!(profiles.is_empty());
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn test_load_profiles_multiple_configs() {
+        let dir = TempDir::new().unwrap();
+
+        let path1 = dir.path().join("alpha.toml");
+        let mut f1 = fs::File::create(&path1).unwrap();
+        writeln!(f1, r#"name = "alpha"
+host = "alpha.com"
+port = 1000"#).unwrap();
+
+        let path2 = dir.path().join("beta.toml");
+        let mut f2 = fs::File::create(&path2).unwrap();
+        writeln!(f2, r#"name = "beta"
+host = "beta.com"
+port = 2000"#).unwrap();
+
+        let (profiles, skipped) = AppConfig::load_profiles(dir.path().to_str().unwrap());
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(skipped, 0);
+        // 按文件名排序：alpha < beta
+        assert_eq!(profiles[0].name, "alpha");
+        assert_eq!(profiles[1].name, "beta");
+    }
+
+    #[test]
+    fn test_load_profiles_mixed_valid_invalid() {
+        let dir = TempDir::new().unwrap();
+
+        let good_path = dir.path().join("good.toml");
+        let mut f = fs::File::create(&good_path).unwrap();
+        writeln!(f, r#"name = "good"
+host = "good.com"
+port = 5000"#).unwrap();
+
+        let bad_path = dir.path().join("bad.toml");
+        fs::write(&bad_path, "invalid {{{{").unwrap();
+
+        let (profiles, skipped) = AppConfig::load_profiles(dir.path().to_str().unwrap());
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(skipped, 1);
+    }
+}

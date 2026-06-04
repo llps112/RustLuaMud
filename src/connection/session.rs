@@ -269,3 +269,190 @@ impl Session {
         self.state = SessionState::Disconnected;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decode_gbk_ascii() {
+        let bytes = b"hello";
+        assert_eq!(decode_gbk(bytes), "hello");
+    }
+
+    #[test]
+    fn test_decode_gbk_chinese() {
+        // GBK 编码的 "你好" = 0xC4 0xE3 0xBA 0xC3
+        let bytes: &[u8] = &[0xC4, 0xE3, 0xBA, 0xC3];
+        let result = decode_gbk(bytes);
+        assert_eq!(result, "你好");
+    }
+
+    #[test]
+    fn test_decode_gbk_mixed() {
+        // "hi你好" = "hi" + GBK "你好"
+        let mut bytes: Vec<u8> = b"hi".to_vec();
+        bytes.extend_from_slice(&[0xC4, 0xE3, 0xBA, 0xC3]);
+        let result = decode_gbk(&bytes);
+        assert_eq!(result, "hi你好");
+    }
+
+    #[test]
+    fn test_encode_gbk_ascii() {
+        let result = encode_gbk("hello");
+        assert_eq!(result, b"hello");
+    }
+
+    #[test]
+    fn test_encode_gbk_chinese() {
+        let result = encode_gbk("你好");
+        assert_eq!(result, vec![0xC4, 0xE3, 0xBA, 0xC3]);
+    }
+
+    #[test]
+    fn test_encode_gbk_mixed() {
+        let result = encode_gbk("hi你好");
+        let mut expected: Vec<u8> = b"hi".to_vec();
+        expected.extend_from_slice(&[0xC4, 0xE3, 0xBA, 0xC3]);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_strip_telnet_iac_no_iac() {
+        let input = b"hello world";
+        assert_eq!(strip_telnet_iac(input), b"hello world");
+    }
+
+    #[test]
+    fn test_strip_telnet_iac_escaped_ff() {
+        // IAC IAC (0xFF 0xFF) = 转义的 0xFF 字面量
+        let input: &[u8] = &[0x41, 0xFF, 0xFF, 0x42];
+        assert_eq!(strip_telnet_iac(input), &[0x41, 0xFF, 0x42]);
+    }
+
+    #[test]
+    fn test_strip_telnet_iac_will() {
+        // IAC WILL (0xFF 0xFB 0x01) = 3字节命令
+        let input: &[u8] = &[0x41, 0xFF, 0xFB, 0x01, 0x42];
+        assert_eq!(strip_telnet_iac(input), b"AB");
+    }
+
+    #[test]
+    fn test_strip_telnet_iac_do() {
+        // IAC DO (0xFF 0xFD 0x01)
+        let input: &[u8] = &[0x48, 0xFF, 0xFD, 0x03, 0x69];
+        assert_eq!(strip_telnet_iac(input), b"Hi");
+    }
+
+    #[test]
+    fn test_strip_telnet_iac_dont() {
+        // IAC DONT (0xFF 0xFE 0x01)
+        let input: &[u8] = &[0xFF, 0xFE, 0x01];
+        assert_eq!(strip_telnet_iac(input), b"");
+    }
+
+    #[test]
+    fn test_strip_telnet_iac_subnegotiation() {
+        // IAC SB ... IAC SE
+        let input: &[u8] = &[0x41, 0xFF, 0xFA, 0x01, 0x02, 0x03, 0xFF, 0xF0, 0x42];
+        assert_eq!(strip_telnet_iac(input), b"AB");
+    }
+
+    #[test]
+    fn test_strip_telnet_iac_truncated_iac() {
+        // 行尾单独的 IAC
+        let input: &[u8] = &[0x41, 0xFF];
+        assert_eq!(strip_telnet_iac(input), b"A");
+    }
+
+    #[test]
+    fn test_strip_telnet_iac_truncated_will() {
+        // IAC WILL 但缺少选项字节
+        let input: &[u8] = &[0x41, 0xFF, 0xFB];
+        assert_eq!(strip_telnet_iac(input), b"A");
+    }
+
+    #[test]
+    fn test_strip_telnet_iac_multiple_commands() {
+        // IAC WILL + IAC DO + 文本
+        let input: &[u8] = &[0xFF, 0xFB, 0x01, 0xFF, 0xFD, 0x03, 0x41, 0x42];
+        assert_eq!(strip_telnet_iac(input), b"AB");
+    }
+
+    #[test]
+    fn test_session_default_state() {
+        let config = ConnectionConfig {
+            name: "test".to_string(),
+            host: "localhost".to_string(),
+            port: 4000,
+            encoding: None,
+            script: None,
+            auto_connect: true,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+        };
+        let session = Session::new(1, &config);
+        assert_eq!(session.name, "test");
+        assert_eq!(session.host, "localhost");
+        assert_eq!(session.port, 4000);
+        assert!(matches!(session.state, SessionState::Disconnected));
+        assert!(session.send_tx.is_none());
+    }
+
+    #[test]
+    fn test_session_send_not_connected() {
+        let config = ConnectionConfig {
+            name: "test".to_string(),
+            host: "localhost".to_string(),
+            port: 4000,
+            encoding: None,
+            script: None,
+            auto_connect: true,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+        };
+        let session = Session::new(1, &config);
+        assert!(session.send("hello").is_err());
+    }
+
+    #[test]
+    fn test_session_disconnect() {
+        let config = ConnectionConfig {
+            name: "test".to_string(),
+            host: "localhost".to_string(),
+            port: 4000,
+            encoding: None,
+            script: None,
+            auto_connect: true,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+        };
+        let mut session = Session::new(1, &config);
+        session.disconnect();
+        assert!(matches!(session.state, SessionState::Disconnected));
+    }
+
+    #[test]
+    fn test_session_gbk_encoding() {
+        let config = ConnectionConfig {
+            name: "gbk_test".to_string(),
+            host: "mud.example.com".to_string(),
+            port: 3000,
+            encoding: Some("gbk".to_string()),
+            script: None,
+            auto_connect: false,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+        };
+        let session = Session::new(2, &config);
+        assert!(matches!(session.encoding, Encoding::Gbk));
+    }
+}
