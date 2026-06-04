@@ -1,4 +1,3 @@
-use std::io::{self, Write};
 use crossterm::{
     cursor,
     event::{KeyCode, KeyEvent, KeyModifiers},
@@ -6,6 +5,7 @@ use crossterm::{
     style::{self, Color, Print, SetForegroundColor},
     terminal::{self, ClearType},
 };
+use std::io::{self, Write};
 use unicode_width::UnicodeWidthStr;
 
 /// 透传原始字符串，让终端原生处理制表符（\t）
@@ -73,13 +73,18 @@ impl Terminal {
 
     /// 获取输出区可用行数
     fn output_height(&self) -> u16 {
-        self.height.saturating_sub(self.status_height + self.input_height)
+        self.height
+            .saturating_sub(self.status_height + self.input_height)
     }
 
     /// 初始化屏幕
     pub fn init_screen(&mut self) -> io::Result<()> {
         let mut stdout = io::stdout();
-        execute!(stdout, terminal::EnterAlternateScreen, terminal::Clear(ClearType::All))?;
+        execute!(
+            stdout,
+            terminal::EnterAlternateScreen,
+            terminal::Clear(ClearType::All)
+        )?;
         self.refresh_all(&mut stdout)?;
         Ok(())
     }
@@ -123,13 +128,18 @@ impl Terminal {
         let mut bar = String::new();
         for (i, info) in sessions.iter().enumerate() {
             let state_icon = match info.state {
-                crate::connection::SessionState::Connected => "\x1b[32m●\x1b[0m",   // green
+                crate::connection::SessionState::Connected => "\x1b[32m●\x1b[0m", // green
                 crate::connection::SessionState::Disconnected => "\x1b[90m○\x1b[0m", // dark grey
-                crate::connection::SessionState::Connecting => "\x1b[33m◎\x1b[0m",  // yellow
-                crate::connection::SessionState::Reconnecting => "\x1b[35m⟳\x1b[0m",// magenta
+                crate::connection::SessionState::Connecting => "\x1b[33m◎\x1b[0m", // yellow
+                crate::connection::SessionState::Reconnecting => "\x1b[35m⟳\x1b[0m", // magenta
             };
             if i == foreground_id {
-                bar.push_str(&format!("\x1b[33m[{}]{}\x1b[0m{} ", i + 1, info.name, state_icon));
+                bar.push_str(&format!(
+                    "\x1b[33m[{}]{}\x1b[0m{} ",
+                    i + 1,
+                    info.name,
+                    state_icon
+                ));
             } else {
                 bar.push_str(&format!("[{}]{}\x1b[0m{} ", i + 1, info.name, state_icon));
             }
@@ -191,7 +201,9 @@ impl Terminal {
             0
         };
         let display_end = std::cmp::min(display_start + avail_width, self.input_buffer.len());
-        let display_str: String = self.input_buffer.chars()
+        let display_str: String = self
+            .input_buffer
+            .chars()
             .skip(display_start)
             .take(display_end - display_start)
             .collect();
@@ -207,8 +219,8 @@ impl Terminal {
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<String> {
         match (key.modifiers, key.code) {
             // Ctrl+C / Ctrl+D: 退出信号
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) |
-            (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
+            (KeyModifiers::CONTROL, KeyCode::Char('c'))
+            | (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
                 None // 退出由 app 层处理
             }
 

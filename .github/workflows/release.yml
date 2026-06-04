@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package binary
+        run: |
+          mkdir -p release
+          cp target/release/rust-lua-mud release/
+          tar czf release/rust-lua-mud-linux-x86_64.tar.gz -C release rust-lua-mud
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          # 获取上一个 tag 到当前 tag 的提交记录
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            LOG=$(git log --pretty=format:"- %s" --reverse)
+          else
+            LOG=$(git log --pretty=format:"- %s" --reverse ${PREV_TAG}..HEAD)
+          fi
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$LOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.changelog.outputs.tag }}
+          body: |
+            ## Changes
+            ${{ steps.changelog.outputs.changelog }}
+          files: |
+            release/rust-lua-mud-linux-x86_64.tar.gz
