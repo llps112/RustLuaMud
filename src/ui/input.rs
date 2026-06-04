@@ -19,8 +19,8 @@ impl InputHandler {
     pub fn handle_key_event(key: KeyEvent) -> Option<InputEvent> {
         match (key.modifiers, key.code) {
             // Ctrl+C / Ctrl+D: 退出
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) |
-            (KeyModifiers::CONTROL, KeyCode::Char('d')) => Some(InputEvent::Quit),
+            (KeyModifiers::CONTROL, KeyCode::Char('c'))
+            | (KeyModifiers::CONTROL, KeyCode::Char('d')) => Some(InputEvent::Quit),
 
             // Alt+1~9: 切换连接
             (KeyModifiers::ALT, KeyCode::Char(c)) if ('1'..='9').contains(&c) => {

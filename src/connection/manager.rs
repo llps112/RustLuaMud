@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 
-use crate::config::ConnectionConfig;
 use super::session::{Session, SessionEvent, SessionInfo, SessionState};
+use crate::config::ConnectionConfig;
 
 /// 连接管理器事件
 #[derive(Debug, Clone)]
@@ -147,9 +147,12 @@ impl ConnectionManager {
 
     /// 获取所有连接的信息摘要
     pub fn session_infos(&self) -> Vec<SessionInfo> {
-        self.sessions.iter().map(|s| SessionInfo {
-            name: s.name.clone(),
-            state: s.state.clone(),
-        }).collect()
+        self.sessions
+            .iter()
+            .map(|s| SessionInfo {
+                name: s.name.clone(),
+                state: s.state.clone(),
+            })
+            .collect()
     }
 }
