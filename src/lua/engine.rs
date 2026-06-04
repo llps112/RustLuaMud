@@ -142,10 +142,20 @@ impl LuaEngine {
         Ok(())
     }
 
-    /// 加载并执行 Lua 脚本文件（要求 UTF-8 编码）
+    /// 加载并执行 Lua 脚本文件
+    /// 自动检测编码：先尝试 UTF-8，失败（GBK 编码）则自动转码
     pub fn load_script(&mut self, path: &str) -> Result<(), String> {
-        let code = std::fs::read_to_string(path)
+        let bytes = std::fs::read(path)
             .map_err(|e| format!("读取脚本失败 '{}': {}", path, e))?;
+
+        let code = match std::str::from_utf8(&bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                // UTF-8 失败，尝试 GBK 解码（兼容 MushClient 的 GBK 脚本）
+                let (cow, _, _) = encoding_rs::GBK.decode(&bytes);
+                cow.into_owned()
+            }
+        };
 
         self.lua.load(&code)
             .set_name(path)
