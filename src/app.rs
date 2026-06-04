@@ -127,7 +127,7 @@ impl App {
         let mut mgr_rx = self
             .manager
             .take_event_rx()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "无法获取事件通道"))?;
+            .ok_or_else(|| io::Error::other("无法获取事件通道"))?;
 
         // 终端事件流
         let mut term_events = EventStream::new();
@@ -286,7 +286,6 @@ impl App {
                     .timer_intervals()
                     .into_iter()
                     .enumerate()
-                    .map(|(i, s)| (i, s))
                     .collect()
             } else {
                 return;
@@ -671,7 +670,7 @@ impl App {
                 }
             }
 
-            "/help" | _ => {
+            _ => {
                 self.terminal.append_output("内置命令:")?;
                 self.terminal
                     .append_output("  /connect <名> <主机:端口>   添加并连接新角色")?;
@@ -704,7 +703,7 @@ impl App {
                 if id < self.manager.sessions.len() {
                     let max_lines = self.config.general.scroll_buffer;
                     let session = &mut self.manager.sessions[id];
-                    for part in data.split_inclusive(|c| c == '\n') {
+                    for part in data.split_inclusive('\n') {
                         let trimmed = part.trim_end_matches('\r').trim_end_matches('\n');
                         if !trimmed.is_empty() {
                             session.output_lines.push(trimmed.to_string());
@@ -729,7 +728,7 @@ impl App {
                         if let Some(ref engine) = self.manager.sessions[id].lua_engine {
                             // 对每行数据分别匹配触发器
                             let mut all_cmds = Vec::new();
-                            for part in data.split_inclusive(|c| c == '\n') {
+                            for part in data.split_inclusive('\n') {
                                 let trimmed = part.trim_end_matches('\r').trim_end_matches('\n');
                                 if !trimmed.is_empty() {
                                     engine.process_output(trimmed);
@@ -829,7 +828,8 @@ impl App {
         Ok(())
     }
 
-    /// 请求退出
+    /// 退出程序（suppress clippy unused warning）
+    #[allow(dead_code)]
     pub fn quit(&mut self) {
         self.running = false;
     }

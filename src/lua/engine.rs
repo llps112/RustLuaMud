@@ -148,11 +148,16 @@ pub struct Trigger {
     pub callback: Function,
     pub enabled: bool,
     pub group: String,
+    #[allow(dead_code)]
     pub sequence: i32,
-    pub multiline: bool,
-    pub lines_to_match: usize,
-    pub omit_from_output: bool,
+    #[allow(dead_code)]
     pub temporary: bool,
+    #[allow(dead_code)]
+    pub multiline: bool,
+    #[allow(dead_code)]
+    pub lines_to_match: usize,
+    #[allow(dead_code)]
+    pub omit_from_output: bool,
     pub send_text: String,
 }
 
@@ -438,7 +443,7 @@ impl LuaEngine {
         // SetTriggerOption(name, key, value)
         let state_rc13 = state_rc.clone();
         let set_trigger_option_fn =
-            lua.create_function_mut(move |lua, (name, key, value): (String, String, Value)| {
+            lua.create_function_mut(move |_lua, (name, key, value): (String, String, Value)| {
                 let mut state = state_rc13.borrow_mut();
                 if let Some(t) = state.triggers.iter_mut().find(|t| t.name == name) {
                     match key.as_str() {
@@ -1075,7 +1080,7 @@ impl LuaEngine {
         // ============================================================
 
         // 覆盖 dofile — 支持 GBK 自动转码和路径分隔符兼容
-        let script_path_rc = Rc::new(RefCell::new(self.script_path.clone()));
+        let _script_path_rc = Rc::new(RefCell::new(self.script_path.clone()));
         let dofile_fn = lua.create_function_mut(move |lua, path: String| {
             // 将 \ 替换为 /
             let path = path.replace('\\', "/");
@@ -1467,11 +1472,12 @@ impl LuaEngine {
             .insert(key.to_string(), value.to_string());
     }
 
+    #[allow(dead_code)]
     /// 设置连接状态
     pub fn set_connected(&mut self, connected: bool) {
         self.state.borrow_mut().connected = connected;
     }
-
+#[allow(dead_code)]
     /// 取出连接请求标志（一次性消费）
     pub fn take_connect_requested(&self) -> bool {
         let val = self.state.borrow_mut().connect_requested;
@@ -1481,6 +1487,7 @@ impl LuaEngine {
         val
     }
 
+    #[allow(dead_code)]
     /// 取出断开请求标志（一次性消费）
     pub fn take_disconnect_requested(&self) -> bool {
         let val = self.state.borrow_mut().disconnect_requested;
@@ -1506,16 +1513,19 @@ impl LuaEngine {
             .collect()
     }
 
+    #[allow(dead_code)]
     /// 获取触发器数量
     pub fn trigger_count(&self) -> usize {
         self.state.borrow().triggers.len()
     }
 
+    #[allow(dead_code)]
     /// 获取别名数量
     pub fn alias_count(&self) -> usize {
         self.state.borrow().aliases.len()
     }
 
+    #[allow(dead_code)]
     /// 获取定时器数量
     pub fn timer_count(&self) -> usize {
         self.state.borrow().timers.len()
@@ -1523,6 +1533,7 @@ impl LuaEngine {
 }
 
 /// 添加触发器的通用实现
+#[allow(clippy::too_many_arguments)]
 fn add_trigger_impl(
     lua: &Lua,
     state_rc: &Rc<RefCell<ScriptState>>,

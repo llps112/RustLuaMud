@@ -136,6 +136,7 @@ impl ConnectionManager {
         }
     }
 
+    #[allow(dead_code)]
     /// 获取前台连接状态
     pub fn foreground_state(&self) -> &SessionState {
         if self.foreground_id < self.sessions.len() {

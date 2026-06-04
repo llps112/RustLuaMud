@@ -1,4 +1,3 @@
-use std::io::{self, Read, Write};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -11,6 +10,7 @@ pub enum SessionState {
     Disconnected,
     Connecting,
     Connected,
+    #[allow(dead_code)]
     Reconnecting,
 }
 
@@ -168,9 +168,9 @@ impl Session {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
-        let auto_reconnect = self.auto_reconnect;
+        let _auto_reconnect = self.auto_reconnect;
         let encoding = self.encoding.clone();
-        let session_id = self.id;
+        let _session_id = self.id;
 
         // 读取任务：从服务器接收数据，按行读取并转码
         let event_tx_read = event_tx.clone();

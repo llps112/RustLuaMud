@@ -32,6 +32,7 @@ fn default_log_rotation_count() -> usize {
     5
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
@@ -148,6 +149,7 @@ impl AppConfig {
     }
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
