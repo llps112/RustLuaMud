@@ -104,6 +104,10 @@ impl AppConfig {
 
         for entry in entries {
             let path = entry.path();
+            // 跳过示例配置文件
+            if path.file_stem().and_then(|s| s.to_str()) == Some("example") {
+                continue;
+            }
             if path.extension().and_then(|s| s.to_str()) != Some("toml") {
                 continue;
             }
