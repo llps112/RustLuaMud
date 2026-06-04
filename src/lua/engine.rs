@@ -1,9 +1,140 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
-use mlua::{Lua, Result as LuaResult, Function};
+use mlua::{Lua, Result as LuaResult, Function, UserData, Table};
 use regex::Regex;
+use rusqlite::{Connection, types::Value};
+
+/// SQLite 连接包装（Lua 用户数据）
+struct LuaDb {
+    conn: Arc<Mutex<Connection>>,
+}
+
+impl UserData for LuaDb {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("close", |_, _this, ()| {
+            Ok(())
+        });
+
+        methods.add_method("exec", |_, this, sql: String| {
+            let conn = this.conn.lock().unwrap();
+            conn.execute_batch(&sql)
+                .map_err(|e| mlua::Error::external(e.to_string()))
+        });
+
+        methods.add_method("prepare", |lua, this, sql: String| {
+            // Validate SQL by preparing it
+            let conn = this.conn.lock().unwrap();
+            conn.prepare(&sql)
+                .map_err(|e| mlua::Error::external(e.to_string()))?;
+            let lua_stmt = LuaStmt {
+                conn: this.conn.clone(),
+                sql: sql.clone(),
+            };
+            let ud = lua.create_userdata(lua_stmt)?;
+            Ok(ud)
+        });
+
+        methods.add_method("changes", |_, this, ()| {
+            let conn = this.conn.lock().unwrap();
+            Ok(conn.changes() as i64)
+        });
+
+        methods.add_method("last_insert_rowid", |_, this, ()| {
+            let conn = this.conn.lock().unwrap();
+            Ok(conn.last_insert_rowid())
+        });
+    }
+}
+
+/// SQLite 预处理语句包装
+struct LuaStmt {
+    conn: Arc<Mutex<Connection>>,
+    sql: String,
+}
+
+impl UserData for LuaStmt {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("step", |lua, this, args: Option<Table>| {
+            let conn = this.conn.lock().unwrap();
+            let mut stmt = conn.prepare(&this.sql)
+                .map_err(|e| mlua::Error::external(e.to_string()))?;
+
+            // Collect params
+            let params_vec = if let Some(ref t) = args {
+                let len = t.len().unwrap_or(0) as usize;
+                let mut vals: Vec<Value> = Vec::with_capacity(len);
+                for i in 1..=len {
+                    let v: String = t.get(i).unwrap_or_default();
+                    vals.push(Value::Text(v));
+                }
+                vals
+            } else {
+                Vec::new()
+            };
+
+            // Convert to rusqlite params
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params_vec.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+
+            let mut rows = stmt.query(params_refs.as_slice())
+                .map_err(|e| mlua::Error::external(e.to_string()))?;
+
+            if let Some(row) = rows.next().map_err(|e| mlua::Error::external(e.to_string()))? {
+                let lua_table = lua.create_table()?;
+                let col_count = row.as_ref().column_count();
+                for i in 0..col_count {
+                    let val = match row.get_ref(i) {
+                        Ok(r) => match r {
+                            rusqlite::types::ValueRef::Null => mlua::Value::Nil,
+                            rusqlite::types::ValueRef::Integer(n) => mlua::Value::Integer(n),
+                            rusqlite::types::ValueRef::Real(f) => mlua::Value::Number(f),
+                            rusqlite::types::ValueRef::Text(s) => {
+                                mlua::Value::String(lua.create_string(s)?)
+                            }
+                            rusqlite::types::ValueRef::Blob(b) => {
+                                mlua::Value::String(lua.create_string(b)?)
+                            }
+                        },
+                        Err(_) => mlua::Value::Nil,
+                    };
+                    lua_table.set(i + 1, val)?;
+                }
+                return Ok(Some(lua_table));
+            }
+
+            Ok(None)
+        });
+
+        methods.add_method("run", |_, this, args: Option<Table>| {
+            let conn = this.conn.lock().unwrap();
+            let mut stmt = conn.prepare(&this.sql)
+                .map_err(|e| mlua::Error::external(e.to_string()))?;
+
+            let params_vec = if let Some(ref t) = args {
+                let len = t.len().unwrap_or(0) as usize;
+                let mut vals: Vec<Value> = Vec::with_capacity(len);
+                for i in 1..=len {
+                    let v: String = t.get(i).unwrap_or_default();
+                    vals.push(Value::Text(v));
+                }
+                vals
+            } else {
+                Vec::new()
+            };
+
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params_vec.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+
+            stmt.execute(params_refs.as_slice())
+                .map_err(|e| mlua::Error::external(e.to_string()))?;
+
+            Ok(())
+        });
+    }
+}
 
 /// 触发器定义
 pub struct Trigger {
@@ -139,7 +270,27 @@ impl LuaEngine {
         })?;
         globals.set("set", set_fn)?;
 
+        // sqlite3 module
+        let sqlite3_mod = lua.create_table()?;
+        let open_fn = lua.create_function(|lua, path: String| {
+            let conn = Connection::open(&path)
+                .map_err(|e| mlua::Error::external(e.to_string()))?;
+            let db = LuaDb {
+                conn: Arc::new(Mutex::new(conn)),
+            };
+            lua.create_userdata(db)
+        })?;
+        sqlite3_mod.set("open", open_fn)?;
+        globals.set("sqlite3", sqlite3_mod)?;
+
         Ok(())
+    }
+
+    /// 直接执行 Lua 代码（用于 /eval 命令）
+    pub fn eval_code(&self, code: &str) -> Result<(), String> {
+        self.lua.load(code)
+            .exec()
+            .map_err(|e| format!("{}", e))
     }
 
     /// 加载并执行 Lua 脚本文件

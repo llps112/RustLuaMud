@@ -527,9 +527,9 @@ impl App {
                 }
             }
 
-            "/lua" => {
+            "/load" => {
                 if parts.len() < 2 {
-                    self.terminal.append_output("[用法] /lua <脚本路径>  或  /lua reload")?;
+                    self.terminal.append_output("[用法] /load <脚本路径>  或  /load reload")?;
                     return Ok(());
                 }
                 let fg = self.manager.foreground_id;
@@ -597,6 +597,39 @@ impl App {
                 }
             }
 
+            "/lua" => {
+                // /lua <lua code> — 直接执行 Lua 代码
+                let fg = self.manager.foreground_id;
+                if fg >= self.manager.sessions.len() {
+                    self.terminal.append_output("[错误] 无前台连接")?;
+                    return Ok(());
+                }
+                let code = cmd.strip_prefix("/lua ").unwrap_or("");
+                if code.is_empty() {
+                    self.terminal.append_output("[用法] /lua <Lua 代码>")?;
+                    return Ok(());
+                }
+                if let Some(ref engine) = self.manager.sessions[fg].lua_engine {
+                    match engine.eval_code(code) {
+                        Ok(_) => {
+                            // 取出待发送的命令和日志
+                            let commands = engine.drain_commands();
+                            for c in commands {
+                                if let Err(e) = self.manager.send_to(fg, &c) {
+                                    self.terminal.append_output(&format!("[错误] {}", e))?;
+                                }
+                            }
+                            self.drain_lua_logs(fg)?;
+                        }
+                        Err(e) => {
+                            self.terminal.append_output(&format!("[Lua 错误] {}", e))?;
+                        }
+                    }
+                } else {
+                    self.terminal.append_output("[错误] 未加载 Lua 引擎，请先加载脚本")?;
+                }
+            }
+
             "/help" | _ => {
                 self.terminal.append_output("内置命令:")?;
                 self.terminal.append_output("  /connect <名> <主机:端口>   添加并连接新角色")?;
@@ -604,8 +637,9 @@ impl App {
                 self.terminal.append_output("  /disconnect [编号]           断开连接（保留 session）")?;
                 self.terminal.append_output("  /close [编号]               彻底关闭并移除 session")?;
                 self.terminal.append_output("  /list                       列出所有连接")?;
-                self.terminal.append_output("  /lua <脚本路径>             为前台连接加载 Lua 脚本")?;
-                self.terminal.append_output("  /lua reload                 重新加载前台连接的 Lua 脚本")?;
+                self.terminal.append_output("  /load <脚本路径>            为前台连接加载 Lua 脚本")?;
+                self.terminal.append_output("  /load reload                重新加载前台连接的 Lua 脚本")?;
+                self.terminal.append_output("  /lua <Lua 代码>             直接执行 Lua 代码")?;
                 self.terminal.append_output("  Alt+0~9                     切换前台连接 (最多10个)")?;
             }
         }
