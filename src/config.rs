@@ -67,36 +67,20 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let content = fs::read_to_string(path)?;
-        let config: AppConfig = toml::from_str(&content)?;
-        Ok(config)
-    }
-
     pub fn load_default() -> Self {
-        // 依次尝试：当前目录 → 可执行文件所在目录
-        let candidates = vec![
-            Path::new("configs/default.toml").to_path_buf(),
-            std::env::current_exe()
-                .ok()
-                .and_then(|exe| exe.parent().map(|p| p.join("configs/default.toml")))
-                .unwrap_or_default(),
-        ];
-
-        for path in &candidates {
-            if path.exists() {
-                match Self::load(path) {
-                    Ok(config) => return config,
-                    Err(e) => {
-                        eprintln!("警告: 加载配置文件 {} 失败 ({})，使用默认配置", path.display(), e);
-                        return Self::default();
-                    }
-                }
+        // 从 profiles 目录加载所有角色配置作为默认连接
+        let (profiles, skipped) = Self::load_profiles("profiles");
+        if !profiles.is_empty() {
+            if skipped > 0 {
+                eprintln!("警告: {} 个角色配置加载失败", skipped);
             }
+            return Self {
+                general: GeneralConfig::default(),
+                connections: profiles,
+            };
         }
 
-        eprintln!("警告: 未找到配置文件 (已搜索: {})，使用默认配置",
-            candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "));
+        eprintln!("警告: profiles 目录未找到角色配置，使用默认配置");
         Self::default()
     }
 
