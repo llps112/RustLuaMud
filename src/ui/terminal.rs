@@ -7,7 +7,6 @@ use crossterm::{
 };
 use std::io::{self, Write};
 
-
 /// 透传原始字符串，让终端原生处理制表符（\t）
 /// 终端驱动会按当前光标列位置执行 TAB 跳格，与 MushClient 行为一致
 fn expand_tabs(s: &str) -> String {

@@ -1477,7 +1477,7 @@ impl LuaEngine {
     pub fn set_connected(&mut self, connected: bool) {
         self.state.borrow_mut().connected = connected;
     }
-#[allow(dead_code)]
+    #[allow(dead_code)]
     /// 取出连接请求标志（一次性消费）
     pub fn take_connect_requested(&self) -> bool {
         let val = self.state.borrow_mut().connect_requested;

@@ -282,11 +282,7 @@ impl App {
         }
         let intervals: Vec<(usize, u64)> =
             if let Some(ref engine) = self.manager.sessions[id].lua_engine {
-                engine
-                    .timer_intervals()
-                    .into_iter()
-                    .enumerate()
-                    .collect()
+                engine.timer_intervals().into_iter().enumerate().collect()
             } else {
                 return;
             };

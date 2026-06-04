@@ -23,10 +23,7 @@ impl AnsiParser {
                         }
                     }
                     // 消费最终字节 (0x40-0x7e)
-                    if chars
-                        .peek()
-                        .is_some_and(|c| ('\x40'..='\x7e').contains(c))
-                    {
+                    if chars.peek().is_some_and(|c| ('\x40'..='\x7e').contains(c)) {
                         chars.next();
                     }
                 }
