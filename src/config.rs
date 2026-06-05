@@ -351,4 +351,36 @@ port = 5000"#
         assert_eq!(profiles.len(), 1);
         assert_eq!(skipped, 1);
     }
+
+    #[test]
+    fn test_connection_config_with_all_optional_fields() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("full.toml");
+        let mut f = fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"name = "full"
+host = "mud.example.com"
+port = 4000
+encoding = "gbk"
+script = "/path/to/script.lua"
+auto_connect = true
+auto_reconnect = false
+reconnect_delay_secs = 10
+username = "player"
+password = "secret""#
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let config: ConnectionConfig = toml::from_str(&content).unwrap();
+        assert_eq!(config.name, "full");
+        assert_eq!(config.encoding, Some("gbk".to_string()));
+        assert_eq!(config.script, Some("/path/to/script.lua".to_string()));
+        assert!(config.auto_connect);
+        assert!(!config.auto_reconnect);
+        assert_eq!(config.reconnect_delay_secs, 10);
+        assert_eq!(config.username, Some("player".to_string()));
+        assert_eq!(config.password, Some("secret".to_string()));
+    }
 }

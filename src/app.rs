@@ -9,6 +9,76 @@ use crate::connection::{ConnectionManager, ManagerEvent, SessionState};
 use crate::log::Logger;
 use crate::ui::{AnsiParser, Terminal};
 
+/// 内置命令解析结果
+#[derive(Debug, PartialEq)]
+enum BuiltinCommand {
+    /// /connect <名称> <主机> <端口>
+    Connect { name: String, host: String, port: u16 },
+    /// /disconnect [编号]
+    Disconnect { id: Option<usize> },
+    /// /close [编号]
+    Close { id: Option<usize> },
+    /// /list
+    List,
+    /// /load <脚本路径>
+    Load { path: String },
+    /// /load reload
+    LoadReload,
+    /// /lua <代码>
+    Lua { code: String },
+    /// 未知命令
+    Unknown,
+}
+
+/// 解析内置命令（纯逻辑，无 IO 依赖）
+fn parse_builtin_command(cmd: &str) -> BuiltinCommand {
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    if parts.is_empty() {
+        return BuiltinCommand::Unknown;
+    }
+
+    match parts[0] {
+        "/connect" => {
+            if let Some((host, port)) = parse_connect_args(&parts) {
+                let name = parts[1].to_string();
+                BuiltinCommand::Connect { name, host, port }
+            } else {
+                BuiltinCommand::Unknown
+            }
+        }
+        "/disconnect" => {
+            let id = parts.get(1).and_then(|s| s.parse::<usize>().ok());
+            BuiltinCommand::Disconnect { id }
+        }
+        "/close" => {
+            let id = parts.get(1).and_then(|s| s.parse::<usize>().ok());
+            BuiltinCommand::Close { id }
+        }
+        "/list" => BuiltinCommand::List,
+        "/load" => {
+            if parts.len() < 2 {
+                return BuiltinCommand::Unknown;
+            }
+            if parts[1] == "reload" {
+                BuiltinCommand::LoadReload
+            } else {
+                BuiltinCommand::Load {
+                    path: parts[1].to_string(),
+                }
+            }
+        }
+        "/lua" => {
+            let code = cmd.strip_prefix("/lua ").unwrap_or("").to_string();
+            if code.is_empty() {
+                BuiltinCommand::Unknown
+            } else {
+                BuiltinCommand::Lua { code }
+            }
+        }
+        _ => BuiltinCommand::Unknown,
+    }
+}
+
 /// 重连请求
 struct ReconnectRequest {
     session_id: usize,
@@ -23,6 +93,25 @@ struct ConnectRequest {
 struct TimerRequest {
     session_id: usize,
     timer_idx: usize,
+}
+
+/// 解析 /connect 命令参数，返回 (host, port)
+fn parse_connect_args(parts: &[&str]) -> Option<(String, u16)> {
+    if parts.len() < 3 {
+        return None;
+    }
+    let (host, port) = if parts[2].contains(':') && parts.len() == 3 {
+        let hp: Vec<&str> = parts[2].splitn(2, ':').collect();
+        (hp[0], hp[1].parse::<u16>().unwrap_or(5555))
+    } else {
+        let p = if parts.len() > 3 {
+            parts[3].parse::<u16>().ok()
+        } else {
+            None
+        };
+        (parts[2], p.unwrap_or(5555))
+    };
+    Some((host.to_string(), port))
 }
 
 /// 应用主结构
@@ -415,39 +504,13 @@ impl App {
         Ok(())
     }
 
-    /// 处理内置命令
+    /// 处理内置命令（基于 parse_builtin_command 分发）
     fn handle_builtin_command(&mut self, cmd: &str) -> io::Result<()> {
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        if parts.is_empty() {
-            return Ok(());
-        }
-
-        match parts[0] {
-            "/connect" => {
-                // /connect 名字 主机:端口  或 /connect 名字 主机 端口
-                if parts.len() < 3 {
-                    self.terminal.append_output(
-                        "[用法] /connect <名称> <主机:端口>  或  /connect <名称> <主机> <端口>",
-                    )?;
-                    return Ok(());
-                }
-                let name = parts[1];
-                let (host, port) = if parts[2].contains(':') && parts.len() == 3 {
-                    let hp: Vec<&str> = parts[2].splitn(2, ':').collect();
-                    (hp[0], hp[1].parse::<u16>().unwrap_or(5555))
-                } else {
-                    let p = if parts.len() > 3 {
-                        parts[3].parse::<u16>().ok()
-                    } else {
-                        None
-                    };
-                    (parts[2], p.unwrap_or(5555))
-                };
-
-                // 创建临时配置并添加连接
+        match parse_builtin_command(cmd) {
+            BuiltinCommand::Connect { name, host, port } => {
                 let conn_config = crate::config::ConnectionConfig {
-                    name: name.to_string(),
-                    host: host.to_string(),
+                    name: name.clone(),
+                    host: host.clone(),
                     port,
                     encoding: Some("gbk".to_string()),
                     script: None,
@@ -466,7 +529,6 @@ impl App {
                     }
                 };
                 self.update_status_bar()?;
-                // 通过 channel 发送异步连接请求
                 let _ = self.connect_tx.try_send(ConnectRequest { session_id: id });
                 self.terminal.append_output(&format!(
                     "[系统] 正在连接 {} ({}) → {}:{}",
@@ -477,44 +539,42 @@ impl App {
                 ))?;
             }
 
-            "/disconnect" => {
-                if parts.len() >= 2 {
-                    if let Ok(id) = parts[1].parse::<usize>() {
-                        if id > 0 && id <= self.manager.sessions.len() {
-                            let target_id = id - 1;
-                            self.manager.sessions[target_id].disconnect();
-                            let name = self.manager.sessions[target_id].name.clone();
-                            self.manager.sessions[target_id].state =
-                                crate::connection::SessionState::Disconnected;
-                            self.update_status_bar()?;
-                            self.terminal
-                                .append_output(&format!("[系统] 已断开连接 {} ({})", id, name))?;
-                        } else {
-                            self.terminal
-                                .append_output(&format!("[错误] 连接 {} 不存在", id))?;
-                        }
-                        return Ok(());
+            BuiltinCommand::Disconnect { id } => {
+                if let Some(id) = id {
+                    if id > 0 && id <= self.manager.sessions.len() {
+                        let target_id = id - 1;
+                        self.manager.sessions[target_id].disconnect();
+                        let name = self.manager.sessions[target_id].name.clone();
+                        self.manager.sessions[target_id].state =
+                            crate::connection::SessionState::Disconnected;
+                        self.update_status_bar()?;
+                        self.terminal
+                            .append_output(&format!("[系统] 已断开连接 {} ({})", id, name))?;
+                    } else {
+                        self.terminal
+                            .append_output(&format!("[错误] 连接 {} 不存在", id))?;
                     }
-                }
-                // 无参数：断开前台连接
-                let fg = self.manager.foreground_id;
-                if fg < self.manager.sessions.len() {
-                    self.manager.sessions[fg].disconnect();
-                    self.manager.sessions[fg].state = crate::connection::SessionState::Disconnected;
-                    self.update_status_bar()?;
-                    self.terminal.append_output(&format!(
-                        "[系统] 已断开连接 {} ({})",
-                        fg + 1,
-                        self.manager.sessions[fg].name
-                    ))?;
+                } else {
+                    let fg = self.manager.foreground_id;
+                    if fg < self.manager.sessions.len() {
+                        self.manager.sessions[fg].disconnect();
+                        self.manager.sessions[fg].state =
+                            crate::connection::SessionState::Disconnected;
+                        self.update_status_bar()?;
+                        self.terminal.append_output(&format!(
+                            "[系统] 已断开连接 {} ({})",
+                            fg + 1,
+                            self.manager.sessions[fg].name
+                        ))?;
+                    }
                 }
             }
 
-            "/close" => {
-                let target = if parts.len() >= 2 {
-                    match parts[1].parse::<usize>() {
-                        Ok(id) => id - 1,
-                        Err(_) => {
+            BuiltinCommand::Close { id } => {
+                let target = if let Some(id) = id {
+                    match id.checked_sub(1) {
+                        Some(t) => t,
+                        None => {
                             self.terminal.append_output("[错误] 无效的编号")?;
                             return Ok(());
                         }
@@ -525,7 +585,6 @@ impl App {
                 match self.manager.remove_session(target) {
                     Ok(name) => {
                         self.update_status_bar()?;
-                        // 如果移除的是前台连接，切换到新的前台
                         if !self.manager.sessions.is_empty() {
                             self.switch_foreground(self.manager.foreground_id)?;
                         } else {
@@ -543,7 +602,7 @@ impl App {
                 }
             }
 
-            "/list" => {
+            BuiltinCommand::List => {
                 for (i, s) in self.manager.sessions.iter().enumerate() {
                     let state_str = match s.state {
                         crate::connection::SessionState::Connected => "已连接",
@@ -566,57 +625,51 @@ impl App {
                 }
             }
 
-            "/load" => {
-                if parts.len() < 2 {
-                    self.terminal
-                        .append_output("[用法] /load <脚本路径>  或  /load reload")?;
-                    return Ok(());
-                }
+            BuiltinCommand::Load { path } => {
                 let fg = self.manager.foreground_id;
                 if fg >= self.manager.sessions.len() {
                     self.terminal.append_output("[错误] 无前台连接")?;
                     return Ok(());
                 }
-                if parts[1] == "reload" {
-                    // 重新加载：先获取之前的脚本路径
-                    let script_path = self.manager.sessions[fg]
-                        .lua_engine
-                        .as_ref()
-                        .and_then(|e| e.script_path().cloned());
-                    if let Some(path) = script_path {
-                        match crate::lua::LuaEngine::new() {
-                            Ok(mut engine) => match engine.load_script(&path) {
-                                Ok(()) => {
-                                    self.manager.sessions[fg].lua_engine = Some(engine);
-                                    self.terminal.append_output(&format!(
-                                        "[Lua] 脚本已重新加载: {}",
-                                        path
-                                    ))?;
-                                    self.start_timers_for_session(fg);
-                                }
-                                Err(e) => {
-                                    self.terminal
-                                        .append_output(&format!("[Lua] 脚本加载失败: {}", e))?;
-                                }
-                            },
-                            Err(e) => {
-                                self.terminal
-                                    .append_output(&format!("[Lua] 引擎初始化失败: {}", e))?;
-                            }
+                match crate::lua::LuaEngine::new() {
+                    Ok(mut engine) => match engine.load_script(&path) {
+                        Ok(()) => {
+                            self.manager.sessions[fg].lua_engine = Some(engine);
+                            self.terminal
+                                .append_output(&format!("[Lua] 脚本已加载: {}", path))?;
+                            self.start_timers_for_session(fg);
                         }
-                    } else {
+                        Err(e) => {
+                            self.terminal
+                                .append_output(&format!("[Lua] 脚本加载失败: {}", e))?;
+                        }
+                    },
+                    Err(e) => {
                         self.terminal
-                            .append_output("[Lua] 未找到之前加载的脚本路径")?;
+                            .append_output(&format!("[Lua] 引擎初始化失败: {}", e))?;
                     }
-                } else {
-                    // 加载指定脚本
-                    let path = parts[1].to_string();
+                }
+            }
+
+            BuiltinCommand::LoadReload => {
+                let fg = self.manager.foreground_id;
+                if fg >= self.manager.sessions.len() {
+                    self.terminal.append_output("[错误] 无前台连接")?;
+                    return Ok(());
+                }
+                let script_path = self.manager.sessions[fg]
+                    .lua_engine
+                    .as_ref()
+                    .and_then(|e| e.script_path().cloned());
+                if let Some(path) = script_path {
                     match crate::lua::LuaEngine::new() {
                         Ok(mut engine) => match engine.load_script(&path) {
                             Ok(()) => {
                                 self.manager.sessions[fg].lua_engine = Some(engine);
-                                self.terminal
-                                    .append_output(&format!("[Lua] 脚本已加载: {}", path))?;
+                                self.terminal.append_output(&format!(
+                                    "[Lua] 脚本已重新加载: {}",
+                                    path
+                                ))?;
                                 self.start_timers_for_session(fg);
                             }
                             Err(e) => {
@@ -629,25 +682,21 @@ impl App {
                                 .append_output(&format!("[Lua] 引擎初始化失败: {}", e))?;
                         }
                     }
+                } else {
+                    self.terminal
+                        .append_output("[Lua] 未找到之前加载的脚本路径")?;
                 }
             }
 
-            "/lua" => {
-                // /lua <lua code> — 直接执行 Lua 代码
+            BuiltinCommand::Lua { code } => {
                 let fg = self.manager.foreground_id;
                 if fg >= self.manager.sessions.len() {
                     self.terminal.append_output("[错误] 无前台连接")?;
                     return Ok(());
                 }
-                let code = cmd.strip_prefix("/lua ").unwrap_or("");
-                if code.is_empty() {
-                    self.terminal.append_output("[用法] /lua <Lua 代码>")?;
-                    return Ok(());
-                }
                 if let Some(ref engine) = self.manager.sessions[fg].lua_engine {
-                    match engine.eval_code(code) {
+                    match engine.eval_code(&code) {
                         Ok(_) => {
-                            // 取出待发送的命令和日志
                             let commands = engine.drain_commands();
                             for c in commands {
                                 if let Err(e) = self.manager.send_to(fg, &c) {
@@ -666,7 +715,7 @@ impl App {
                 }
             }
 
-            _ => {
+            BuiltinCommand::Unknown => {
                 self.terminal.append_output("内置命令:")?;
                 self.terminal
                     .append_output("  /connect <名> <主机:端口>   添加并连接新角色")?;
@@ -858,5 +907,192 @@ impl App {
             self.manager.foreground_name()
         ))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_connect_args_host_port() {
+        let parts: Vec<&str> = "/connect test mud.example.com 4000".split_whitespace().collect();
+        let result = parse_connect_args(&parts);
+        assert_eq!(result, Some(("mud.example.com".to_string(), 4000)));
+    }
+
+    #[test]
+    fn test_parse_connect_args_host_colon_port() {
+        let parts: Vec<&str> = "/connect test mud.example.com:4000".split_whitespace().collect();
+        let result = parse_connect_args(&parts);
+        assert_eq!(result, Some(("mud.example.com".to_string(), 4000)));
+    }
+
+    #[test]
+    fn test_parse_connect_args_default_port() {
+        let parts: Vec<&str> = "/connect test mud.example.com".split_whitespace().collect();
+        let result = parse_connect_args(&parts);
+        assert_eq!(result, Some(("mud.example.com".to_string(), 5555)));
+    }
+
+    #[test]
+    fn test_parse_connect_args_invalid_port() {
+        let parts: Vec<&str> = "/connect test mud.example.com abc"
+            .split_whitespace()
+            .collect();
+        let result = parse_connect_args(&parts);
+        assert_eq!(result, Some(("mud.example.com".to_string(), 5555)));
+    }
+
+    #[test]
+    fn test_parse_connect_args_too_few() {
+        let parts: Vec<&str> = "/connect test".split_whitespace().collect();
+        let result = parse_connect_args(&parts);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_connect_args_empty() {
+        let parts: Vec<&str> = "/connect".split_whitespace().collect();
+        let result = parse_connect_args(&parts);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_connect_args_host_colon_invalid_port() {
+        let parts: Vec<&str> = "/connect test host:abc".split_whitespace().collect();
+        let result = parse_connect_args(&parts);
+        assert_eq!(result, Some(("host".to_string(), 5555)));
+    }
+
+    #[test]
+    fn test_parse_connect_args_host_colon_port_with_extra() {
+        // host:port format with extra arg should use separate format
+        let parts: Vec<&str> = "/connect test host:4000 extra"
+            .split_whitespace()
+            .collect();
+        let result = parse_connect_args(&parts);
+        // When len != 3 and contains ':', falls to else branch
+        assert_eq!(result, Some(("host:4000".to_string(), 5555)));
+    }
+
+    // === parse_builtin_command 测试 ===
+
+    #[test]
+    fn test_parse_builtin_connect() {
+        let cmd = parse_builtin_command("/connect test mud.example.com 4000");
+        assert_eq!(
+            cmd,
+            BuiltinCommand::Connect {
+                name: "test".to_string(),
+                host: "mud.example.com".to_string(),
+                port: 4000
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_builtin_connect_colon_port() {
+        let cmd = parse_builtin_command("/connect mymud host:5555");
+        assert_eq!(
+            cmd,
+            BuiltinCommand::Connect {
+                name: "mymud".to_string(),
+                host: "host".to_string(),
+                port: 5555
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_builtin_connect_invalid() {
+        let cmd = parse_builtin_command("/connect");
+        assert_eq!(cmd, BuiltinCommand::Unknown);
+
+        let cmd = parse_builtin_command("/connect test");
+        assert_eq!(cmd, BuiltinCommand::Unknown);
+    }
+
+    #[test]
+    fn test_parse_builtin_disconnect_with_id() {
+        let cmd = parse_builtin_command("/disconnect 2");
+        assert_eq!(cmd, BuiltinCommand::Disconnect { id: Some(2) });
+    }
+
+    #[test]
+    fn test_parse_builtin_disconnect_no_id() {
+        let cmd = parse_builtin_command("/disconnect");
+        assert_eq!(cmd, BuiltinCommand::Disconnect { id: None });
+    }
+
+    #[test]
+    fn test_parse_builtin_disconnect_invalid_id() {
+        let cmd = parse_builtin_command("/disconnect abc");
+        assert_eq!(cmd, BuiltinCommand::Disconnect { id: None });
+    }
+
+    #[test]
+    fn test_parse_builtin_close_with_id() {
+        let cmd = parse_builtin_command("/close 3");
+        assert_eq!(cmd, BuiltinCommand::Close { id: Some(3) });
+    }
+
+    #[test]
+    fn test_parse_builtin_close_no_id() {
+        let cmd = parse_builtin_command("/close");
+        assert_eq!(cmd, BuiltinCommand::Close { id: None });
+    }
+
+    #[test]
+    fn test_parse_builtin_list() {
+        let cmd = parse_builtin_command("/list");
+        assert_eq!(cmd, BuiltinCommand::List);
+    }
+
+    #[test]
+    fn test_parse_builtin_load() {
+        let cmd = parse_builtin_command("/load /path/to/script.lua");
+        assert_eq!(
+            cmd,
+            BuiltinCommand::Load {
+                path: "/path/to/script.lua".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_builtin_load_reload() {
+        let cmd = parse_builtin_command("/load reload");
+        assert_eq!(cmd, BuiltinCommand::LoadReload);
+    }
+
+    #[test]
+    fn test_parse_builtin_load_no_path() {
+        let cmd = parse_builtin_command("/load");
+        assert_eq!(cmd, BuiltinCommand::Unknown);
+    }
+
+    #[test]
+    fn test_parse_builtin_lua() {
+        let cmd = parse_builtin_command("/lua print('hello')");
+        assert_eq!(
+            cmd,
+            BuiltinCommand::Lua {
+                code: "print('hello')".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_builtin_lua_no_code() {
+        let cmd = parse_builtin_command("/lua");
+        assert_eq!(cmd, BuiltinCommand::Unknown);
+    }
+
+    #[test]
+    fn test_parse_builtin_unknown() {
+        assert_eq!(parse_builtin_command("/unknown"), BuiltinCommand::Unknown);
+        assert_eq!(parse_builtin_command(""), BuiltinCommand::Unknown);
+        assert_eq!(parse_builtin_command("hello"), BuiltinCommand::Unknown);
     }
 }

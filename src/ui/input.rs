@@ -35,3 +35,80 @@ impl InputHandler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctrl_key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn alt_key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+    }
+
+    fn normal_key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn test_ctrl_c_quits() {
+        let result = InputHandler::handle_key_event(ctrl_key('c'));
+        assert!(matches!(result, Some(InputEvent::Quit)));
+    }
+
+    #[test]
+    fn test_ctrl_d_quits() {
+        let result = InputHandler::handle_key_event(ctrl_key('d'));
+        assert!(matches!(result, Some(InputEvent::Quit)));
+    }
+
+    #[test]
+    fn test_alt_1_switches_to_connection_0() {
+        let result = InputHandler::handle_key_event(alt_key('1'));
+        assert!(matches!(result, Some(InputEvent::SwitchConnection(0))));
+    }
+
+    #[test]
+    fn test_alt_9_switches_to_connection_8() {
+        let result = InputHandler::handle_key_event(alt_key('9'));
+        assert!(matches!(result, Some(InputEvent::SwitchConnection(8))));
+    }
+
+    #[test]
+    fn test_alt_0_unhandled() {
+        let result = InputHandler::handle_key_event(alt_key('0'));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_alt_letter_unhandled() {
+        let result = InputHandler::handle_key_event(alt_key('a'));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_enter_returns_command() {
+        let result = InputHandler::handle_key_event(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ));
+        assert!(matches!(result, Some(InputEvent::Command(_))));
+    }
+
+    #[test]
+    fn test_normal_char_unhandled() {
+        let result = InputHandler::handle_key_event(normal_key('a'));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_escape_unhandled() {
+        let result = InputHandler::handle_key_event(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ));
+        assert!(result.is_none());
+    }
+}

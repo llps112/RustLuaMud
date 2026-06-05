@@ -130,4 +130,36 @@ mod tests {
         assert!(fs::read_to_string(&file_a).unwrap().contains("msg_a"));
         assert!(fs::read_to_string(&file_b).unwrap().contains("msg_b"));
     }
+
+    #[test]
+    fn test_logger_empty_message() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        logger.log("session", "");
+        let date = Local::now().format("%Y%m%d");
+        let file = dir.path().join(format!("session_{}.log", date));
+        assert!(file.exists());
+    }
+
+    #[test]
+    fn test_logger_unicode_message() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        logger.log("session", "你好世界 🌍");
+        let date = Local::now().format("%Y%m%d");
+        let file = dir.path().join(format!("session_{}.log", date));
+        let content = fs::read_to_string(&file).unwrap();
+        assert!(content.contains("你好世界 🌍"));
+    }
+
+    #[test]
+    fn test_logger_long_session_name() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let long_name = "a".repeat(200);
+        logger.log(&long_name, "msg");
+        let date = Local::now().format("%Y%m%d");
+        let file = dir.path().join(format!("a{}_{}.log", "a".repeat(199), date));
+        assert!(file.exists());
+    }
 }

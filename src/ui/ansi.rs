@@ -105,4 +105,23 @@ mod tests {
     fn test_preserve_newlines() {
         assert_eq!(AnsiParser::strip_ansi("line1\nline2"), "line1\nline2");
     }
+
+    #[test]
+    fn test_strip_ansi_empty_input() {
+        assert_eq!(AnsiParser::strip_ansi(""), "");
+    }
+
+    #[test]
+    fn test_strip_csi_with_question_mark() {
+        // CSI ? 25 h (show cursor)
+        assert_eq!(AnsiParser::strip_ansi("\x1b[?25htext"), "text");
+    }
+
+    #[test]
+    fn test_strip_mixed_ansi_and_text() {
+        assert_eq!(
+            AnsiParser::strip_ansi("hello \x1b[32mworld\x1b[0m!"),
+            "hello world!"
+        );
+    }
 }

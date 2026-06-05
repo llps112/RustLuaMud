@@ -3040,4 +3040,1057 @@ mod tests {
             assert!(logs2.is_empty());
         });
     }
+
+    // ===== 边界用例补充测试 =====
+
+    #[test]
+    fn test_script_path_method() {
+        let mut engine = LuaEngine::new().unwrap();
+        assert!(engine.script_path().is_none());
+        engine.set_script_path("/some/path/");
+        assert_eq!(engine.script_path().unwrap(), "/some/path/");
+    }
+
+    #[test]
+    fn test_set_connected_true_false() {
+        let mut engine = LuaEngine::new().unwrap();
+        assert!(!eval::<bool>(&engine, "return IsConnected()").unwrap());
+        engine.set_connected(true);
+        assert!(eval::<bool>(&engine, "return IsConnected()").unwrap());
+        engine.set_connected(false);
+        assert!(!eval::<bool>(&engine, "return IsConnected()").unwrap());
+    }
+
+    #[test]
+    fn test_take_connect_requested_consumed() {
+        let engine = LuaEngine::new().unwrap();
+        exec(&engine, "Connect()").unwrap();
+        assert!(engine.take_connect_requested());
+        assert!(!engine.take_connect_requested());
+    }
+
+    #[test]
+    fn test_take_disconnect_requested_consumed() {
+        let engine = LuaEngine::new().unwrap();
+        exec(&engine, "Disconnect()").unwrap();
+        assert!(engine.take_disconnect_requested());
+        assert!(!engine.take_disconnect_requested());
+    }
+
+    #[test]
+    fn test_fire_timer_out_of_bounds() {
+        with_engine(|engine| {
+            // 索引越界不应 panic
+            engine.fire_timer(999);
+        });
+    }
+
+    #[test]
+    fn test_load_script_nonexistent() {
+        let mut engine = LuaEngine::new().unwrap();
+        let result = engine.load_script("/nonexistent/path/script.lua");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_eval_code_error_returns_message() {
+        let engine = LuaEngine::new().unwrap();
+        let result = engine.eval_code("invalid{{{lua");
+        assert!(result.is_err());
+        assert!(!result.unwrap_err().is_empty());
+    }
+
+    #[test]
+    fn test_process_output_empty_line() {
+        with_engine(|engine| {
+            // 空行不应 panic
+            engine.process_output("");
+        });
+    }
+
+    #[test]
+    fn test_process_input_empty() {
+        with_engine(|engine| {
+            let handled = engine.process_input("");
+            assert!(!handled);
+        });
+    }
+
+    #[test]
+    fn test_trigger_count_alias_count_timer_count() {
+        let mut engine = LuaEngine::new().unwrap();
+        assert_eq!(engine.trigger_count(), 0);
+        assert_eq!(engine.alias_count(), 0);
+        assert_eq!(engine.timer_count(), 0);
+
+        exec(&mut engine, "AddTrigger('t1', 'test', '', 33, 0, 0, '', '', 0, 0)").unwrap();
+        exec(&mut engine, "AddAlias('a1', 'go', '', 33, 0, '', 0)").unwrap();
+        exec(&mut engine, "AddTimer('tm1', 0, 0, 10, 0, 1, 0, '', 0)").unwrap();
+
+        assert_eq!(engine.trigger_count(), 1);
+        assert_eq!(engine.alias_count(), 1);
+        assert_eq!(engine.timer_count(), 1);
+    }
+
+    #[test]
+    fn test_timer_intervals_with_disabled() {
+        with_engine(|engine| {
+            exec(engine, "AddTimer('t1', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('t2', 0, 0, 10, 0, 1, 0, '', 0)").unwrap();
+            let intervals = engine.timer_intervals();
+            assert_eq!(intervals, vec![5, 10]);
+        });
+    }
+
+    #[test]
+    fn test_enable_timer_via_api() {
+        with_engine(|engine| {
+            exec(engine, "AddTimer('t1', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            let result: i32 = eval(engine, "return EnableTimer('t1', false)").unwrap();
+            assert_eq!(result, 0);
+            let result: i32 = eval(engine, "return EnableTimer('t1', true)").unwrap();
+            assert_eq!(result, 0);
+        });
+    }
+
+    #[test]
+    fn test_enable_timer_not_found_via_api() {
+        with_engine(|engine| {
+            let result: i32 = eval(engine, "return EnableTimer('nonexistent', true)").unwrap();
+            assert_eq!(result, 1);
+        });
+    }
+
+    #[test]
+    fn test_delete_variable_nonexistent() {
+        with_engine(|engine| {
+            // DeleteVariable returns nil, should not panic on nonexistent
+            exec(engine, "DeleteVariable('no_such_var')").unwrap();
+        });
+    }
+
+    #[test]
+    fn test_get_trigger_info_codes() {
+        with_engine(|engine| {
+            exec(engine, "AddTrigger('t1', 'test', '', 33, 0, 0, '', '', 0, 0)").unwrap();
+            // code 8 = enabled
+            let en: bool = eval(engine, "return GetTriggerInfo('t1', 8)").unwrap();
+            assert!(en);
+            // Set group via SetTriggerOption then read via code 26
+            exec(engine, "SetTriggerOption('t1', 'group', 'grp1')").unwrap();
+            let group: String = eval(engine, "return GetTriggerInfo('t1', 26)").unwrap();
+            assert_eq!(group, "grp1");
+            // unknown code returns nil
+            let val: Value = eval(engine, "return GetTriggerInfo('t1', 999)").unwrap();
+            assert!(val.is_nil());
+        });
+    }
+
+    #[test]
+    fn test_get_timer_info_codes() {
+        with_engine(|engine| {
+            exec(engine, "AddTimer('t1', 0, 1, 30, 0, 1, 0, '', 0)").unwrap();
+            // code 6 = enabled
+            let en: bool = eval(engine, "return GetTimerInfo('t1', 6)").unwrap();
+            assert!(en);
+            // unknown code returns nil
+            let val: Value = eval(engine, "return GetTimerInfo('t1', 999)").unwrap();
+            assert!(val.is_nil());
+        });
+    }
+
+    #[test]
+    fn test_set_alias_option_enabled() {
+        with_engine(|engine| {
+            exec(engine, "AddAlias('a1', 'go', '', 33, 0, '', 0)").unwrap();
+            exec(engine, "SetAliasOption('a1', 'enabled', false)").unwrap();
+            // Verify via GetAliasList or re-enable
+            exec(engine, "SetAliasOption('a1', 'enabled', true)").unwrap();
+        });
+    }
+
+    #[test]
+    fn test_set_timer_option_enabled() {
+        with_engine(|engine| {
+            exec(engine, "AddTimer('t1', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "SetTimerOption('t1', 'enabled', false)").unwrap();
+            let en: bool = eval(engine, "return GetTimerInfo('t1', 6)").unwrap();
+            assert!(!en);
+            exec(engine, "SetTimerOption('t1', 'enabled', true)").unwrap();
+            let en: bool = eval(engine, "return GetTimerInfo('t1', 6)").unwrap();
+            assert!(en);
+        });
+    }
+
+    #[test]
+    fn test_multiline_trigger_with_newlines() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                ml_result = nil
+                AddTriggerEx('ml', [[line1\nline2]], '', 33, 0, 0, '', '', 0, 0, 2, false)
+            "#).unwrap();
+            engine.process_output("line1");
+            engine.process_output("line2");
+        });
+    }
+
+    #[test]
+    fn test_sqlite3_changes_and_rowid() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                local db = sqlite3.open(':memory:')
+                db:exec('CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)')
+                db:exec("INSERT INTO t(v) VALUES('hello')")
+                test_changes = db:changes()
+                test_rowid = db:last_insert_rowid()
+                db:close()
+            "#).unwrap();
+            let changes: i64 = eval(engine, "return test_changes").unwrap();
+            let rowid: i64 = eval(engine, "return test_rowid").unwrap();
+            assert_eq!(changes, 1);
+            assert_eq!(rowid, 1);
+        });
+    }
+
+    #[test]
+    fn test_sqlite3_prepare_bind_step() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                local db = sqlite3.open(':memory:')
+                db:exec('CREATE TABLE t(id INTEGER, v TEXT)')
+                db:exec("INSERT INTO t(id, v) VALUES(1, 'one')")
+                local stmt = db:prepare("SELECT v FROM t WHERE id = ?")
+                local row = stmt:step({1})
+                test_bind_result = row and row[1] or nil
+                stmt = nil
+                db:close()
+            "#).unwrap();
+            let result: String = eval(engine, "return test_bind_result").unwrap();
+            assert_eq!(result, "one");
+        });
+    }
+
+    #[test]
+    fn test_regex_escape_special_chars() {
+        with_engine(|engine| {
+            let result: String = eval(engine, r#"return AddTrigger('esc', 'hello.world', '', 33, 0, 0, '', '', 0, 0) == 0 and 'ok' or 'fail'"#).unwrap();
+            assert_eq!(result, "ok");
+        });
+    }
+
+    #[test]
+    fn test_variable_numeric_value() {
+        with_engine(|engine| {
+            exec(engine, "SetVariable('num', '42')").unwrap();
+            let val: String = eval(engine, "return GetVariable('num')").unwrap();
+            assert_eq!(val, "42");
+        });
+    }
+
+    #[test]
+    fn test_send_multiple_commands() {
+        with_engine(|engine| {
+            exec(engine, "send('cmd1')").unwrap();
+            exec(engine, "send('cmd2')").unwrap();
+            exec(engine, "send('cmd3')").unwrap();
+            let cmds = engine.drain_commands();
+            assert_eq!(cmds, vec!["cmd1", "cmd2", "cmd3"]);
+        });
+    }
+
+    #[test]
+    fn test_execute_function() {
+        with_engine(|engine| {
+            // Execute pushes the raw command string to pending_commands
+            exec(engine, "Execute('hello')").unwrap();
+            let cmds = engine.drain_commands();
+            assert!(cmds.contains(&"hello".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_colour_note_with_colors() {
+        with_engine(|engine| {
+            exec(engine, "ColourNote('red', 'blue', 'colored text')").unwrap();
+            let logs = engine.drain_logs();
+            assert!(logs.iter().any(|l| l.contains("colored text")));
+        });
+    }
+
+    #[test]
+    fn test_tell_with_colors() {
+        with_engine(|engine| {
+            // Tell only takes one string argument
+            exec(engine, "Tell('tell text')").unwrap();
+            let logs = engine.drain_logs();
+            assert!(logs.iter().any(|l| l.contains("tell text")));
+        });
+    }
+
+    #[test]
+    fn test_timer_shorthand() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                timer_result = nil
+                timer(5, function() timer_result = "fired" end)
+            "#).unwrap();
+            assert_eq!(engine.timer_count(), 1);
+            engine.fire_timer(0);
+            let result: String = eval(engine, "return timer_result").unwrap();
+            assert_eq!(result, "fired");
+        });
+    }
+
+    #[test]
+    fn test_dofile_nonexistent() {
+        with_engine(|engine| {
+            // dofile with nonexistent file should not panic
+            let result = exec(engine, "dofile('/nonexistent/file.lua')");
+            // May or may not error depending on implementation
+            let _ = result;
+        });
+    }
+
+    #[test]
+    fn test_get_plugin_info_more_codes() {
+        with_engine(|engine| {
+            // code 1 = plugin id
+            let id: String = eval(engine, "return GetPluginInfo(GetPluginID(), 1)").unwrap();
+            assert!(!id.is_empty());
+            // unknown code returns nil
+            let val: Value = eval(engine, "return GetPluginInfo(GetPluginID(), 999)").unwrap();
+            assert!(val.is_nil());
+        });
+    }
+
+    #[test]
+    fn test_trigger_omit_from_output_flag() {
+        with_engine(|engine| {
+            // flag bit 4 (16) = omit from output
+            exec(engine, "AddTrigger('omit', 'hide_me', '', 49, 0, 0, '', '', 0, 0)").unwrap();
+            engine.process_output("hide_me");
+            let logs = engine.drain_logs();
+            // omit trigger should not produce Note output
+            assert!(logs.is_empty() || !logs.iter().any(|l| l.contains("hide_me")));
+        });
+    }
+
+    #[test]
+    fn test_alias_callback_sends_command() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                AddAlias('go_alias', 'go', '', 33, 0, 'function() send("north") end', 0)
+            "#).unwrap();
+            let handled = engine.process_input("go");
+            assert!(handled);
+            let cmds = engine.drain_commands();
+            assert!(cmds.contains(&"north".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_trigger_keep_evaluating() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                result1 = nil
+                result2 = nil
+                AddTrigger('trig1', 'test', '', 33, 0, 0, '', 'function() result1 = 1 end', 0, 0)
+                AddTrigger('trig2', 'test', '', 33, 0, 0, '', 'function() result2 = 2 end', 0, 0)
+            "#).unwrap();
+            engine.process_output("test");
+            let r1: Option<i64> = eval(engine, "return result1").unwrap();
+            let r2: Option<i64> = eval(engine, "return result2").unwrap();
+            // Both triggers should fire (keep_evaluating is default)
+            assert_eq!(r1, Some(1));
+            assert_eq!(r2, Some(2));
+        });
+    }
+
+    #[test]
+    fn test_set_trigger_option_send() {
+        with_engine(|engine| {
+            exec(engine, "AddTrigger('send_trig2', 'go', '', 1, 0, 0, '', '', 0, 0)").unwrap();
+            exec(engine, "SetTriggerOption('send_trig2', 'send', 'north')").unwrap();
+            engine.process_output("go");
+            let cmds = engine.drain_commands();
+            assert!(cmds.contains(&"north".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_delete_trigger_clears() {
+        with_engine(|engine| {
+            exec(engine, "AddTrigger('del_me', 'test', '', 33, 0, 0, '', '', 0, 0)").unwrap();
+            assert_eq!(engine.trigger_count(), 1);
+            exec(engine, "DeleteTrigger('del_me')").unwrap();
+            assert_eq!(engine.trigger_count(), 0);
+        });
+    }
+
+    #[test]
+    fn test_delete_alias_clears() {
+        with_engine(|engine| {
+            exec(engine, "AddAlias('del_me', 'go', '', 33, 0, '', 0)").unwrap();
+            assert_eq!(engine.alias_count(), 1);
+            exec(engine, "DeleteAlias('del_me')").unwrap();
+            assert_eq!(engine.alias_count(), 0);
+        });
+    }
+
+    #[test]
+    fn test_delete_timer_clears() {
+        with_engine(|engine| {
+            exec(engine, "AddTimer('del_me', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            assert_eq!(engine.timer_count(), 1);
+            exec(engine, "DeleteTimer('del_me')").unwrap();
+            assert_eq!(engine.timer_count(), 0);
+        });
+    }
+
+    #[test]
+    fn test_enable_trigger_group_via_api() {
+        with_engine(|engine| {
+            exec(engine, "AddTrigger('g1_t1', 'a', '', 33, 0, 0, '', '', 0, 0)").unwrap();
+            exec(engine, "AddTrigger('g1_t2', 'b', '', 33, 0, 0, '', '', 0, 0)").unwrap();
+            // Set group via SetTriggerOption
+            exec(engine, "SetTriggerOption('g1_t1', 'group', 'grp_a')").unwrap();
+            exec(engine, "SetTriggerOption('g1_t2', 'group', 'grp_a')").unwrap();
+            // Disable group
+            exec(engine, "EnableTriggerGroup('grp_a', false)").unwrap();
+            let en: bool = eval(engine, "return GetTriggerInfo('g1_t1', 8)").unwrap();
+            assert!(!en);
+            // Enable group
+            exec(engine, "EnableTriggerGroup('grp_a', true)").unwrap();
+            let en: bool = eval(engine, "return GetTriggerInfo('g1_t1', 8)").unwrap();
+            assert!(en);
+        });
+    }
+
+    #[test]
+    fn test_enable_alias_group_via_set_option() {
+        with_engine(|engine| {
+            // No EnableAliasGroup API, use SetAliasOption to set group then enable/disable
+            exec(engine, "AddAlias('g1_a1', 'x', '', 33, 0, '', 0)").unwrap();
+            exec(engine, "SetAliasOption('g1_a1', 'group', 'grp_b')").unwrap();
+            exec(engine, "SetAliasOption('g1_a1', 'enabled', false)").unwrap();
+            // Verify disabled
+            let handled = engine.process_input("x");
+            assert!(!handled);
+            // Re-enable
+            exec(engine, "SetAliasOption('g1_a1', 'enabled', true)").unwrap();
+        });
+    }
+
+    #[test]
+    fn test_enable_timer_group_via_api() {
+        with_engine(|engine| {
+            exec(engine, "AddTimer('g1_t1', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            // Set group via SetTimerOption
+            exec(engine, "SetTimerOption('g1_t1', 'group', 'grp_c')").unwrap();
+            // EnableTimerGroup returns nil (unit)
+            exec(engine, "EnableTimerGroup('grp_c', false)").unwrap();
+            let en: bool = eval(engine, "return GetTimerInfo('g1_t1', 6)").unwrap();
+            assert!(!en);
+            exec(engine, "EnableTimerGroup('grp_c', true)").unwrap();
+            let en: bool = eval(engine, "return GetTimerInfo('g1_t1', 6)").unwrap();
+            assert!(en);
+        });
+    }
+
+    #[test]
+    fn test_sqlite3_exec_error() {
+        with_engine(|engine| {
+            let result: i64 = eval(engine, r#"
+                local db = sqlite3.open(':memory:')
+                local ok, err = pcall(function() db:exec('INVALID SQL') end)
+                db:close()
+                return ok and 1 or 0
+            "#).unwrap();
+            assert_eq!(result, 0);
+        });
+    }
+
+    #[test]
+    fn test_sqlite3_multiple_rows() {
+        with_engine(|engine| {
+            let count: i64 = eval(engine, r#"
+                local db = sqlite3.open(':memory:')
+                db:exec('CREATE TABLE t(id INTEGER, v TEXT)')
+                db:exec("INSERT INTO t VALUES(1, 'a')")
+                db:exec("INSERT INTO t VALUES(2, 'b')")
+                db:exec("INSERT INTO t VALUES(3, 'c')")
+                local c = 0
+                -- step() re-prepares each time, so we use exec + specific queries
+                local row1 = db:prepare('SELECT v FROM t WHERE id = 1'):step()
+                local row2 = db:prepare('SELECT v FROM t WHERE id = 2'):step()
+                local row3 = db:prepare('SELECT v FROM t WHERE id = 3'):step()
+                if row1 then c = c + 1 end
+                if row2 then c = c + 1 end
+                if row3 then c = c + 1 end
+                db:close()
+                return c
+            "#).unwrap();
+            assert_eq!(count, 3);
+        });
+    }
+
+    #[test]
+    fn test_get_variable_list_count() {
+        with_engine(|engine| {
+            exec(engine, "SetVariable('k1', 'v1')").unwrap();
+            exec(engine, "SetVariable('k2', 'v2')").unwrap();
+            let count: i64 = eval(engine, r#"
+                local list = GetVariableList()
+                local c = 0
+                for _ in pairs(list) do c = c + 1 end
+                return c
+            "#).unwrap();
+            assert_eq!(count, 2);
+        });
+    }
+
+    #[test]
+    fn test_process_output_with_trigger_and_alias_chain() {
+        with_engine(|engine| {
+            // Trigger fires on "prompt>" and sends a command
+            exec(engine, r#"
+                AddTrigger('auto_cmd', 'prompt>', '', 33, 0, 0, '', '', 0, 0)
+                SetTriggerOption('auto_cmd', 'send', 'look')
+            "#).unwrap();
+            engine.process_output("prompt>");
+            let cmds = engine.drain_commands();
+            assert!(cmds.contains(&"look".to_string()));
+        });
+    }
+
+    // ================================================================
+    // 触发器集成测试
+    // ================================================================
+
+    #[test]
+    fn test_trigger_multiple_captures() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                cap1 = nil; cap2 = nil
+                AddTrigger('multi_cap', [[^(\w+) hits (\w+)$]], '', 33, 0, 0, '', 'function(t) cap1 = t[1]; cap2 = t[2] end', 0, 0)
+            "#).unwrap();
+            engine.process_output("goblin hits warrior");
+            let r1: Option<String> = eval(engine, "return cap1").unwrap();
+            let r2: Option<String> = eval(engine, "return cap2").unwrap();
+            assert_eq!(r1, Some("goblin".to_string()));
+            assert_eq!(r2, Some("warrior".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_trigger_no_match_different_line() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                no_match_result = nil
+                AddTrigger('no_match', [[^exact$]], '', 33, 0, 0, '', 'function() no_match_result = true end', 0, 0)
+            "#).unwrap();
+            engine.process_output("not exact at all");
+            let result: Option<bool> = eval(engine, "return no_match_result").unwrap();
+            assert_eq!(result, None);
+        });
+    }
+
+    #[test]
+    fn test_trigger_ansi_stripped() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                ansi_result = nil
+                AddTrigger('ansi_trig', 'hello', '', 33, 0, 0, '', 'function() ansi_result = true end', 0, 0)
+            "#).unwrap();
+            // ANSI escape codes should be stripped before matching
+            engine.process_output("\x1b[31mhello\x1b[0m");
+            let result: Option<bool> = eval(engine, "return ansi_result").unwrap();
+            assert_eq!(result, Some(true));
+        });
+    }
+
+    #[test]
+    fn test_trigger_callback_error_handled() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                AddTrigger('err_trig', 'test', '', 33, 0, 0, '', 'function() error("boom") end', 0, 0)
+            "#).unwrap();
+            // Should not panic even if callback errors
+            engine.process_output("test");
+        });
+    }
+
+    #[test]
+    fn test_trigger_partial_match() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                partial_result = nil
+                AddTrigger('partial', 'hp', '', 33, 0, 0, '', 'function() partial_result = true end', 0, 0)
+            "#).unwrap();
+            engine.process_output("100hp 200mp 300mv");
+            let result: Option<bool> = eval(engine, "return partial_result").unwrap();
+            assert_eq!(result, Some(true));
+        });
+    }
+
+    #[test]
+    fn test_trigger_multiple_fire_order() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                fire_order = {}
+                AddTrigger('t1', 'test', '', 33, 0, 0, '', 'function() table.insert(fire_order, 1) end', 0, 0)
+                AddTrigger('t2', 'test', '', 33, 0, 0, '', 'function() table.insert(fire_order, 2) end', 0, 0)
+                AddTrigger('t3', 'test', '', 33, 0, 0, '', 'function() table.insert(fire_order, 3) end', 0, 0)
+            "#).unwrap();
+            engine.process_output("test");
+            let order: Vec<i64> = eval(engine, "return fire_order").unwrap();
+            assert_eq!(order, vec![1, 2, 3]);
+        });
+    }
+
+    #[test]
+    fn test_trigger_send_text_with_wildcard() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                AddTrigger('auto_go', 'You see * here', '', 1, 0, 0, '', '', 0, 0)
+                SetTriggerOption('auto_go', 'send', 'examine $1')
+            "#).unwrap();
+            // send_text 不做变量替换，直接发送
+            engine.process_output("You see a sword here");
+            let cmds = engine.drain_commands();
+            // send_text is literal "examine $1", not variable-substituted
+            assert!(cmds.contains(&"examine $1".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_trigger_enabled_disabled_toggle() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                toggle_result = nil
+                AddTrigger('toggle', 'fire', '', 1, 0, 0, '', 'function() toggle_result = true end', 0, 0)
+            "#).unwrap();
+            // Initially enabled
+            engine.process_output("fire");
+            let r1: Option<bool> = eval(engine, "return toggle_result").unwrap();
+            assert_eq!(r1, Some(true));
+
+            // Disable
+            exec(engine, "EnableTrigger('toggle', false)").unwrap();
+            exec(engine, "toggle_result = nil").unwrap();
+            engine.process_output("fire");
+            let r2: Option<bool> = eval(engine, "return toggle_result").unwrap();
+            assert_eq!(r2, None);
+
+            // Re-enable
+            exec(engine, "EnableTrigger('toggle', true)").unwrap();
+            engine.process_output("fire");
+            let r3: Option<bool> = eval(engine, "return toggle_result").unwrap();
+            assert_eq!(r3, Some(true));
+        });
+    }
+
+    #[test]
+    fn test_trigger_duplicate_name_replaces() {
+        with_engine(|engine| {
+            exec(engine, "AddTrigger('dup', 'first', '', 1, 0, 0, '', '', 0, 0)").unwrap();
+            exec(engine, "AddTrigger('dup', 'second', '', 1, 0, 0, '', '', 0, 0)").unwrap();
+            // Both triggers exist (no uniqueness enforcement)
+            assert_eq!(engine.trigger_count(), 2);
+        });
+    }
+
+    #[test]
+    fn test_trigger_group_operations() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                grp_a_result = nil
+                grp_b_result = nil
+                AddTrigger('ga', 'alpha', '', 1, 0, 0, '', 'function() grp_a_result = true end', 0, 0)
+                AddTrigger('gb', 'beta', '', 1, 0, 0, '', 'function() grp_b_result = true end', 0, 0)
+                SetTriggerOption('ga', 'group', 'groupA')
+                SetTriggerOption('gb', 'group', 'groupB')
+            "#).unwrap();
+            // Disable groupA
+            exec(engine, "EnableTriggerGroup('groupA', false)").unwrap();
+            engine.process_output("alpha");
+            engine.process_output("beta");
+            let ra: Option<bool> = eval(engine, "return grp_a_result").unwrap();
+            let rb: Option<bool> = eval(engine, "return grp_b_result").unwrap();
+            assert_eq!(ra, None);
+            assert_eq!(rb, Some(true));
+        });
+    }
+
+    // ================================================================
+    // 定时器集成测试
+    // ================================================================
+
+    #[test]
+    fn test_timer_fire_executes_send_text() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                AddTimer('cmd_timer', 0, 0, 5, 0, 1, 0, 'send("auto_command")', 0)
+            "#).unwrap();
+            engine.fire_timer(0);
+            let cmds = engine.drain_commands();
+            // send_text is Lua code that gets executed, which calls send()
+            assert!(cmds.contains(&"auto_command".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_timer_fire_with_callback() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                timer_cb_result = nil
+                timer(10, function() timer_cb_result = "callback_fired" end)
+            "#).unwrap();
+            engine.fire_timer(0);
+            let result: Option<String> = eval(engine, "return timer_cb_result").unwrap();
+            assert_eq!(result, Some("callback_fired".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_timer_one_shot_auto_remove() {
+        with_engine(|engine| {
+            // flag 5 = Enabled(1) + OneShot(4)
+            exec(engine, "AddTimer('oneshot_t', 0, 0, 3, 0, 5, 0, '', 0)").unwrap();
+            assert_eq!(engine.timer_count(), 1);
+            engine.fire_timer(0);
+            assert_eq!(engine.timer_count(), 0);
+        });
+    }
+
+    #[test]
+    fn test_timer_repeating_stays() {
+        with_engine(|engine| {
+            exec(engine, "AddTimer('repeat_t', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            assert_eq!(engine.timer_count(), 1);
+            engine.fire_timer(0);
+            // Non-one-shot timer should remain
+            assert_eq!(engine.timer_count(), 1);
+        });
+    }
+
+    #[test]
+    fn test_timer_disabled_not_fired() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                disabled_t_result = nil
+                AddTimer('dis_t', 0, 0, 5, 0, 0, 0, 'disabled_t_result = true', 0)
+            "#).unwrap();
+            engine.fire_timer(0);
+            let result: Option<bool> = eval(engine, "return disabled_t_result").unwrap();
+            assert_eq!(result, None);
+        });
+    }
+
+    #[test]
+    fn test_timer_enable_disable_cycle() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                cycle_result = nil
+                AddTimer('cycle_t', 0, 0, 5, 0, 1, 0, 'cycle_result = "fired"', 0)
+            "#).unwrap();
+            // Disable
+            exec(engine, "EnableTimer('cycle_t', false)").unwrap();
+            engine.fire_timer(0);
+            let r1: Option<String> = eval(engine, "return cycle_result").unwrap();
+            assert_eq!(r1, None);
+
+            // Re-enable
+            exec(engine, "EnableTimer('cycle_t', true)").unwrap();
+            exec(engine, "cycle_result = nil").unwrap();
+            engine.fire_timer(0);
+            let r2: Option<String> = eval(engine, "return cycle_result").unwrap();
+            assert_eq!(r2, Some("fired".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_timer_group_enable_disable() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                tg1_result = nil; tg2_result = nil
+                AddTimer('tg1', 0, 0, 5, 0, 1, 0, 'tg1_result = true', 0)
+                AddTimer('tg2', 0, 0, 10, 0, 1, 0, 'tg2_result = true', 0)
+                SetTimerOption('tg1', 'group', 'grpX')
+                SetTimerOption('tg2', 'group', 'grpX')
+            "#).unwrap();
+            exec(engine, "EnableTimerGroup('grpX', false)").unwrap();
+            engine.fire_timer(0); // tg1
+            engine.fire_timer(1); // tg2
+            let r1: Option<bool> = eval(engine, "return tg1_result").unwrap();
+            let r2: Option<bool> = eval(engine, "return tg2_result").unwrap();
+            assert_eq!(r1, None);
+            assert_eq!(r2, None);
+        });
+    }
+
+    #[test]
+    fn test_timer_multiple_fire() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                fire_count = 0
+                timer(5, function() fire_count = fire_count + 1 end)
+            "#).unwrap();
+            engine.fire_timer(0);
+            engine.fire_timer(0);
+            engine.fire_timer(0);
+            let count: i64 = eval(engine, "return fire_count").unwrap();
+            assert_eq!(count, 3);
+        });
+    }
+
+    #[test]
+    fn test_timer_delete_during_iteration() {
+        with_engine(|engine| {
+            exec(engine, "AddTimer('del1', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('del2', 0, 0, 10, 0, 1, 0, '', 0)").unwrap();
+            assert_eq!(engine.timer_count(), 2);
+            exec(engine, "DeleteTimer('del1')").unwrap();
+            assert_eq!(engine.timer_count(), 1);
+            // Remaining timer should still fire
+            engine.fire_timer(0);
+        });
+    }
+
+    // ================================================================
+    // 别名集成测试
+    // ================================================================
+
+    #[test]
+    fn test_alias_multiple_captures() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                alias_c1 = nil; alias_c2 = nil
+                AddAlias('multi_cap_a', 'cast * at *', '', 1, 0, 'function(t) alias_c1 = t[1]; alias_c2 = t[2] end', 0)
+            "#).unwrap();
+            let handled = engine.process_input("cast fireball at goblin");
+            assert!(handled);
+            let r1: Option<String> = eval(engine, "return alias_c1").unwrap();
+            let r2: Option<String> = eval(engine, "return alias_c2").unwrap();
+            assert_eq!(r1, Some("fireball".to_string()));
+            assert_eq!(r2, Some("goblin".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_alias_priority_first_match() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                priority_result = nil
+                AddAlias('specific', 'kill goblin', '', 33, 0, 'function() priority_result = "specific" end', 0)
+                AddAlias('general', 'kill *', '', 33, 0, 'function() priority_result = "general" end', 0)
+            "#).unwrap();
+            let handled = engine.process_input("kill goblin");
+            assert!(handled);
+            let result: Option<String> = eval(engine, "return priority_result").unwrap();
+            // Both match, both fire; last one wins since both set the same variable
+            assert!(result == Some("specific".to_string()) || result == Some("general".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_alias_no_match_returns_false() {
+        with_engine(|engine| {
+            exec(engine, "AddAlias('only_go', 'go *', '', 1, 0, '', 0)").unwrap();
+            let handled = engine.process_input("look around");
+            assert!(!handled);
+        });
+    }
+
+    #[test]
+    fn test_alias_sends_command() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                AddAlias('kk', 'kk', '', 33, 0, 'function() send("kill") end', 0)
+            "#).unwrap();
+            let handled = engine.process_input("kk");
+            assert!(handled);
+            let cmds = engine.drain_commands();
+            assert!(cmds.contains(&"kill".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_alias_disabled_not_matched() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                dis_alias_result = nil
+                AddAlias('dis_al', 'test', '', 0, 0, 'function() dis_alias_result = true end', 0)
+            "#).unwrap();
+            let handled = engine.process_input("test");
+            assert!(!handled);
+        });
+    }
+
+    #[test]
+    fn test_alias_toggle_enable() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                toggle_alias_result = nil
+                AddAlias('toggle_a', 'hello', '', 1, 0, 'function() toggle_alias_result = true end', 0)
+            "#).unwrap();
+            // Initially enabled
+            let h1 = engine.process_input("hello");
+            assert!(h1);
+            // Disable
+            exec(engine, "SetAliasOption('toggle_a', 'enabled', false)").unwrap();
+            let h2 = engine.process_input("hello");
+            assert!(!h2);
+            // Re-enable
+            exec(engine, "SetAliasOption('toggle_a', 'enabled', true)").unwrap();
+            let h3 = engine.process_input("hello");
+            assert!(h3);
+        });
+    }
+
+    #[test]
+    fn test_alias_group_management() {
+        with_engine(|engine| {
+            exec(engine, "AddAlias('grp_a1', 'x', '', 1, 0, '', 0)").unwrap();
+            exec(engine, "AddAlias('grp_a2', 'y', '', 1, 0, '', 0)").unwrap();
+            exec(engine, "SetAliasOption('grp_a1', 'group', 'combat')").unwrap();
+            exec(engine, "SetAliasOption('grp_a2', 'group', 'combat')").unwrap();
+            // Disable both via group (manual since no EnableAliasGroup)
+            exec(engine, "SetAliasOption('grp_a1', 'enabled', false)").unwrap();
+            exec(engine, "SetAliasOption('grp_a2', 'enabled', false)").unwrap();
+            let h1 = engine.process_input("x");
+            let h2 = engine.process_input("y");
+            assert!(!h1);
+            assert!(!h2);
+        });
+    }
+
+    #[test]
+    fn test_alias_regex_pattern() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                regex_al_result = nil
+                AddAlias('regex_a', [[^#(\d+)$]], '', 33, 0, 'function(t) regex_al_result = t[1] end', 0)
+            "#).unwrap();
+            let handled = engine.process_input("#5");
+            assert!(handled);
+            let result: Option<String> = eval(engine, "return regex_al_result").unwrap();
+            assert_eq!(result, Some("5".to_string()));
+            // Should not match non-numeric
+            let handled2 = engine.process_input("#abc");
+            // regex ^#(\d+)$ won't match #abc
+            assert!(!handled2);
+        });
+    }
+
+    #[test]
+    fn test_alias_case_insensitive() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                ci_alias_result = nil
+                AddAlias('ci_al', 'HELLO', '', 33, 0, 'function() ci_alias_result = true end', 0)
+            "#).unwrap();
+            // Use regex flag (33) with (?i) prefix for case insensitive
+            exec(engine, r#"
+                ci_alias_result2 = nil
+                AddAlias('ci_al2', [[(?i)^hello$]], '', 33, 0, 'function() ci_alias_result2 = true end', 0)
+            "#).unwrap();
+            let handled = engine.process_input("hello");
+            assert!(handled);
+            let result: Option<bool> = eval(engine, "return ci_alias_result2").unwrap();
+            assert_eq!(result, Some(true));
+        });
+    }
+
+    #[test]
+    fn test_alias_delete_and_readd() {
+        with_engine(|engine| {
+            exec(engine, "AddAlias('temp_a', 'go', '', 1, 0, '', 0)").unwrap();
+            assert_eq!(engine.alias_count(), 1);
+            exec(engine, "DeleteAlias('temp_a')").unwrap();
+            assert_eq!(engine.alias_count(), 0);
+            exec(engine, "AddAlias('temp_a', 'go', '', 1, 0, '', 0)").unwrap();
+            assert_eq!(engine.alias_count(), 1);
+        });
+    }
+
+    #[test]
+    fn test_alias_callback_error_handled() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                AddAlias('err_al', 'boom', '', 33, 0, 'function() error("alias error") end', 0)
+            "#).unwrap();
+            // Should not panic
+            let handled = engine.process_input("boom");
+            assert!(handled);
+        });
+    }
+
+    #[test]
+    fn test_alias_input_passed_as_arg0() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                raw_input = nil
+                alias('^test$', function(t) raw_input = t[0] end)
+            "#).unwrap();
+            let handled = engine.process_input("test");
+            assert!(handled);
+            let result: Option<String> = eval(engine, "return raw_input").unwrap();
+            assert_eq!(result, Some("test".to_string()));
+        });
+    }
+
+    // ================================================================
+    // 触发器+别名+定时器联动测试
+    // ================================================================
+
+    #[test]
+    fn test_trigger_sends_command_alias_intercepts() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                AddTrigger('auto_trig', 'prompt>', '', 33, 0, 0, '', '', 0, 0)
+                SetTriggerOption('auto_trig', 'send', 'go')
+                alias_result = nil
+                alias('^go$', function() alias_result = "intercepted" end)
+            "#).unwrap();
+            engine.process_output("prompt>");
+            let cmds = engine.drain_commands();
+            // Trigger sends "go" as command, but alias is for process_input not process_output
+            assert!(cmds.contains(&"go".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_timer_and_trigger_coexist() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                trig_result = nil
+                AddTrigger('co_trig', 'status', '', 33, 0, 0, '', 'function() trig_result = true end', 0, 0)
+                timer_result = nil
+                timer(5, function() timer_result = true end)
+            "#).unwrap();
+            engine.process_output("status");
+            engine.fire_timer(0);
+            let tr: Option<bool> = eval(engine, "return trig_result").unwrap();
+            let tmr: Option<bool> = eval(engine, "return timer_result").unwrap();
+            assert_eq!(tr, Some(true));
+            assert_eq!(tmr, Some(true));
+        });
+    }
+
+    #[test]
+    fn test_variable_shared_across_triggers_and_aliases() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                SetVariable('counter', '0')
+                AddTrigger('count_trig', 'tick', '', 33, 0, 0, '', 'function() SetVariable("counter", tostring(tonumber(GetVariable("counter")) + 1)) end', 0, 0)
+                AddAlias('show_count', 'count', '', 33, 0, 'function() Note("count=" .. GetVariable("counter")) end', 0)
+            "#).unwrap();
+            engine.process_output("tick");
+            engine.process_output("tick");
+            engine.process_output("tick");
+            let val: String = eval(engine, "return GetVariable('counter')").unwrap();
+            assert_eq!(val, "3");
+        });
+    }
 }

@@ -459,4 +459,466 @@ mod tests {
         let session = Session::new(2, &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
     }
+
+    #[test]
+    fn test_session_default_encoding() {
+        let config = ConnectionConfig {
+            name: "default_enc".to_string(),
+            host: "mud.example.com".to_string(),
+            port: 3000,
+            encoding: None,
+            script: None,
+            auto_connect: false,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+        };
+        let session = Session::new(3, &config);
+        assert!(matches!(session.encoding, Encoding::Utf8));
+    }
+
+    #[test]
+    fn test_session_with_script_path() {
+        let config = ConnectionConfig {
+            name: "scripted".to_string(),
+            host: "mud.example.com".to_string(),
+            port: 3000,
+            encoding: None,
+            script: Some("/path/to/script.lua".to_string()),
+            auto_connect: false,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+        };
+        let session = Session::new(5, &config);
+        assert_eq!(session.script_path, Some("/path/to/script.lua".to_string()));
+    }
+
+    #[test]
+    fn test_session_with_credentials() {
+        let config = ConnectionConfig {
+            name: "auth".to_string(),
+            host: "mud.example.com".to_string(),
+            port: 3000,
+            encoding: None,
+            script: None,
+            auto_connect: false,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: Some("player".to_string()),
+            password: Some("secret".to_string()),
+        };
+        let session = Session::new(6, &config);
+        assert_eq!(session.username, Some("player".to_string()));
+        assert_eq!(session.password, Some("secret".to_string()));
+    }
+
+    #[test]
+    fn test_session_auto_connect_flag() {
+        let config = ConnectionConfig {
+            name: "auto".to_string(),
+            host: "mud.example.com".to_string(),
+            port: 3000,
+            encoding: None,
+            script: None,
+            auto_connect: true,
+            auto_reconnect: false,
+            reconnect_delay_secs: 3,
+            username: None,
+            password: None,
+        };
+        let session = Session::new(7, &config);
+        assert!(session.auto_connect);
+        assert!(!session.auto_reconnect);
+        assert_eq!(session.reconnect_delay_secs, 3);
+    }
+
+    #[test]
+    fn test_session_gbk_encoding_uppercase() {
+        let config = ConnectionConfig {
+            name: "gbk_upper".to_string(),
+            host: "mud.example.com".to_string(),
+            port: 3000,
+            encoding: Some("GBK".to_string()),
+            script: None,
+            auto_connect: false,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+        };
+        let session = Session::new(8, &config);
+        assert!(matches!(session.encoding, Encoding::Gbk));
+    }
+
+    #[test]
+    fn test_session_unknown_encoding_defaults_utf8() {
+        let config = ConnectionConfig {
+            name: "unknown_enc".to_string(),
+            host: "mud.example.com".to_string(),
+            port: 3000,
+            encoding: Some("shift_jis".to_string()),
+            script: None,
+            auto_connect: false,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+        };
+        let session = Session::new(9, &config);
+        assert!(matches!(session.encoding, Encoding::Utf8));
+    }
+
+    #[test]
+    fn test_decode_gbk_empty() {
+        assert_eq!(decode_gbk(&[]), "");
+    }
+
+    #[test]
+    fn test_encode_gbk_empty() {
+        assert_eq!(encode_gbk(""), b"");
+    }
+
+    #[test]
+    fn test_decode_gbk_invalid_bytes() {
+        // Invalid GBK bytes should not panic
+        let bytes: &[u8] = &[0x80, 0x81];
+        let result = decode_gbk(bytes);
+        assert!(!result.is_empty()); // encoding_rs replaces invalid with ?
+    }
+
+    #[test]
+    fn test_strip_telnet_iac_empty() {
+        assert_eq!(strip_telnet_iac(&[]), b"");
+    }
+
+    #[test]
+    fn test_strip_telnet_iac_wont() {
+        // IAC WONT (0xFF 0xFC 0x01)
+        let input: &[u8] = &[0xFF, 0xFC, 0x01];
+        assert_eq!(strip_telnet_iac(input), b"");
+    }
+
+    #[test]
+    fn test_strip_telnet_iac_subnegotiation_unterminated() {
+        // IAC SB without IAC SE - scans for IAC SE but doesn't find it
+        // Bytes consumed by the while loop are skipped, remaining bytes after loop are kept
+        let input: &[u8] = &[0x41, 0xFF, 0xFA, 0x01, 0x02];
+        let result = strip_telnet_iac(input);
+        // After IAC SB, while loop scans bytes[3]=0x01 (not IAC SE), i=4
+        // Loop exits, then bytes[4]=0x02 is pushed as normal data
+        assert_eq!(result, &[0x41, 0x02]);
+    }
+
+    #[test]
+    fn test_strip_telnet_iac_other_command() {
+        // IAC + other command byte (0xF1 = NOP, 2-byte command)
+        let input: &[u8] = &[0x41, 0xFF, 0xF1, 0x42];
+        assert_eq!(strip_telnet_iac(input), b"AB");
+    }
+
+    #[test]
+    fn test_session_output_lines_initially_empty() {
+        let config = ConnectionConfig {
+            name: "test".to_string(),
+            host: "localhost".to_string(),
+            port: 4000,
+            encoding: None,
+            script: None,
+            auto_connect: false,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+        };
+        let session = Session::new(1, &config);
+        assert!(session.output_lines.is_empty());
+    }
+
+    #[test]
+    fn test_session_lua_engine_initially_none() {
+        let config = ConnectionConfig {
+            name: "test".to_string(),
+            host: "localhost".to_string(),
+            port: 4000,
+            encoding: None,
+            script: None,
+            auto_connect: false,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+        };
+        let session = Session::new(1, &config);
+        assert!(session.lua_engine.is_none());
+    }
+
+    #[test]
+    fn test_session_disconnect_clears_send_tx() {
+        let config = ConnectionConfig {
+            name: "test".to_string(),
+            host: "localhost".to_string(),
+            port: 4000,
+            encoding: None,
+            script: None,
+            auto_connect: false,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+        };
+        let mut session = Session::new(1, &config);
+        session.disconnect();
+        assert!(session.send_tx.is_none());
+        // Send should fail after disconnect
+        assert!(session.send("test").is_err());
+    }
+
+    #[test]
+    fn test_session_state_equality() {
+        assert_eq!(SessionState::Connected, SessionState::Connected);
+        assert_ne!(SessionState::Connected, SessionState::Disconnected);
+    }
+
+    // === 异步集成测试（本地 TCP 回环对） ===
+
+    fn make_test_config(name: &str, port: u16) -> ConnectionConfig {
+        ConnectionConfig {
+            name: name.to_string(),
+            host: "127.0.0.1".to_string(),
+            port,
+            encoding: None,
+            script: None,
+            auto_connect: false,
+            auto_reconnect: false,
+            reconnect_delay_secs: 1,
+            username: None,
+            password: None,
+        }
+    }
+
+    fn make_gbk_test_config(name: &str, port: u16) -> ConnectionConfig {
+        ConnectionConfig {
+            name: name.to_string(),
+            host: "127.0.0.1".to_string(),
+            port,
+            encoding: Some("gbk".to_string()),
+            script: None,
+            auto_connect: false,
+            auto_reconnect: false,
+            reconnect_delay_secs: 1,
+            username: None,
+            password: None,
+        }
+    }
+
+    /// 启动一个本地 TCP 回显服务器，返回监听端口
+    async fn start_echo_server() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        let (mut read_half, mut write_half) = stream.split();
+                        let _ = tokio::io::copy(&mut read_half, &mut write_half).await;
+                    });
+                }
+            }
+        });
+        port
+    }
+
+    /// 启动一个本地 TCP 服务器，发送预设数据后关闭
+    async fn start_send_and_close_server(data: &[u8]) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let data = data.to_vec();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let _ = stream.write_all(&data).await;
+                // 短暂等待后关闭
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn test_session_connect_and_receive_data() {
+        let data = b"hello world\n";
+        let port = start_send_and_close_server(data).await;
+        let mut session = Session::new(0, &make_test_config("test", port));
+
+        let mut event_rx = session.connect().await.unwrap();
+        assert!(matches!(session.state, SessionState::Connected));
+
+        // 接收数据事件
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(event) = event_rx.recv().await {
+                if let SessionEvent::Data(text) = event {
+                    assert!(text.contains("hello world"));
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for data");
+    }
+
+    #[tokio::test]
+    async fn test_session_connect_state_changes() {
+        let port = start_echo_server().await;
+        let mut session = Session::new(0, &make_test_config("test", port));
+
+        let mut event_rx = session.connect().await.unwrap();
+
+        // 应该收到 Connected 状态变更
+        let mut got_connected = false;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while let Some(event) = event_rx.recv().await {
+                if let SessionEvent::StateChange(state) = event {
+                    if matches!(state, SessionState::Connected) {
+                        got_connected = true;
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for state change");
+        assert!(got_connected);
+    }
+
+    #[tokio::test]
+    async fn test_session_send_command() {
+        let port = start_echo_server().await;
+        let mut session = Session::new(0, &make_test_config("test", port));
+
+        let mut event_rx = session.connect().await.unwrap();
+
+        // 发送命令
+        session.send("look").unwrap();
+
+        // 等待回显数据
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(event) = event_rx.recv().await {
+                if let SessionEvent::Data(text) = event {
+                    if text.contains("look") {
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for echo");
+    }
+
+    #[tokio::test]
+    async fn test_session_connect_failure() {
+        // 连接到一个不存在的端口
+        let mut session = Session::new(0, &make_test_config("test", 1));
+
+        let result = session.connect().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("连接"));
+    }
+
+    #[tokio::test]
+    async fn test_session_disconnect_after_connect() {
+        let port = start_echo_server().await;
+        let mut session = Session::new(0, &make_test_config("test", port));
+
+        let _event_rx = session.connect().await.unwrap();
+        assert!(matches!(session.state, SessionState::Connected));
+
+        session.disconnect();
+        assert!(matches!(session.state, SessionState::Disconnected));
+        assert!(session.send("test").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_session_gbk_receive_data() {
+        // GBK 编码的 "你好\n"
+        let gbk_bytes = encode_gbk("你好\n");
+        let port = start_send_and_close_server(&gbk_bytes).await;
+        let mut session = Session::new(0, &make_gbk_test_config("gbk_test", port));
+
+        let mut event_rx = session.connect().await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(event) = event_rx.recv().await {
+                if let SessionEvent::Data(text) = event {
+                    assert!(text.contains("你好"));
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for GBK data");
+    }
+
+    #[tokio::test]
+    async fn test_session_receive_multiple_lines() {
+        let data = b"line1\nline2\nline3\n";
+        let port = start_send_and_close_server(data).await;
+        let mut session = Session::new(0, &make_test_config("test", port));
+
+        let mut event_rx = session.connect().await.unwrap();
+
+        let mut received_lines = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    SessionEvent::Data(text) => {
+                        received_lines.push(text);
+                        if received_lines.len() >= 3 {
+                            return;
+                        }
+                    }
+                    SessionEvent::StateChange(SessionState::Disconnected) => {
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for multiple lines");
+
+        assert!(received_lines.len() >= 3);
+    }
+
+    #[tokio::test]
+    async fn test_session_server_disconnect_detected() {
+        // 服务器立即关闭连接
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                // 发送一行数据后立即关闭
+                let _ = stream.write_all(b"bye\n").await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let mut session = Session::new(0, &make_test_config("test", port));
+        let mut event_rx = session.connect().await.unwrap();
+
+        let mut got_disconnect = false;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(event) = event_rx.recv().await {
+                if let SessionEvent::StateChange(SessionState::Disconnected) = event {
+                    got_disconnect = true;
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for disconnect");
+        assert!(got_disconnect);
+    }
 }

@@ -3,4 +3,5 @@ pub mod input;
 pub mod terminal;
 
 pub use ansi::AnsiParser;
-pub use terminal::Terminal;
+#[allow(unused_imports)]
+pub use terminal::{Terminal, TerminalState};

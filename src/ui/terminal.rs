@@ -7,6 +7,8 @@ use crossterm::{
 };
 use std::io::{self, Write};
 
+use crate::connection::{SessionInfo, SessionState};
+
 /// 透传原始字符串，让终端原生处理制表符（\t）
 /// 终端驱动会按当前光标列位置执行 TAB 跳格，与 MushClient 行为一致
 fn expand_tabs(s: &str) -> String {
@@ -29,35 +31,68 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
     result
 }
 
-/// 终端 UI 渲染器
-pub struct Terminal {
-    /// 输出缓冲区（滚动回看用）
-    output_lines: Vec<String>,
-    /// 当前输入行内容
-    input_buffer: String,
-    /// 输入光标位置（字符偏移）
-    input_cursor: usize,
-    /// 命令历史
-    history: Vec<String>,
-    /// 历史浏览位置
-    history_pos: usize,
-    /// 终端宽度（列数）
-    width: u16,
-    /// 终端高度（行数）
-    height: u16,
-    /// 状态栏高度
-    status_height: u16,
-    /// 输入行高度
-    input_height: u16,
-    /// 状态栏缓存（避免每次重新构建）
-    status_bar_cache: Option<String>,
+/// 构建状态栏字符串（纯逻辑，无 IO 依赖）
+fn build_status_bar(
+    sessions: &[SessionInfo],
+    foreground_id: usize,
+    total_width: usize,
+) -> String {
+    let mut bar = String::new();
+    for (i, info) in sessions.iter().enumerate() {
+        let state_icon = match info.state {
+            SessionState::Connected => "\x1b[32m●\x1b[0m",
+            SessionState::Disconnected => "\x1b[90m○\x1b[0m",
+            SessionState::Connecting => "\x1b[33m◎\x1b[0m",
+            SessionState::Reconnecting => "\x1b[35m⟳\x1b[0m",
+        };
+        if i == foreground_id {
+            bar.push_str(&format!(
+                "\x1b[33m[{}]{}\x1b[0m{} ",
+                i + 1,
+                info.name,
+                state_icon
+            ));
+        } else {
+            bar.push_str(&format!("[{}]{}\x1b[0m{} ", i + 1, info.name, state_icon));
+        }
+    }
+    let right_text = "RustLuaMud";
+    if bar.len() + right_text.len() + 2 < total_width {
+        let padding = total_width - bar.len() - right_text.len() - 2;
+        bar.extend(std::iter::repeat_n(' ', padding));
+        bar.push_str(&format!("\x1b[36m{}\x1b[0m", right_text));
+    }
+    bar
 }
 
-impl Terminal {
-    pub fn new() -> io::Result<Self> {
-        terminal::enable_raw_mode()?;
-        let (width, height) = terminal::size()?;
-        Ok(Self {
+/// 终端状态（纯数据，可脱离 IO 测试）
+pub struct TerminalState {
+    /// 输出缓冲区（滚动回看用）
+    pub output_lines: Vec<String>,
+    /// 当前输入行内容
+    pub input_buffer: String,
+    /// 输入光标位置（字符偏移）
+    pub input_cursor: usize,
+    /// 命令历史
+    pub history: Vec<String>,
+    /// 历史浏览位置
+    pub history_pos: usize,
+    /// 终端宽度（列数）
+    pub width: u16,
+    /// 终端高度（行数）
+    pub height: u16,
+    /// 状态栏高度
+    pub status_height: u16,
+    /// 输入行高度
+    pub input_height: u16,
+    /// 状态栏缓存
+    pub status_bar_cache: Option<String>,
+}
+
+impl TerminalState {
+    /// 创建默认状态（用于测试）
+    pub fn new(width: u16, height: u16) -> Self {
+        Self {
             output_lines: Vec::new(),
             input_buffer: String::new(),
             input_cursor: 0,
@@ -68,131 +103,138 @@ impl Terminal {
             status_height: 1,
             input_height: 1,
             status_bar_cache: None,
-        })
+        }
     }
 
     /// 获取输出区可用行数
-    fn output_height(&self) -> u16 {
+    pub fn output_height(&self) -> u16 {
         self.height
             .saturating_sub(self.status_height + self.input_height)
     }
 
-    /// 初始化屏幕
-    pub fn init_screen(&mut self) -> io::Result<()> {
-        let mut stdout = io::stdout();
-        execute!(
-            stdout,
-            terminal::EnterAlternateScreen,
-            terminal::Clear(ClearType::All)
-        )?;
-        self.refresh_all(&mut stdout)?;
-        Ok(())
-    }
-
-    /// 完整刷新屏幕（含状态栏）
-    fn refresh_all(&self, stdout: &mut io::Stdout) -> io::Result<()> {
-        // 重绘状态栏（从缓存）
-        if let Some(ref bar) = self.status_bar_cache {
-            queue!(stdout, cursor::MoveTo(0, 0))?;
-            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-            queue!(stdout, Print(bar))?;
-        }
-
-        // 输出区
-        let output_height = self.output_height() as usize;
-        let start = if self.output_lines.len() > output_height {
-            self.output_lines.len() - output_height
-        } else {
-            0
-        };
-        for (i, line) in self.output_lines[start..].iter().enumerate() {
-            queue!(stdout, cursor::MoveTo(0, self.status_height + i as u16))?;
-            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-            // 展开制表符后直接输出，不截断——MUD 服务器已按固定宽度格式化
-            let expanded = expand_tabs(line);
-            queue!(stdout, Print(&expanded))?;
-        }
-        // 输入行
-        self.draw_input_line(stdout)?;
-        stdout.flush()?;
-        Ok(())
-    }
-
-    /// 绘制状态栏，显示所有连接状态（结果缓存供 refresh_all 使用）
-    pub fn draw_status_bar(
-        &mut self,
-        stdout: &mut io::Stdout,
-        sessions: &[crate::connection::SessionInfo],
-        foreground_id: usize,
-    ) -> io::Result<()> {
-        let mut bar = String::new();
-        for (i, info) in sessions.iter().enumerate() {
-            let state_icon = match info.state {
-                crate::connection::SessionState::Connected => "\x1b[32m●\x1b[0m", // green
-                crate::connection::SessionState::Disconnected => "\x1b[90m○\x1b[0m", // dark grey
-                crate::connection::SessionState::Connecting => "\x1b[33m◎\x1b[0m", // yellow
-                crate::connection::SessionState::Reconnecting => "\x1b[35m⟳\x1b[0m", // magenta
-            };
-            if i == foreground_id {
-                bar.push_str(&format!(
-                    "\x1b[33m[{}]{}\x1b[0m{} ",
-                    i + 1,
-                    info.name,
-                    state_icon
-                ));
-            } else {
-                bar.push_str(&format!("[{}]{}\x1b[0m{} ", i + 1, info.name, state_icon));
-            }
-        }
-        // 右侧 RustLuaMud
-        let right_text = "RustLuaMud";
-        let total_width = self.width as usize;
-        if bar.len() + right_text.len() + 2 < total_width {
-            let padding = total_width - bar.len() - right_text.len() - 2;
-            bar.extend(std::iter::repeat_n(' ', padding));
-            bar.push_str(&format!("\x1b[36m{}\x1b[0m", right_text)); // cyan
-        }
-
-        // 缓存并立即输出
-        self.status_bar_cache = Some(bar.clone());
-        queue!(stdout, cursor::MoveTo(0, 0))?;
-        queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-        queue!(stdout, Print(&bar))?;
-        stdout.flush()?;
-        Ok(())
-    }
-
-    /// 追加一行输出
-    pub fn append_output(&mut self, line: &str) -> io::Result<()> {
-        // 处理 \r\n 和 \n
+    /// 追加输出行到缓冲区（纯逻辑，不涉及 IO）
+    pub fn push_output(&mut self, line: &str) {
         for part in line.split_inclusive('\n') {
-            let trimmed = part.trim_end_matches('\r').trim_end_matches('\n');
+            let trimmed = part.trim_end_matches('\n').trim_end_matches('\r');
             if !trimmed.is_empty() {
                 self.output_lines.push(trimmed.to_string());
             }
         }
-
         // 限制缓冲区大小
         let max_lines = 5000;
         if self.output_lines.len() > max_lines {
             let drain_count = self.output_lines.len() - max_lines;
             self.output_lines.drain(..drain_count);
         }
-
-        let mut stdout = io::stdout();
-        self.refresh_all(&mut stdout)?;
-        Ok(())
     }
 
-    /// 绘制输入行
-    fn draw_input_line(&self, stdout: &mut io::Stdout) -> io::Result<()> {
-        let input_y = self.height.saturating_sub(1);
-        queue!(stdout, cursor::MoveTo(0, input_y))?;
-        queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-        queue!(stdout, SetForegroundColor(Color::Green), Print("> "))?;
-        queue!(stdout, style::ResetColor)?;
+    /// 处理键盘事件，返回是否需要发送命令（纯逻辑）
+    pub fn handle_key(&mut self, key: KeyEvent) -> Option<String> {
+        match (key.modifiers, key.code) {
+            (KeyModifiers::CONTROL, KeyCode::Char('c'))
+            | (KeyModifiers::CONTROL, KeyCode::Char('d')) => None,
 
-        // 输入行目前只处理 ASCII，字符偏移 = 显示列偏移
+            (KeyModifiers::NONE, KeyCode::Enter) => {
+                let cmd = self.input_buffer.clone();
+                if !cmd.is_empty() {
+                    self.history.push(cmd.clone());
+                    self.history_pos = self.history.len();
+                }
+                self.input_buffer.clear();
+                self.input_cursor = 0;
+                Some(cmd)
+            }
+
+            (KeyModifiers::NONE, KeyCode::Backspace) => {
+                if self.input_cursor > 0 {
+                    self.input_cursor -= 1;
+                    self.input_buffer.remove(self.input_cursor);
+                }
+                None
+            }
+
+            (KeyModifiers::NONE, KeyCode::Delete) => {
+                if self.input_cursor < self.input_buffer.len() {
+                    self.input_buffer.remove(self.input_cursor);
+                }
+                None
+            }
+
+            (KeyModifiers::NONE, KeyCode::Left) => {
+                if self.input_cursor > 0 {
+                    self.input_cursor -= 1;
+                }
+                None
+            }
+
+            (KeyModifiers::NONE, KeyCode::Right) => {
+                if self.input_cursor < self.input_buffer.len() {
+                    self.input_cursor += 1;
+                }
+                None
+            }
+
+            (KeyModifiers::NONE, KeyCode::Up) => {
+                if self.history_pos > 0 {
+                    self.history_pos -= 1;
+                    self.input_buffer = self.history[self.history_pos].clone();
+                    self.input_cursor = self.input_buffer.len();
+                }
+                None
+            }
+
+            (KeyModifiers::NONE, KeyCode::Down) => {
+                if self.history_pos < self.history.len() {
+                    self.history_pos += 1;
+                    if self.history_pos < self.history.len() {
+                        self.input_buffer = self.history[self.history_pos].clone();
+                    } else {
+                        self.input_buffer.clear();
+                    }
+                    self.input_cursor = self.input_buffer.len();
+                }
+                None
+            }
+
+            (KeyModifiers::NONE, KeyCode::Home) => {
+                self.input_cursor = 0;
+                None
+            }
+
+            (KeyModifiers::NONE, KeyCode::End) => {
+                self.input_cursor = self.input_buffer.len();
+                None
+            }
+
+            (KeyModifiers::NONE, KeyCode::Char(c)) => {
+                self.input_buffer.insert(self.input_cursor, c);
+                self.input_cursor += 1;
+                None
+            }
+
+            _ => None,
+        }
+    }
+
+    /// 更新状态栏缓存（纯逻辑）
+    pub fn update_status_bar(&mut self, sessions: &[SessionInfo], foreground_id: usize) {
+        let bar = build_status_bar(sessions, foreground_id, self.width as usize);
+        self.status_bar_cache = Some(bar);
+    }
+
+    /// 获取当前可见的输出行
+    pub fn visible_output_lines(&self) -> &[String] {
+        let output_height = self.output_height() as usize;
+        let start = if self.output_lines.len() > output_height {
+            self.output_lines.len() - output_height
+        } else {
+            0
+        };
+        &self.output_lines[start..]
+    }
+
+    /// 获取输入行显示内容（考虑滚动）
+    pub fn input_display(&self) -> (String, usize) {
         let prompt_len: usize = 2; // "> "
         let avail_width = self.width as usize - prompt_len;
         let display_start = if self.input_cursor > avail_width {
@@ -207,141 +249,143 @@ impl Terminal {
             .skip(display_start)
             .take(display_end - display_start)
             .collect();
-        queue!(stdout, Print(&display_str))?;
+        let cursor_x = prompt_len + self.input_cursor - display_start;
+        (display_str, cursor_x)
+    }
+}
 
-        // 设置光标位置
-        let cursor_x = (prompt_len + self.input_cursor - display_start) as u16;
-        queue!(stdout, cursor::MoveTo(cursor_x, input_y))?;
+/// 终端 UI 渲染器（持有 TerminalState + IO 渲染）
+pub struct Terminal {
+    state: TerminalState,
+}
+
+impl Terminal {
+    pub fn new() -> io::Result<Self> {
+        terminal::enable_raw_mode()?;
+        let (width, height) = terminal::size()?;
+        Ok(Self {
+            state: TerminalState::new(width, height),
+        })
+    }
+
+    /// 获取状态引用
+    #[allow(dead_code)]
+    pub fn state(&self) -> &TerminalState {
+        &self.state
+    }
+
+    /// 获取状态可变引用
+    #[allow(dead_code)]
+    pub fn state_mut(&mut self) -> &mut TerminalState {
+        &mut self.state
+    }
+
+    /// 初始化屏幕
+    pub fn init_screen(&mut self) -> io::Result<()> {
+        let mut stdout = io::stdout();
+        execute!(
+            stdout,
+            terminal::EnterAlternateScreen,
+            terminal::Clear(ClearType::All)
+        )?;
+        self.refresh_all(&mut stdout)?;
+        Ok(())
+    }
+
+    /// 完整刷新屏幕
+    fn refresh_all(&self, stdout: &mut io::Stdout) -> io::Result<()> {
+        if let Some(ref bar) = self.state.status_bar_cache {
+            queue!(stdout, cursor::MoveTo(0, 0))?;
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+            queue!(stdout, Print(bar))?;
+        }
+
+        let output_height = self.state.output_height() as usize;
+        let visible = self.state.visible_output_lines();
+        for (i, line) in visible.iter().enumerate() {
+            queue!(
+                stdout,
+                cursor::MoveTo(0, self.state.status_height + i as u16)
+            )?;
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+            let expanded = expand_tabs(line);
+            queue!(stdout, Print(&expanded))?;
+        }
+        // 清除输出区剩余行
+        for i in visible.len()..output_height {
+            queue!(
+                stdout,
+                cursor::MoveTo(0, self.state.status_height + i as u16)
+            )?;
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+        }
+        self.draw_input_line(stdout)?;
+        stdout.flush()?;
+        Ok(())
+    }
+
+    /// 绘制状态栏
+    pub fn draw_status_bar(
+        &mut self,
+        stdout: &mut io::Stdout,
+        sessions: &[SessionInfo],
+        foreground_id: usize,
+    ) -> io::Result<()> {
+        self.state.update_status_bar(sessions, foreground_id);
+        if let Some(ref bar) = self.state.status_bar_cache {
+            queue!(stdout, cursor::MoveTo(0, 0))?;
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+            queue!(stdout, Print(bar))?;
+            stdout.flush()?;
+        }
+        Ok(())
+    }
+
+    /// 追加一行输出
+    pub fn append_output(&mut self, line: &str) -> io::Result<()> {
+        self.state.push_output(line);
+        let mut stdout = io::stdout();
+        self.refresh_all(&mut stdout)?;
+        Ok(())
+    }
+
+    /// 绘制输入行
+    fn draw_input_line(&self, stdout: &mut io::Stdout) -> io::Result<()> {
+        let input_y = self.state.height.saturating_sub(1);
+        queue!(stdout, cursor::MoveTo(0, input_y))?;
+        queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+        queue!(stdout, SetForegroundColor(Color::Green), Print("> "))?;
+        queue!(stdout, style::ResetColor)?;
+
+        let (display_str, cursor_x) = self.state.input_display();
+        queue!(stdout, Print(&display_str))?;
+        queue!(stdout, cursor::MoveTo(cursor_x as u16, input_y))?;
         Ok(())
     }
 
     /// 处理键盘事件，返回是否需要发送命令
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<String> {
-        match (key.modifiers, key.code) {
-            // Ctrl+C / Ctrl+D: 退出信号
-            (KeyModifiers::CONTROL, KeyCode::Char('c'))
-            | (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
-                None // 退出由 app 层处理
-            }
-
-            // Enter: 提交命令
-            (KeyModifiers::NONE, KeyCode::Enter) => {
-                let cmd = self.input_buffer.clone();
-                if !cmd.is_empty() {
-                    self.history.push(cmd.clone());
-                    self.history_pos = self.history.len();
-                }
-                self.input_buffer.clear();
-                self.input_cursor = 0;
-                let _ = self.refresh_all(&mut io::stdout());
-                Some(cmd)
-            }
-
-            // Backspace
-            (KeyModifiers::NONE, KeyCode::Backspace) => {
-                if self.input_cursor > 0 {
-                    self.input_cursor -= 1;
-                    self.input_buffer.remove(self.input_cursor);
-                    let _ = self.refresh_all(&mut io::stdout());
-                }
-                None
-            }
-
-            // Delete
-            (KeyModifiers::NONE, KeyCode::Delete) => {
-                if self.input_cursor < self.input_buffer.len() {
-                    self.input_buffer.remove(self.input_cursor);
-                    let _ = self.refresh_all(&mut io::stdout());
-                }
-                None
-            }
-
-            // Left arrow
-            (KeyModifiers::NONE, KeyCode::Left) => {
-                if self.input_cursor > 0 {
-                    self.input_cursor -= 1;
-                    let _ = self.refresh_all(&mut io::stdout());
-                }
-                None
-            }
-
-            // Right arrow
-            (KeyModifiers::NONE, KeyCode::Right) => {
-                if self.input_cursor < self.input_buffer.len() {
-                    self.input_cursor += 1;
-                    let _ = self.refresh_all(&mut io::stdout());
-                }
-                None
-            }
-
-            // Up arrow: 历史上翻
-            (KeyModifiers::NONE, KeyCode::Up) => {
-                if self.history_pos > 0 {
-                    self.history_pos -= 1;
-                    self.input_buffer = self.history[self.history_pos].clone();
-                    self.input_cursor = self.input_buffer.len();
-                    let _ = self.refresh_all(&mut io::stdout());
-                }
-                None
-            }
-
-            // Down arrow: 历史下翻
-            (KeyModifiers::NONE, KeyCode::Down) => {
-                if self.history_pos < self.history.len() {
-                    self.history_pos += 1;
-                    if self.history_pos < self.history.len() {
-                        self.input_buffer = self.history[self.history_pos].clone();
-                    } else {
-                        self.input_buffer.clear();
-                    }
-                    self.input_cursor = self.input_buffer.len();
-                    let _ = self.refresh_all(&mut io::stdout());
-                }
-                None
-            }
-
-            // Home: 光标到行首
-            (KeyModifiers::NONE, KeyCode::Home) => {
-                self.input_cursor = 0;
-                let _ = self.refresh_all(&mut io::stdout());
-                None
-            }
-
-            // End: 光标到行尾
-            (KeyModifiers::NONE, KeyCode::End) => {
-                self.input_cursor = self.input_buffer.len();
-                let _ = self.refresh_all(&mut io::stdout());
-                None
-            }
-
-            // 普通字符输入
-            (KeyModifiers::NONE, KeyCode::Char(c)) => {
-                self.input_buffer.insert(self.input_cursor, c);
-                self.input_cursor += 1;
-                let _ = self.refresh_all(&mut io::stdout());
-                None
-            }
-
-            _ => None,
-        }
+        let result = self.state.handle_key(key);
+        let _ = self.refresh_all(&mut io::stdout());
+        result
     }
 
     /// 获取当前输入缓冲区内容
     #[allow(dead_code)]
     pub fn input_buffer(&self) -> &str {
-        &self.input_buffer
+        &self.state.input_buffer
     }
 
     /// 处理终端大小变化
     pub fn resize(&mut self, width: u16, height: u16) {
-        self.width = width;
-        self.height = height;
+        self.state.width = width;
+        self.state.height = height;
         let _ = self.refresh_all(&mut io::stdout());
     }
 
     /// 替换整个输出缓冲区（切换前台连接时使用）
     pub fn replace_output(&mut self, lines: &[String]) -> io::Result<()> {
-        self.output_lines = lines.to_vec();
+        self.state.output_lines = lines.to_vec();
         let mut stdout = io::stdout();
         self.refresh_all(&mut stdout)?;
         Ok(())
@@ -352,5 +396,361 @@ impl Drop for Terminal {
     fn drop(&mut self) {
         let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_expand_tabs_passthrough() {
+        assert_eq!(expand_tabs("hello\tworld"), "hello\tworld");
+        assert_eq!(expand_tabs("no_tabs"), "no_tabs");
+        assert_eq!(expand_tabs(""), "");
+    }
+
+    #[test]
+    fn test_truncate_to_width_ascii() {
+        assert_eq!(truncate_to_width("hello", 3), "hel");
+        assert_eq!(truncate_to_width("hi", 5), "hi");
+        assert_eq!(truncate_to_width("", 5), "");
+    }
+
+    #[test]
+    fn test_truncate_to_width_exact() {
+        assert_eq!(truncate_to_width("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_to_width_zero() {
+        assert_eq!(truncate_to_width("hello", 0), "");
+    }
+
+    #[test]
+    fn test_truncate_to_width_cjk() {
+        assert_eq!(truncate_to_width("你好", 3), "你");
+        assert_eq!(truncate_to_width("你好", 2), "你");
+        assert_eq!(truncate_to_width("你好", 1), "");
+    }
+
+    #[test]
+    fn test_truncate_to_width_mixed() {
+        assert_eq!(truncate_to_width("a你好", 4), "a你");
+        assert_eq!(truncate_to_width("a你好", 3), "a你");
+    }
+
+    #[test]
+    fn test_truncate_to_width_ansi_codes_counted() {
+        let result = truncate_to_width("\x1b[32mhello\x1b[0m", 5);
+        assert!(!result.is_empty());
+    }
+
+    // === TerminalState 纯逻辑测试 ===
+
+    #[test]
+    fn test_state_new() {
+        let state = TerminalState::new(80, 24);
+        assert_eq!(state.width, 80);
+        assert_eq!(state.height, 24);
+        assert!(state.output_lines.is_empty());
+        assert!(state.input_buffer.is_empty());
+        assert_eq!(state.input_cursor, 0);
+        assert!(state.history.is_empty());
+    }
+
+    #[test]
+    fn test_state_push_output() {
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("hello");
+        assert_eq!(state.output_lines, vec!["hello"]);
+
+        state.push_output("line1\nline2\n");
+        assert_eq!(state.output_lines, vec!["hello", "line1", "line2"]);
+    }
+
+    #[test]
+    fn test_state_push_output_trims_cr() {
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("line\r\n");
+        assert_eq!(state.output_lines, vec!["line"]);
+    }
+
+    #[test]
+    fn test_state_push_output_skips_empty() {
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("\n\n");
+        assert!(state.output_lines.is_empty());
+    }
+
+    #[test]
+    fn test_state_push_output_buffer_limit() {
+        let mut state = TerminalState::new(80, 24);
+        for i in 0..5005 {
+            state.push_output(&format!("line {}", i));
+        }
+        assert_eq!(state.output_lines.len(), 5000);
+        assert_eq!(state.output_lines[0], "line 5");
+    }
+
+    #[test]
+    fn test_state_output_height() {
+        let state = TerminalState::new(80, 24);
+        assert_eq!(state.output_height(), 22); // 24 - 1 (status) - 1 (input)
+    }
+
+    #[test]
+    fn test_state_visible_output_lines() {
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("line1");
+        state.push_output("line2");
+        let visible = state.visible_output_lines();
+        assert_eq!(visible.len(), 2);
+    }
+
+    #[test]
+    fn test_state_visible_output_lines_scroll() {
+        let mut state = TerminalState::new(80, 24);
+        let output_height = state.output_height() as usize;
+        for i in 0..output_height + 5 {
+            state.push_output(&format!("line {}", i));
+        }
+        let visible = state.visible_output_lines();
+        assert_eq!(visible.len(), output_height);
+        // Should show the last output_height lines
+        assert_eq!(visible[0], format!("line 5"));
+    }
+
+    #[test]
+    fn test_state_handle_key_enter() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 5;
+        let result = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(result, Some("hello".to_string()));
+        assert!(state.input_buffer.is_empty());
+        assert_eq!(state.input_cursor, 0);
+        assert_eq!(state.history, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_state_handle_key_enter_empty() {
+        let mut state = TerminalState::new(80, 24);
+        let result = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(result, Some(String::new()));
+        assert!(state.history.is_empty());
+    }
+
+    #[test]
+    fn test_state_handle_key_char() {
+        let mut state = TerminalState::new(80, 24);
+        state.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "a");
+        assert_eq!(state.input_cursor, 1);
+
+        state.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "ab");
+        assert_eq!(state.input_cursor, 2);
+    }
+
+    #[test]
+    fn test_state_handle_key_backspace() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "ab".to_string();
+        state.input_cursor = 2;
+        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "a");
+        assert_eq!(state.input_cursor, 1);
+    }
+
+    #[test]
+    fn test_state_handle_key_backspace_at_start() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "a".to_string();
+        state.input_cursor = 0;
+        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "a");
+        assert_eq!(state.input_cursor, 0);
+    }
+
+    #[test]
+    fn test_state_handle_key_delete() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "ab".to_string();
+        state.input_cursor = 0;
+        state.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "b");
+        assert_eq!(state.input_cursor, 0);
+    }
+
+    #[test]
+    fn test_state_handle_key_delete_at_end() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "a".to_string();
+        state.input_cursor = 1;
+        state.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "a");
+        assert_eq!(state.input_cursor, 1);
+    }
+
+    #[test]
+    fn test_state_handle_key_left_right() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "abc".to_string();
+        state.input_cursor = 3;
+
+        state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(state.input_cursor, 2);
+
+        state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(state.input_cursor, 1);
+
+        state.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(state.input_cursor, 2);
+    }
+
+    #[test]
+    fn test_state_handle_key_left_at_start() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_cursor = 0;
+        state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(state.input_cursor, 0);
+    }
+
+    #[test]
+    fn test_state_handle_key_right_at_end() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "a".to_string();
+        state.input_cursor = 1;
+        state.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(state.input_cursor, 1);
+    }
+
+    #[test]
+    fn test_state_handle_key_home_end() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "abc".to_string();
+        state.input_cursor = 2;
+
+        state.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(state.input_cursor, 0);
+
+        state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(state.input_cursor, 3);
+    }
+
+    #[test]
+    fn test_state_handle_key_history_up_down() {
+        let mut state = TerminalState::new(80, 24);
+        state.history = vec!["cmd1".to_string(), "cmd2".to_string()];
+        state.history_pos = 2;
+
+        state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "cmd2");
+        assert_eq!(state.history_pos, 1);
+
+        state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "cmd1");
+        assert_eq!(state.history_pos, 0);
+
+        state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "cmd2");
+        assert_eq!(state.history_pos, 1);
+
+        state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(state.input_buffer.is_empty());
+        assert_eq!(state.history_pos, 2);
+    }
+
+    #[test]
+    fn test_state_handle_key_ctrl_c_returns_none() {
+        let mut state = TerminalState::new(80, 24);
+        let result = state.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_state_handle_key_ctrl_d_returns_none() {
+        let mut state = TerminalState::new(80, 24);
+        let result = state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_state_input_display() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 5;
+        let (display, cursor_x) = state.input_display();
+        assert_eq!(display, "hello");
+        assert_eq!(cursor_x, 7); // 2 (prompt) + 5
+    }
+
+    #[test]
+    fn test_state_input_display_scroll() {
+        let mut state = TerminalState::new(10, 24);
+        state.input_buffer = "abcdefghij".to_string(); // 10 chars
+        state.input_cursor = 10;
+        let (display, _cursor_x) = state.input_display();
+        // avail_width = 10 - 2 = 8, cursor > avail_width so scroll
+        assert!(display.len() <= 8);
+    }
+
+    #[test]
+    fn test_state_insert_char_in_middle() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "ac".to_string();
+        state.input_cursor = 1;
+        state.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "abc");
+        assert_eq!(state.input_cursor, 2);
+    }
+
+    #[test]
+    fn test_build_status_bar_empty() {
+        let bar = build_status_bar(&[], 0, 80);
+        assert!(bar.contains("RustLuaMud"));
+    }
+
+    #[test]
+    fn test_build_status_bar_with_sessions() {
+        let sessions = vec![
+            SessionInfo {
+                name: "mud1".to_string(),
+                state: SessionState::Connected,
+            },
+            SessionInfo {
+                name: "mud2".to_string(),
+                state: SessionState::Disconnected,
+            },
+        ];
+        let bar = build_status_bar(&sessions, 0, 80);
+        assert!(bar.contains("mud1"));
+        assert!(bar.contains("mud2"));
+        assert!(bar.contains("RustLuaMud"));
+    }
+
+    #[test]
+    fn test_build_status_bar_foreground_highlight() {
+        let sessions = vec![SessionInfo {
+            name: "mud1".to_string(),
+            state: SessionState::Connected,
+        }];
+        let bar = build_status_bar(&sessions, 0, 80);
+        // Foreground should have yellow highlight
+        assert!(bar.contains("\x1b[33m[1]"));
+    }
+
+    #[test]
+    fn test_state_update_status_bar() {
+        let mut state = TerminalState::new(80, 24);
+        let sessions = vec![SessionInfo {
+            name: "test".to_string(),
+            state: SessionState::Connected,
+        }];
+        state.update_status_bar(&sessions, 0);
+        assert!(state.status_bar_cache.is_some());
+        let bar = state.status_bar_cache.as_ref().unwrap();
+        assert!(bar.contains("test"));
     }
 }
