@@ -7,7 +7,9 @@ use chrono::Local;
 /// 简单日志记录器（Phase 1 基础版，Phase 4 完善轮转）
 pub struct Logger {
     log_dir: PathBuf,
+    #[allow(dead_code)]
     max_size_mb: u64,
+    #[allow(dead_code)]
     max_files: usize,
 }
 

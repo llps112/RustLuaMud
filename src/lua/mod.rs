@@ -1,4 +1,4 @@
-pub mod engine;
 pub mod api;
+pub mod engine;
 
 pub use engine::LuaEngine;

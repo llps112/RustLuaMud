@@ -11,8 +11,7 @@ use config::AppConfig;
 fn main() {
     let config = AppConfig::load_default();
 
-    let rt = tokio::runtime::Runtime::new()
-        .expect("无法创建 tokio runtime");
+    let rt = tokio::runtime::Runtime::new().expect("无法创建 tokio runtime");
 
     rt.block_on(async {
         let mut app = match App::new(config) {

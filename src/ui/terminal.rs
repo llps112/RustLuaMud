@@ -6,7 +6,6 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use std::io::{self, Write};
-use unicode_width::UnicodeWidthStr;
 
 /// 透传原始字符串，让终端原生处理制表符（\t）
 /// 终端驱动会按当前光标列位置执行 TAB 跳格，与 MushClient 行为一致
@@ -15,6 +14,7 @@ fn expand_tabs(s: &str) -> String {
 }
 
 /// 按显示宽度截取字符串，确保不超过 max_width 列
+#[allow(dead_code)]
 fn truncate_to_width(s: &str, max_width: usize) -> String {
     let mut result = String::new();
     let mut width = 0;
@@ -149,7 +149,7 @@ impl Terminal {
         let total_width = self.width as usize;
         if bar.len() + right_text.len() + 2 < total_width {
             let padding = total_width - bar.len() - right_text.len() - 2;
-            bar.extend(std::iter::repeat(' ').take(padding));
+            bar.extend(std::iter::repeat_n(' ', padding));
             bar.push_str(&format!("\x1b[36m{}\x1b[0m", right_text)); // cyan
         }
 
@@ -165,7 +165,7 @@ impl Terminal {
     /// 追加一行输出
     pub fn append_output(&mut self, line: &str) -> io::Result<()> {
         // 处理 \r\n 和 \n
-        for part in line.split_inclusive(|c| c == '\n') {
+        for part in line.split_inclusive('\n') {
             let trimmed = part.trim_end_matches('\r').trim_end_matches('\n');
             if !trimmed.is_empty() {
                 self.output_lines.push(trimmed.to_string());
@@ -327,6 +327,7 @@ impl Terminal {
     }
 
     /// 获取当前输入缓冲区内容
+    #[allow(dead_code)]
     pub fn input_buffer(&self) -> &str {
         &self.input_buffer
     }

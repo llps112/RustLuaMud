@@ -3,4 +3,5 @@ logs/
 *.log
 profiles/wudaodm.toml
 .git-crypt-key
+.trae/
 scripts/class/
