@@ -7,3 +7,4 @@ profiles/wudaodm.toml
 scripts/class/
 scripts/michen_xkx.lua
 scripts/xkxMAP.db
+scripts/config_*.lua
