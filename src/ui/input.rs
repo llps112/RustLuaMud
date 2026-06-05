@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// 输入事件
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum InputEvent {
     /// 用户输入了一行命令
     Command(String),
@@ -13,14 +14,14 @@ pub enum InputEvent {
 
 /// 输入处理器
 pub struct InputHandler;
-
+#[allow(dead_code)]
 impl InputHandler {
     /// 从终端事件中解析出应用级输入事件
     pub fn handle_key_event(key: KeyEvent) -> Option<InputEvent> {
         match (key.modifiers, key.code) {
             // Ctrl+C / Ctrl+D: 退出
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) |
-            (KeyModifiers::CONTROL, KeyCode::Char('d')) => Some(InputEvent::Quit),
+            (KeyModifiers::CONTROL, KeyCode::Char('c'))
+            | (KeyModifiers::CONTROL, KeyCode::Char('d')) => Some(InputEvent::Quit),
 
             // Alt+1~9: 切换连接
             (KeyModifiers::ALT, KeyCode::Char(c)) if ('1'..='9').contains(&c) => {

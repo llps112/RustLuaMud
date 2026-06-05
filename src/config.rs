@@ -16,12 +16,23 @@ pub struct GeneralConfig {
     pub log_rotation_count: usize,
 }
 
-fn default_scroll_buffer() -> usize { 5000 }
-fn default_log_dir() -> String { "logs".to_string() }
-fn default_profile_dir() -> String { "profiles".to_string() }
-fn default_log_rotation_size_mb() -> u64 { 10 }
-fn default_log_rotation_count() -> usize { 5 }
+fn default_scroll_buffer() -> usize {
+    5000
+}
+fn default_log_dir() -> String {
+    "logs".to_string()
+}
+fn default_profile_dir() -> String {
+    "profiles".to_string()
+}
+fn default_log_rotation_size_mb() -> u64 {
+    10
+}
+fn default_log_rotation_count() -> usize {
+    5
+}
 
+#[allow(clippy::derivable_impls)]
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
@@ -55,8 +66,12 @@ pub struct ConnectionConfig {
     pub password: Option<String>,
 }
 
-fn default_true() -> bool { true }
-fn default_reconnect_delay() -> u64 { 5 }
+fn default_true() -> bool {
+    true
+}
+fn default_reconnect_delay() -> u64 {
+    5
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
@@ -113,18 +128,16 @@ impl AppConfig {
             }
 
             match fs::read_to_string(&path) {
-                Ok(content) => {
-                    match toml::from_str::<ConnectionConfig>(&content) {
-                        Ok(config) => {
-                            eprintln!("已加载角色配置: {} ({})", config.name, path.display());
-                            profiles.push(config);
-                        }
-                        Err(e) => {
-                            eprintln!("警告: 角色配置 {} 格式错误: {}", path.display(), e);
-                            skipped += 1;
-                        }
+                Ok(content) => match toml::from_str::<ConnectionConfig>(&content) {
+                    Ok(config) => {
+                        eprintln!("已加载角色配置: {} ({})", config.name, path.display());
+                        profiles.push(config);
                     }
-                }
+                    Err(e) => {
+                        eprintln!("警告: 角色配置 {} 格式错误: {}", path.display(), e);
+                        skipped += 1;
+                    }
+                },
                 Err(e) => {
                     eprintln!("警告: 无法读取 {}: {}", path.display(), e);
                     skipped += 1;
@@ -136,6 +149,7 @@ impl AppConfig {
     }
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -228,9 +242,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let example_path = dir.path().join("example.toml");
         let mut f = fs::File::create(&example_path).unwrap();
-        writeln!(f, r#"name = "example"
+        writeln!(
+            f,
+            r#"name = "example"
 host = "example.com"
-port = 4000"#).unwrap();
+port = 4000"#
+        )
+        .unwrap();
 
         let (profiles, skipped) = AppConfig::load_profiles(dir.path().to_str().unwrap());
         assert!(profiles.is_empty());
@@ -242,9 +260,13 @@ port = 4000"#).unwrap();
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("mud.toml");
         let mut f = fs::File::create(&config_path).unwrap();
-        writeln!(f, r#"name = "mud"
+        writeln!(
+            f,
+            r#"name = "mud"
 host = "mud.example.com"
-port = 3000"#).unwrap();
+port = 3000"#
+        )
+        .unwrap();
 
         let (profiles, skipped) = AppConfig::load_profiles(dir.path().to_str().unwrap());
         assert_eq!(profiles.len(), 1);
@@ -282,15 +304,23 @@ port = 3000"#).unwrap();
 
         let path1 = dir.path().join("alpha.toml");
         let mut f1 = fs::File::create(&path1).unwrap();
-        writeln!(f1, r#"name = "alpha"
+        writeln!(
+            f1,
+            r#"name = "alpha"
 host = "alpha.com"
-port = 1000"#).unwrap();
+port = 1000"#
+        )
+        .unwrap();
 
         let path2 = dir.path().join("beta.toml");
         let mut f2 = fs::File::create(&path2).unwrap();
-        writeln!(f2, r#"name = "beta"
+        writeln!(
+            f2,
+            r#"name = "beta"
 host = "beta.com"
-port = 2000"#).unwrap();
+port = 2000"#
+        )
+        .unwrap();
 
         let (profiles, skipped) = AppConfig::load_profiles(dir.path().to_str().unwrap());
         assert_eq!(profiles.len(), 2);
@@ -306,9 +336,13 @@ port = 2000"#).unwrap();
 
         let good_path = dir.path().join("good.toml");
         let mut f = fs::File::create(&good_path).unwrap();
-        writeln!(f, r#"name = "good"
+        writeln!(
+            f,
+            r#"name = "good"
 host = "good.com"
-port = 5000"#).unwrap();
+port = 5000"#
+        )
+        .unwrap();
 
         let bad_path = dir.path().join("bad.toml");
         fs::write(&bad_path, "invalid {{{{").unwrap();

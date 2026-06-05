@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use mlua::{Lua, Result as LuaResult, Function, UserData, Table, Value};
+use mlua::{Function, Lua, Result as LuaResult, Table, UserData, Value};
 use regex::Regex;
-use rusqlite::{Connection, types::Value as SqlValue};
+use rusqlite::{types::Value as SqlValue, Connection};
 
 /// SQLite 连接包装（Lua 用户数据）
 struct LuaDb {
@@ -14,9 +14,7 @@ struct LuaDb {
 
 impl UserData for LuaDb {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("close", |_, _this, ()| {
-            Ok(())
-        });
+        methods.add_method("close", |_, _this, ()| Ok(()));
 
         methods.add_method("exec", |_, this, sql: String| {
             let conn = this.conn.lock().unwrap();
@@ -58,7 +56,8 @@ impl UserData for LuaStmt {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("step", |lua, this, args: Option<Table>| {
             let conn = this.conn.lock().unwrap();
-            let mut stmt = conn.prepare(&this.sql)
+            let mut stmt = conn
+                .prepare(&this.sql)
                 .map_err(|e| mlua::Error::external(e.to_string()))?;
 
             let params_vec = if let Some(ref t) = args {
@@ -73,13 +72,19 @@ impl UserData for LuaStmt {
                 Vec::new()
             };
 
-            let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-                params_vec.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec
+                .iter()
+                .map(|v| v as &dyn rusqlite::types::ToSql)
+                .collect();
 
-            let mut rows = stmt.query(params_refs.as_slice())
+            let mut rows = stmt
+                .query(params_refs.as_slice())
                 .map_err(|e| mlua::Error::external(e.to_string()))?;
 
-            if let Some(row) = rows.next().map_err(|e| mlua::Error::external(e.to_string()))? {
+            if let Some(row) = rows
+                .next()
+                .map_err(|e| mlua::Error::external(e.to_string()))?
+            {
                 let lua_table = lua.create_table()?;
                 let col_count = row.as_ref().column_count();
                 for i in 0..col_count {
@@ -107,7 +112,8 @@ impl UserData for LuaStmt {
 
         methods.add_method("run", |_, this, args: Option<Table>| {
             let conn = this.conn.lock().unwrap();
-            let mut stmt = conn.prepare(&this.sql)
+            let mut stmt = conn
+                .prepare(&this.sql)
                 .map_err(|e| mlua::Error::external(e.to_string()))?;
 
             let params_vec = if let Some(ref t) = args {
@@ -122,8 +128,10 @@ impl UserData for LuaStmt {
                 Vec::new()
             };
 
-            let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-                params_vec.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec
+                .iter()
+                .map(|v| v as &dyn rusqlite::types::ToSql)
+                .collect();
 
             stmt.execute(params_refs.as_slice())
                 .map_err(|e| mlua::Error::external(e.to_string()))?;
@@ -140,11 +148,16 @@ pub struct Trigger {
     pub callback: Function,
     pub enabled: bool,
     pub group: String,
+    #[allow(dead_code)]
     pub sequence: i32,
-    pub multiline: bool,
-    pub lines_to_match: usize,
-    pub omit_from_output: bool,
+    #[allow(dead_code)]
     pub temporary: bool,
+    #[allow(dead_code)]
+    pub multiline: bool,
+    #[allow(dead_code)]
+    pub lines_to_match: usize,
+    #[allow(dead_code)]
+    pub omit_from_output: bool,
     pub send_text: String,
 }
 
@@ -210,7 +223,12 @@ impl LuaEngine {
             disconnect_requested: false,
         }));
 
-        let mut engine = Self { lua, state, script_path: None, script_dir: None };
+        let mut engine = Self {
+            lua,
+            state,
+            script_path: None,
+            script_dir: None,
+        };
         engine.register_api()?;
         Ok(engine)
     }
@@ -266,11 +284,12 @@ impl LuaEngine {
 
         // ColourNote(fg, bg, text)
         let state_rc5 = state_rc.clone();
-        let colour_note_fn = lua.create_function_mut(move |_, (fg, bg, text): (String, String, String)| {
-            let msg = format!("[{}:{}]: {}", fg, bg, text);
-            state_rc5.borrow_mut().pending_logs.push(msg);
-            Ok(())
-        })?;
+        let colour_note_fn =
+            lua.create_function_mut(move |_, (fg, bg, text): (String, String, String)| {
+                let msg = format!("[{}:{}]: {}", fg, bg, text);
+                state_rc5.borrow_mut().pending_logs.push(msg);
+                Ok(())
+            })?;
         globals.set("ColourNote", colour_note_fn)?;
 
         // Note(text)
@@ -295,16 +314,84 @@ impl LuaEngine {
 
         // AddTrigger(name, match_str, response, flags, colour, wildcard, sound, script, send_to, sequence)
         let state_rc8 = state_rc.clone();
-        let add_trigger_fn = lua.create_function_mut(move |lua, (name, match_str, _response, flags, _colour, _wildcard, _sound, script, _send_to, sequence): (String, String, String, i64, i64, i64, String, String, i64, i64)| {
-            add_trigger_impl(lua, &state_rc8, &name, &match_str, flags, &script, _send_to, sequence as i32)
-        })?;
+        let add_trigger_fn = lua.create_function_mut(
+            move |lua,
+                  (
+                name,
+                match_str,
+                _response,
+                flags,
+                _colour,
+                _wildcard,
+                _sound,
+                script,
+                _send_to,
+                sequence,
+            ): (
+                String,
+                String,
+                String,
+                i64,
+                i64,
+                i64,
+                String,
+                String,
+                i64,
+                i64,
+            )| {
+                add_trigger_impl(
+                    lua,
+                    &state_rc8,
+                    &name,
+                    &match_str,
+                    flags,
+                    &script,
+                    _send_to,
+                    sequence as i32,
+                )
+            },
+        )?;
         globals.set("AddTrigger", add_trigger_fn)?;
 
         // AddTriggerEx(name, match_str, response, flags, colour, wildcard, sound, script, send_to, sequence)
         let state_rc9 = state_rc.clone();
-        let add_trigger_ex_fn = lua.create_function_mut(move |lua, (name, match_str, _response, flags, _colour, _wildcard, _sound, script, _send_to, sequence): (String, String, String, i64, i64, i64, String, String, i64, i64)| {
-            add_trigger_impl(lua, &state_rc9, &name, &match_str, flags, &script, _send_to, sequence as i32)
-        })?;
+        let add_trigger_ex_fn = lua.create_function_mut(
+            move |lua,
+                  (
+                name,
+                match_str,
+                _response,
+                flags,
+                _colour,
+                _wildcard,
+                _sound,
+                script,
+                _send_to,
+                sequence,
+            ): (
+                String,
+                String,
+                String,
+                i64,
+                i64,
+                i64,
+                String,
+                String,
+                i64,
+                i64,
+            )| {
+                add_trigger_impl(
+                    lua,
+                    &state_rc9,
+                    &name,
+                    &match_str,
+                    flags,
+                    &script,
+                    _send_to,
+                    sequence as i32,
+                )
+            },
+        )?;
         globals.set("AddTriggerEx", add_trigger_ex_fn)?;
 
         // DeleteTrigger(name)
@@ -313,7 +400,11 @@ impl LuaEngine {
             let mut state = state_rc10.borrow_mut();
             let before = state.triggers.len();
             state.triggers.retain(|t| t.name != name);
-            if state.triggers.len() < before { Ok(0) } else { Ok(1) }
+            if state.triggers.len() < before {
+                Ok(0)
+            } else {
+                Ok(1)
+            }
         })?;
         globals.set("DeleteTrigger", delete_trigger_fn)?;
 
@@ -331,98 +422,102 @@ impl LuaEngine {
 
         // GetTriggerInfo(name, code)
         let state_rc12 = state_rc.clone();
-        let get_trigger_info_fn = lua.create_function_mut(move |lua, (name, code): (String, i64)| {
-            let state = state_rc12.borrow();
-            if let Some(t) = state.triggers.iter().find(|t| t.name == name) {
-                match code {
-                    8 => Ok(Value::Boolean(t.enabled)), // enabled
-                    26 => {
-                        let group = t.group.clone();
-                        Ok(Value::String(lua.create_string(&group)?))
+        let get_trigger_info_fn =
+            lua.create_function_mut(move |lua, (name, code): (String, i64)| {
+                let state = state_rc12.borrow();
+                if let Some(t) = state.triggers.iter().find(|t| t.name == name) {
+                    match code {
+                        8 => Ok(Value::Boolean(t.enabled)), // enabled
+                        26 => {
+                            let group = t.group.clone();
+                            Ok(Value::String(lua.create_string(&group)?))
+                        }
+                        _ => Ok(Value::Nil),
                     }
-                    _ => Ok(Value::Nil),
+                } else {
+                    Ok(Value::Nil)
                 }
-            } else {
-                Ok(Value::Nil)
-            }
-        })?;
+            })?;
         globals.set("GetTriggerInfo", get_trigger_info_fn)?;
 
         // SetTriggerOption(name, key, value)
         let state_rc13 = state_rc.clone();
-        let set_trigger_option_fn = lua.create_function_mut(move |lua, (name, key, value): (String, String, Value)| {
-            let mut state = state_rc13.borrow_mut();
-            if let Some(t) = state.triggers.iter_mut().find(|t| t.name == name) {
-                match key.as_str() {
-                    "group" => {
-                        if let Value::String(s) = value {
-                            t.group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+        let set_trigger_option_fn =
+            lua.create_function_mut(move |_lua, (name, key, value): (String, String, Value)| {
+                let mut state = state_rc13.borrow_mut();
+                if let Some(t) = state.triggers.iter_mut().find(|t| t.name == name) {
+                    match key.as_str() {
+                        "group" => {
+                            if let Value::String(s) = value {
+                                t.group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+                            }
                         }
-                    }
-                    "multi_line" | "multiline" => {
-                        if let Value::Boolean(b) = value {
-                            t.multiline = b;
-                        } else if let Value::Integer(n) = value {
-                            t.multiline = n != 0;
+                        "multi_line" | "multiline" => {
+                            if let Value::Boolean(b) = value {
+                                t.multiline = b;
+                            } else if let Value::Integer(n) = value {
+                                t.multiline = n != 0;
+                            }
                         }
-                    }
-                    "lines_to_match" => {
-                        if let Value::Integer(n) = value {
-                            t.lines_to_match = n as usize;
+                        "lines_to_match" => {
+                            if let Value::Integer(n) = value {
+                                t.lines_to_match = n as usize;
+                            }
                         }
-                    }
-                    "omit_from_output" => {
-                        if let Value::Boolean(b) = value {
-                            t.omit_from_output = b;
-                        } else if let Value::Integer(n) = value {
-                            t.omit_from_output = n != 0;
+                        "omit_from_output" => {
+                            if let Value::Boolean(b) = value {
+                                t.omit_from_output = b;
+                            } else if let Value::Integer(n) = value {
+                                t.omit_from_output = n != 0;
+                            }
                         }
-                    }
-                    "enabled" => {
-                        if let Value::Boolean(b) = value {
-                            t.enabled = b;
-                        } else if let Value::Integer(n) = value {
-                            t.enabled = n != 0;
+                        "enabled" => {
+                            if let Value::Boolean(b) = value {
+                                t.enabled = b;
+                            } else if let Value::Integer(n) = value {
+                                t.enabled = n != 0;
+                            }
                         }
-                    }
-                    "send" => {
-                        if let Value::String(s) = value {
-                            t.send_text = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+                        "send" => {
+                            if let Value::String(s) = value {
+                                t.send_text = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
+                    Ok(Value::Integer(0))
+                } else {
+                    Ok(Value::Integer(1))
                 }
-                Ok(Value::Integer(0))
-            } else {
-                Ok(Value::Integer(1))
-            }
-        })?;
+            })?;
         globals.set("SetTriggerOption", set_trigger_option_fn)?;
 
         // EnableTriggerGroup(group_name, enable)
         let state_rc14 = state_rc.clone();
-        let enable_trigger_group_fn = lua.create_function_mut(move |_, (group, enable): (String, bool)| {
-            let mut state = state_rc14.borrow_mut();
-            for t in state.triggers.iter_mut() {
-                if !t.group.is_empty() && t.group == group {
-                    t.enabled = enable;
+        let enable_trigger_group_fn =
+            lua.create_function_mut(move |_, (group, enable): (String, bool)| {
+                let mut state = state_rc14.borrow_mut();
+                for t in state.triggers.iter_mut() {
+                    if !t.group.is_empty() && t.group == group {
+                        t.enabled = enable;
+                    }
                 }
-            }
-            Ok(())
-        })?;
+                Ok(())
+            })?;
         globals.set("EnableTriggerGroup", enable_trigger_group_fn)?;
 
         // EnableTrigger(name, enable)
         let state_rc_et = state_rc.clone();
-        let enable_trigger_fn = lua.create_function_mut(move |_, (name, enable): (String, bool)| {
-            let mut state = state_rc_et.borrow_mut();
-            if let Some(t) = state.triggers.iter_mut().find(|t| t.name == name) {
-                t.enabled = enable;
-                Ok(Value::Integer(0))
-            } else {
-                Ok(Value::Integer(1))
-            }
-        })?;
+        let enable_trigger_fn =
+            lua.create_function_mut(move |_, (name, enable): (String, bool)| {
+                let mut state = state_rc_et.borrow_mut();
+                if let Some(t) = state.triggers.iter_mut().find(|t| t.name == name) {
+                    t.enabled = enable;
+                    Ok(Value::Integer(0))
+                } else {
+                    Ok(Value::Integer(1))
+                }
+            })?;
         globals.set("EnableTrigger", enable_trigger_fn)?;
 
         // ============================================================
@@ -431,34 +526,47 @@ impl LuaEngine {
 
         // AddAlias(name, match_str, response, flags, colour, script, send_to)
         let state_rc15 = state_rc.clone();
-        let add_alias_fn = lua.create_function_mut(move |lua, (name, match_str, _response, flags, _colour, script, _send_to): (String, String, String, i64, i64, String, i64)| {
-            let re_str = if (flags & 32) != 0 {
-                match_str.clone()
-            } else {
-                regex_escape(&match_str).replace('*', "(.*)").replace('?', "(.)")
-            };
-            let re = Regex::new(&re_str)
-                .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", re_str, e)))?;
+        let add_alias_fn = lua.create_function_mut(
+            move |lua,
+                  (name, match_str, _response, flags, _colour, script, _send_to): (
+                String,
+                String,
+                String,
+                i64,
+                i64,
+                String,
+                i64,
+            )| {
+                let re_str = if (flags & 32) != 0 {
+                    match_str.clone()
+                } else {
+                    regex_escape(&match_str)
+                        .replace('*', "(.*)")
+                        .replace('?', "(.)")
+                };
+                let re = Regex::new(&re_str)
+                    .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", re_str, e)))?;
 
-            let callback: Function = if script.is_empty() {
-                lua.create_function(|_, _: ()| Ok(()))?
-            } else {
-                let code = format!("return {}", script);
-                match lua.load(&code).eval::<Function>() {
-                    Ok(f) => f,
-                    Err(_) => lua.load(script).eval()?,
-                }
-            };
+                let callback: Function = if script.is_empty() {
+                    lua.create_function(|_, _: ()| Ok(()))?
+                } else {
+                    let code = format!("return {}", script);
+                    match lua.load(&code).eval::<Function>() {
+                        Ok(f) => f,
+                        Err(_) => lua.load(script).eval()?,
+                    }
+                };
 
-            state_rc15.borrow_mut().aliases.push(Alias {
-                name,
-                pattern: re,
-                callback,
-                enabled: (flags & 1) != 0,
-                group: String::new(),
-            });
-            Ok(Value::Integer(0))
-        })?;
+                state_rc15.borrow_mut().aliases.push(Alias {
+                    name,
+                    pattern: re,
+                    callback,
+                    enabled: (flags & 1) != 0,
+                    group: String::new(),
+                });
+                Ok(Value::Integer(0))
+            },
+        )?;
         globals.set("AddAlias", add_alias_fn)?;
 
         // DeleteAlias(name)
@@ -467,7 +575,11 @@ impl LuaEngine {
             let mut state = state_rc16.borrow_mut();
             let before = state.aliases.len();
             state.aliases.retain(|a| a.name != name);
-            if state.aliases.len() < before { Ok(0) } else { Ok(1) }
+            if state.aliases.len() < before {
+                Ok(0)
+            } else {
+                Ok(1)
+            }
         })?;
         globals.set("DeleteAlias", delete_alias_fn)?;
 
@@ -485,29 +597,30 @@ impl LuaEngine {
 
         // SetAliasOption(name, key, value)
         let state_rc18 = state_rc.clone();
-        let set_alias_option_fn = lua.create_function_mut(move |_, (name, key, value): (String, String, Value)| {
-            let mut state = state_rc18.borrow_mut();
-            if let Some(a) = state.aliases.iter_mut().find(|a| a.name == name) {
-                match key.as_str() {
-                    "group" => {
-                        if let Value::String(s) = value {
-                            a.group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+        let set_alias_option_fn =
+            lua.create_function_mut(move |_, (name, key, value): (String, String, Value)| {
+                let mut state = state_rc18.borrow_mut();
+                if let Some(a) = state.aliases.iter_mut().find(|a| a.name == name) {
+                    match key.as_str() {
+                        "group" => {
+                            if let Value::String(s) = value {
+                                a.group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+                            }
                         }
-                    }
-                    "enabled" => {
-                        if let Value::Boolean(b) = value {
-                            a.enabled = b;
-                        } else if let Value::Integer(n) = value {
-                            a.enabled = n != 0;
+                        "enabled" => {
+                            if let Value::Boolean(b) = value {
+                                a.enabled = b;
+                            } else if let Value::Integer(n) = value {
+                                a.enabled = n != 0;
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
+                    Ok(Value::Integer(0))
+                } else {
+                    Ok(Value::Integer(1))
                 }
-                Ok(Value::Integer(0))
-            } else {
-                Ok(Value::Integer(1))
-            }
-        })?;
+            })?;
         globals.set("SetAliasOption", set_alias_option_fn)?;
 
         // ============================================================
@@ -516,24 +629,37 @@ impl LuaEngine {
 
         // AddTimer(name, hour, min, sec, callback, flags, colour, script, send_to)
         let state_rc19 = state_rc.clone();
-        let add_timer_fn = lua.create_function_mut(move |lua, (name, _hour, _min, sec, _callback, flags, _colour, script, _send_to): (String, i64, i64, i64, i64, i64, i64, String, i64)| {
-            let interval = if sec <= 0 { 1 } else { sec as u64 };
-            let one_shot = (flags & 4) != 0;
+        let add_timer_fn = lua.create_function_mut(
+            move |lua,
+                  (name, _hour, _min, sec, _callback, flags, _colour, script, _send_to): (
+                String,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                String,
+                i64,
+            )| {
+                let interval = if sec <= 0 { 1 } else { sec as u64 };
+                let one_shot = (flags & 4) != 0;
 
-            // 将脚本作为 send_text 存储，在 fire_timer 时执行
-            let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
+                // 将脚本作为 send_text 存储，在 fire_timer 时执行
+                let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
 
-            state_rc19.borrow_mut().timers.push(TimerDef {
-                name,
-                interval_secs: interval,
-                callback,
-                enabled: (flags & 1) != 0,
-                group: String::new(),
-                one_shot,
-                send_text: script,
-            });
-            Ok(Value::Integer(0))
-        })?;
+                state_rc19.borrow_mut().timers.push(TimerDef {
+                    name,
+                    interval_secs: interval,
+                    callback,
+                    enabled: (flags & 1) != 0,
+                    group: String::new(),
+                    one_shot,
+                    send_text: script,
+                });
+                Ok(Value::Integer(0))
+            },
+        )?;
         globals.set("AddTimer", add_timer_fn)?;
 
         // DeleteTimer(name)
@@ -542,7 +668,11 @@ impl LuaEngine {
             let mut state = state_rc20.borrow_mut();
             let before = state.timers.len();
             state.timers.retain(|t| t.name != name);
-            if state.timers.len() < before { Ok(0) } else { Ok(1) }
+            if state.timers.len() < before {
+                Ok(0)
+            } else {
+                Ok(1)
+            }
         })?;
         globals.set("DeleteTimer", delete_timer_fn)?;
 
@@ -560,75 +690,79 @@ impl LuaEngine {
 
         // GetTimerInfo(name, code)
         let state_rc22 = state_rc.clone();
-        let get_timer_info_fn = lua.create_function_mut(move |lua, (name, code): (String, i64)| {
-            let state = state_rc22.borrow();
-            if let Some(t) = state.timers.iter().find(|t| t.name == name) {
-                match code {
-                    6 => Ok(Value::Boolean(t.enabled)), // enabled
-                    19 => {
-                        let group = t.group.clone();
-                        Ok(Value::String(lua.create_string(&group)?))
+        let get_timer_info_fn =
+            lua.create_function_mut(move |lua, (name, code): (String, i64)| {
+                let state = state_rc22.borrow();
+                if let Some(t) = state.timers.iter().find(|t| t.name == name) {
+                    match code {
+                        6 => Ok(Value::Boolean(t.enabled)), // enabled
+                        19 => {
+                            let group = t.group.clone();
+                            Ok(Value::String(lua.create_string(&group)?))
+                        }
+                        _ => Ok(Value::Nil),
                     }
-                    _ => Ok(Value::Nil),
+                } else {
+                    Ok(Value::Nil)
                 }
-            } else {
-                Ok(Value::Nil)
-            }
-        })?;
+            })?;
         globals.set("GetTimerInfo", get_timer_info_fn)?;
 
         // SetTimerOption(name, key, value)
         let state_rc23 = state_rc.clone();
-        let set_timer_option_fn = lua.create_function_mut(move |_, (name, key, value): (String, String, Value)| {
-            let mut state = state_rc23.borrow_mut();
-            if let Some(t) = state.timers.iter_mut().find(|t| t.name == name) {
-                match key.as_str() {
-                    "group" => {
-                        if let Value::String(s) = value {
-                            t.group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+        let set_timer_option_fn =
+            lua.create_function_mut(move |_, (name, key, value): (String, String, Value)| {
+                let mut state = state_rc23.borrow_mut();
+                if let Some(t) = state.timers.iter_mut().find(|t| t.name == name) {
+                    match key.as_str() {
+                        "group" => {
+                            if let Value::String(s) = value {
+                                t.group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+                            }
                         }
-                    }
-                    "enabled" => {
-                        if let Value::Boolean(b) = value {
-                            t.enabled = b;
-                        } else if let Value::Integer(n) = value {
-                            t.enabled = n != 0;
+                        "enabled" => {
+                            if let Value::Boolean(b) = value {
+                                t.enabled = b;
+                            } else if let Value::Integer(n) = value {
+                                t.enabled = n != 0;
+                            }
                         }
+                        "send_to" => {}
+                        _ => {}
                     }
-                    "send_to" => {}
-                    _ => {}
+                    Ok(Value::Integer(0))
+                } else {
+                    Ok(Value::Integer(1))
                 }
-                Ok(Value::Integer(0))
-            } else {
-                Ok(Value::Integer(1))
-            }
-        })?;
+            })?;
         globals.set("SetTimerOption", set_timer_option_fn)?;
 
         // EnableTimerGroup(group_name, enable)
         let state_rc24 = state_rc.clone();
-        let enable_timer_group_fn = lua.create_function_mut(move |_, (group, enable): (String, bool)| {
-            let mut state = state_rc24.borrow_mut();
-            for t in state.timers.iter_mut() {
-                if !t.group.is_empty() && t.group == group {
-                    t.enabled = enable;
+        let enable_timer_group_fn =
+            lua.create_function_mut(move |_, (group, enable): (String, bool)| {
+                let mut state = state_rc24.borrow_mut();
+                for t in state.timers.iter_mut() {
+                    if !t.group.is_empty() && t.group == group {
+                        t.enabled = enable;
+                    }
                 }
-            }
-            Ok(())
-        })?;
+                Ok(())
+            })?;
         globals.set("EnableTimerGroup", enable_timer_group_fn)?;
 
         // EnableTimer(name, enable)
         let state_rc_emt = state_rc.clone();
-        let enable_timer_fn = lua.create_function_mut(move |_, (name, enable): (String, bool)| {
-            let mut state = state_rc_emt.borrow_mut();
-            if let Some(t) = state.timers.iter_mut().find(|t| t.name == name) {
-                t.enabled = enable;
-                Ok(Value::Integer(0))
-            } else {
-                Ok(Value::Integer(1))
-            }
-        })?;
+        let enable_timer_fn =
+            lua.create_function_mut(move |_, (name, enable): (String, bool)| {
+                let mut state = state_rc_emt.borrow_mut();
+                if let Some(t) = state.timers.iter_mut().find(|t| t.name == name) {
+                    t.enabled = enable;
+                    Ok(Value::Integer(0))
+                } else {
+                    Ok(Value::Integer(1))
+                }
+            })?;
         globals.set("EnableTimer", enable_timer_fn)?;
 
         // ============================================================
@@ -637,21 +771,19 @@ impl LuaEngine {
 
         // GetInfo(code)
         let script_dir_rc = Rc::new(RefCell::new(self.script_dir.clone()));
-        let get_info_fn = lua.create_function_mut(move |lua, code: i64| {
-            match code {
-                35 => {
-                    let dir = script_dir_rc.borrow().clone();
-                    match dir {
-                        Some(d) => {
-                            let win_path = d.replace('/', "\\");
-                            Ok(Value::String(lua.create_string(&win_path)?))
-                        }
-                        None => Ok(Value::String(lua.create_string(".\\")?)),
+        let get_info_fn = lua.create_function_mut(move |lua, code: i64| match code {
+            35 => {
+                let dir = script_dir_rc.borrow().clone();
+                match dir {
+                    Some(d) => {
+                        let win_path = d.replace('/', "\\");
+                        Ok(Value::String(lua.create_string(&win_path)?))
                     }
+                    None => Ok(Value::String(lua.create_string(".\\")?)),
                 }
-                1 => Ok(Value::String(lua.create_string("RustLuaMud 1.0")?)),
-                _ => Ok(Value::String(lua.create_string("")?)),
             }
+            1 => Ok(Value::String(lua.create_string("RustLuaMud 1.0")?)),
+            _ => Ok(Value::String(lua.create_string("")?)),
         })?;
         globals.set("GetInfo", get_info_fn)?;
 
@@ -673,11 +805,12 @@ impl LuaEngine {
         globals.set("GetOption", get_option_fn)?;
 
         // SetAlphaOption(name, value)
-        let set_alpha_option_fn = lua.create_function(move |lua, (name, value): (String, Value)| {
-            let options: Table = lua.globals().get("_mud_alpha_options")?;
-            options.set(name, value)?;
-            Ok(())
-        })?;
+        let set_alpha_option_fn =
+            lua.create_function(move |lua, (name, value): (String, Value)| {
+                let options: Table = lua.globals().get("_mud_alpha_options")?;
+                options.set(name, value)?;
+                Ok(())
+            })?;
         globals.set("_mud_alpha_options", lua.create_table()?)?;
         globals.set("SetAlphaOption", set_alpha_option_fn)?;
 
@@ -695,9 +828,8 @@ impl LuaEngine {
 
         // IsConnected()
         let state_rc25 = state_rc.clone();
-        let is_connected_fn = lua.create_function_mut(move |_, ()| {
-            Ok(Value::Boolean(state_rc25.borrow().connected))
-        })?;
+        let is_connected_fn = lua
+            .create_function_mut(move |_, ()| Ok(Value::Boolean(state_rc25.borrow().connected)))?;
         globals.set("IsConnected", is_connected_fn)?;
 
         // Connect()
@@ -730,9 +862,7 @@ impl LuaEngine {
         globals.set("GetUniqueNumber", get_unique_number_fn)?;
 
         // Trim(string)
-        let trim_fn = lua.create_function(move |_, s: String| {
-            Ok(s.trim().to_string())
-        })?;
+        let trim_fn = lua.create_function(move |_, s: String| Ok(s.trim().to_string()))?;
         globals.set("Trim", trim_fn)?;
 
         // ============================================================
@@ -752,10 +882,11 @@ impl LuaEngine {
 
         // SetVariable(name, value)
         let state_rc30 = state_rc.clone();
-        let set_variable_fn = lua.create_function_mut(move |_, (name, value): (String, String)| {
-            state_rc30.borrow_mut().variables.insert(name, value);
-            Ok(())
-        })?;
+        let set_variable_fn =
+            lua.create_function_mut(move |_, (name, value): (String, String)| {
+                state_rc30.borrow_mut().variables.insert(name, value);
+                Ok(())
+            })?;
         globals.set("SetVariable", set_variable_fn)?;
 
         // DeleteVariable(name)
@@ -783,15 +914,12 @@ impl LuaEngine {
         // ============================================================
 
         // OpenLog(filename, append)
-        let open_log_fn = lua.create_function(move |_, (_filename, _append): (String, bool)| {
-            Ok(())
-        })?;
+        let open_log_fn =
+            lua.create_function(move |_, (_filename, _append): (String, bool)| Ok(()))?;
         globals.set("OpenLog", open_log_fn)?;
 
         // IsLogOpen()
-        let is_log_open_fn = lua.create_function(move |_, ()| {
-            Ok(Value::Boolean(true))
-        })?;
+        let is_log_open_fn = lua.create_function(move |_, ()| Ok(Value::Boolean(true)))?;
         globals.set("IsLogOpen", is_log_open_fn)?;
 
         // ============================================================
@@ -799,16 +927,13 @@ impl LuaEngine {
         // ============================================================
 
         // DatabaseClose(dbname)
-        let database_close_fn = lua.create_function(move |_, _dbname: String| {
-            Ok(())
-        })?;
+        let database_close_fn = lua.create_function(move |_, _dbname: String| Ok(()))?;
         globals.set("DatabaseClose", database_close_fn)?;
 
         // sqlite3 module
         let sqlite3_mod = lua.create_table()?;
         let open_fn = lua.create_function(|lua, path: String| {
-            let conn = Connection::open(&path)
-                .map_err(|e| mlua::Error::external(e.to_string()))?;
+            let conn = Connection::open(&path).map_err(|e| mlua::Error::external(e.to_string()))?;
             let db = LuaDb {
                 conn: Arc::new(Mutex::new(conn)),
             };
@@ -907,36 +1032,47 @@ impl LuaEngine {
 
         // bit 库
         let bit_mod = lua.create_table()?;
-        bit_mod.set("bor", lua.create_function(|_, (a, b): (i64, i64)| Ok(a | b))?)?;
-        bit_mod.set("band", lua.create_function(|_, (a, b): (i64, i64)| Ok(a & b))?)?;
-        bit_mod.set("bxor", lua.create_function(|_, (a, b): (i64, i64)| Ok(a ^ b))?)?;
+        bit_mod.set(
+            "bor",
+            lua.create_function(|_, (a, b): (i64, i64)| Ok(a | b))?,
+        )?;
+        bit_mod.set(
+            "band",
+            lua.create_function(|_, (a, b): (i64, i64)| Ok(a & b))?,
+        )?;
+        bit_mod.set(
+            "bxor",
+            lua.create_function(|_, (a, b): (i64, i64)| Ok(a ^ b))?,
+        )?;
         bit_mod.set("bnot", lua.create_function(|_, a: i64| Ok(!a))?)?;
-        bit_mod.set("lshift", lua.create_function(|_, (a, n): (i64, i64)| Ok(a << n))?)?;
-        bit_mod.set("rshift", lua.create_function(|_, (a, n): (i64, i64)| Ok(a >> n))?)?;
+        bit_mod.set(
+            "lshift",
+            lua.create_function(|_, (a, n): (i64, i64)| Ok(a << n))?,
+        )?;
+        bit_mod.set(
+            "rshift",
+            lua.create_function(|_, (a, n): (i64, i64)| Ok(a >> n))?,
+        )?;
         globals.set("bit", bit_mod)?;
 
         // MakeRegularExpression(pattern) — 将通配符转为正则
         let make_re_fn = lua.create_function(move |lua, pattern: String| {
-            let re = regex_escape(&pattern)
-                .replace('*', ".*")
-                .replace('?', ".");
+            let re = regex_escape(&pattern).replace('*', ".*").replace('?', ".");
             Ok(Value::String(lua.create_string(&re)?))
         })?;
         globals.set("MakeRegularExpression", make_re_fn)?;
 
         // GetPluginID()
-        let get_plugin_id_fn = lua.create_function(move |lua, ()| {
-            Ok(Value::String(lua.create_string("")?))
-        })?;
+        let get_plugin_id_fn =
+            lua.create_function(move |lua, ()| Ok(Value::String(lua.create_string("")?)))?;
         globals.set("GetPluginID", get_plugin_id_fn)?;
 
         // GetPluginInfo(id, code)
-        let get_plugin_info_fn = lua.create_function(move |lua, (_id, code): (String, i64)| {
-            match code {
+        let get_plugin_info_fn =
+            lua.create_function(move |lua, (_id, code): (String, i64)| match code {
                 1 => Ok(Value::String(lua.create_string("RustLuaMud")?)),
                 _ => Ok(Value::Nil),
-            }
-        })?;
+            })?;
         globals.set("GetPluginInfo", get_plugin_info_fn)?;
 
         // ============================================================
@@ -944,7 +1080,7 @@ impl LuaEngine {
         // ============================================================
 
         // 覆盖 dofile — 支持 GBK 自动转码和路径分隔符兼容
-        let script_path_rc = Rc::new(RefCell::new(self.script_path.clone()));
+        let _script_path_rc = Rc::new(RefCell::new(self.script_path.clone()));
         let dofile_fn = lua.create_function_mut(move |lua, path: String| {
             // 将 \ 替换为 /
             let path = path.replace('\\', "/");
@@ -970,7 +1106,10 @@ impl LuaEngine {
         // 设置 require 路径
         let package: Table = globals.get("package")?;
         let current_path: String = package.get("path")?;
-        let new_path = format!("./scripts/lua/?.lua;./scripts/lua/?/init.lua;{}", current_path);
+        let new_path = format!(
+            "./scripts/lua/?.lua;./scripts/lua/?/init.lua;{}",
+            current_path
+        );
         package.set("path", new_path)?;
 
         // ============================================================
@@ -980,56 +1119,69 @@ impl LuaEngine {
         // table.getn
         {
             let table_mod: Table = globals.get("table")?;
-            table_mod.set("getn", lua.create_function(|_, t: Table| {
-                Ok(t.len().unwrap_or(0))
-            })?)?;
+            table_mod.set(
+                "getn",
+                lua.create_function(|_, t: Table| Ok(t.len().unwrap_or(0)))?,
+            )?;
         }
 
         // table.foreachi
         {
             let table_mod: Table = globals.get("table")?;
-            table_mod.set("foreachi", lua.create_function(|_, (t, f): (Table, Function)| {
-                let len = t.len().unwrap_or(0);
-                for i in 1..=len {
-                    let val: Value = t.get(i).unwrap_or(Value::Nil);
-                    match f.call::<()>((i, val)) {
-                        Ok(_) => {}
-                        Err(e) => { return Err(e); }
+            table_mod.set(
+                "foreachi",
+                lua.create_function(|_, (t, f): (Table, Function)| {
+                    let len = t.len().unwrap_or(0);
+                    for i in 1..=len {
+                        let val: Value = t.get(i).unwrap_or(Value::Nil);
+                        match f.call::<()>((i, val)) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                return Err(e);
+                            }
+                        }
                     }
-                }
-                Ok(())
-            })?)?;
+                    Ok(())
+                })?,
+            )?;
         }
 
         // table.foreach
         {
             let table_mod: Table = globals.get("table")?;
-            table_mod.set("foreach", lua.create_function(|_, (t, f): (Table, Function)| {
-                for pair in t.pairs::<Value, Value>() {
-                    let (k, v) = pair?;
-                    match f.call::<()>((k, v)) {
-                        Ok(_) => {}
-                        Err(e) => { return Err(e); }
+            table_mod.set(
+                "foreach",
+                lua.create_function(|_, (t, f): (Table, Function)| {
+                    for pair in t.pairs::<Value, Value>() {
+                        let (k, v) = pair?;
+                        match f.call::<()>((k, v)) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                return Err(e);
+                            }
+                        }
                     }
-                }
-                Ok(())
-            })?)?;
+                    Ok(())
+                })?,
+            )?;
         }
 
         // math.mod
         {
             let math_mod: Table = globals.get("math")?;
-            math_mod.set("mod", lua.create_function(|_, (a, b): (f64, f64)| {
-                Ok(a % b)
-            })?)?;
+            math_mod.set(
+                "mod",
+                lua.create_function(|_, (a, b): (f64, f64)| Ok(a % b))?,
+            )?;
         }
 
         // math.pow
         {
             let math_mod: Table = globals.get("math")?;
-            math_mod.set("pow", lua.create_function(|_, (a, b): (f64, f64)| {
-                Ok(a.powf(b))
-            })?)?;
+            math_mod.set(
+                "pow",
+                lua.create_function(|_, (a, b): (f64, f64)| Ok(a.powf(b)))?,
+            )?;
         }
 
         // ============================================================
@@ -1038,56 +1190,59 @@ impl LuaEngine {
 
         // trigger(pattern, callback)
         let state_rc33 = state_rc.clone();
-        let trigger_fn = lua.create_function_mut(move |_, (pattern, callback): (String, Function)| {
-            let re = Regex::new(&pattern)
-                .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", pattern, e)))?;
-            state_rc33.borrow_mut().triggers.push(Trigger {
-                name: String::new(),
-                pattern: re,
-                callback,
-                enabled: true,
-                group: String::new(),
-                sequence: 0,
-                multiline: false,
-                lines_to_match: 1,
-                omit_from_output: false,
-                temporary: false,
-                send_text: String::new(),
-            });
-            Ok(())
-        })?;
+        let trigger_fn =
+            lua.create_function_mut(move |_, (pattern, callback): (String, Function)| {
+                let re = Regex::new(&pattern)
+                    .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", pattern, e)))?;
+                state_rc33.borrow_mut().triggers.push(Trigger {
+                    name: String::new(),
+                    pattern: re,
+                    callback,
+                    enabled: true,
+                    group: String::new(),
+                    sequence: 0,
+                    multiline: false,
+                    lines_to_match: 1,
+                    omit_from_output: false,
+                    temporary: false,
+                    send_text: String::new(),
+                });
+                Ok(())
+            })?;
         globals.set("trigger", trigger_fn)?;
 
         // alias(pattern, callback)
         let state_rc34 = state_rc.clone();
-        let alias_fn = lua.create_function_mut(move |_, (pattern, callback): (String, Function)| {
-            let re = Regex::new(&pattern)
-                .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", pattern, e)))?;
-            state_rc34.borrow_mut().aliases.push(Alias {
-                name: String::new(),
-                pattern: re,
-                callback,
-                enabled: true,
-                group: String::new(),
-            });
-            Ok(())
-        })?;
+        let alias_fn =
+            lua.create_function_mut(move |_, (pattern, callback): (String, Function)| {
+                let re = Regex::new(&pattern)
+                    .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", pattern, e)))?;
+                state_rc34.borrow_mut().aliases.push(Alias {
+                    name: String::new(),
+                    pattern: re,
+                    callback,
+                    enabled: true,
+                    group: String::new(),
+                });
+                Ok(())
+            })?;
         globals.set("alias", alias_fn)?;
 
         // timer(interval, callback)
         let state_rc35 = state_rc.clone();
-        let timer_fn = lua.create_function_mut(move |_, (interval_secs, callback): (u64, Function)| {
-            state_rc35.borrow_mut().timers.push(TimerDef {
-                name: String::new(),
-                interval_secs,
-                callback,
-                enabled: true,
-                group: String::new(),
-                one_shot: false,
-                send_text: String::new(),
-            });
-            Ok(())
-        })?;
+        let timer_fn =
+            lua.create_function_mut(move |_, (interval_secs, callback): (u64, Function)| {
+                state_rc35.borrow_mut().timers.push(TimerDef {
+                    name: String::new(),
+                    interval_secs,
+                    callback,
+                    enabled: true,
+                    group: String::new(),
+                    one_shot: false,
+                    send_text: String::new(),
+                });
+                Ok(())
+            })?;
         globals.set("timer", timer_fn)?;
 
         // get(key)
@@ -1111,16 +1266,13 @@ impl LuaEngine {
 
     /// 直接执行 Lua 代码（用于 /eval 命令）
     pub fn eval_code(&self, code: &str) -> Result<(), String> {
-        self.lua.load(code)
-            .exec()
-            .map_err(|e| format!("{}", e))
+        self.lua.load(code).exec().map_err(|e| format!("{}", e))
     }
 
     /// 加载并执行 Lua 脚本文件
     /// 自动检测编码：先尝试 UTF-8，失败（GBK 编码）则自动转码
     pub fn load_script(&mut self, path: &str) -> Result<(), String> {
-        let bytes = std::fs::read(path)
-            .map_err(|e| format!("读取脚本失败 '{}': {}", path, e))?;
+        let bytes = std::fs::read(path).map_err(|e| format!("读取脚本失败 '{}': {}", path, e))?;
 
         let code = match std::str::from_utf8(&bytes) {
             Ok(s) => s.to_string(),
@@ -1130,7 +1282,8 @@ impl LuaEngine {
             }
         };
 
-        self.lua.load(&code)
+        self.lua
+            .load(&code)
             .set_name(path)
             .exec()
             .map_err(|e| format!("脚本执行错误 '{}': {}", path, e))?;
@@ -1166,12 +1319,15 @@ impl LuaEngine {
             let state = self.state.borrow();
             let mut result = Vec::new();
             for (i, trigger) in state.triggers.iter().enumerate() {
-                if !trigger.enabled { continue; }
+                if !trigger.enabled {
+                    continue;
+                }
 
                 if trigger.multiline && trigger.lines_to_match > 1 {
                     let n = trigger.lines_to_match;
                     if state.recent_lines.len() >= n {
-                        let combined: String = state.recent_lines
+                        let combined: String = state
+                            .recent_lines
                             .iter()
                             .rev()
                             .take(n)
@@ -1181,9 +1337,11 @@ impl LuaEngine {
                             .join("\n");
                         // 多行模式下让 . 匹配换行符
                         let multiline_pattern = format!("(?s){}", trigger.pattern.as_str());
-                        let multiline_re = Regex::new(&multiline_pattern).unwrap_or_else(|_| trigger.pattern.clone());
+                        let multiline_re = Regex::new(&multiline_pattern)
+                            .unwrap_or_else(|_| trigger.pattern.clone());
                         if let Some(caps) = multiline_re.captures(&combined) {
-                            let caps_list: Vec<String> = caps.iter()
+                            let caps_list: Vec<String> = caps
+                                .iter()
                                 .skip(1)
                                 .flatten()
                                 .map(|m| m.as_str().to_string())
@@ -1193,7 +1351,8 @@ impl LuaEngine {
                     }
                 } else {
                     if let Some(caps) = trigger.pattern.captures(&clean_line) {
-                        let caps_list: Vec<String> = caps.iter()
+                        let caps_list: Vec<String> = caps
+                            .iter()
                             .skip(1)
                             .flatten()
                             .map(|m| m.as_str().to_string())
@@ -1209,7 +1368,10 @@ impl LuaEngine {
         for (idx, caps_list) in matches {
             let (callback, send_text) = {
                 let state = self.state.borrow();
-                (state.triggers[idx].callback.clone(), state.triggers[idx].send_text.clone())
+                (
+                    state.triggers[idx].callback.clone(),
+                    state.triggers[idx].send_text.clone(),
+                )
             };
             if let Ok(args_table) = self.lua.create_table() {
                 for (i, m) in caps_list.iter().enumerate() {
@@ -1231,9 +1393,12 @@ impl LuaEngine {
             let state = self.state.borrow();
             let mut result = Vec::new();
             for (i, alias) in state.aliases.iter().enumerate() {
-                if !alias.enabled { continue; }
+                if !alias.enabled {
+                    continue;
+                }
                 if let Some(caps) = alias.pattern.captures(input) {
-                    let caps_list: Vec<String> = caps.iter()
+                    let caps_list: Vec<String> = caps
+                        .iter()
                         .skip(1)
                         .flatten()
                         .map(|m| m.as_str().to_string())
@@ -1272,7 +1437,11 @@ impl LuaEngine {
         let (callback, send_text, one_shot) = {
             let state = self.state.borrow();
             if index < state.timers.len() && state.timers[index].enabled {
-                (state.timers[index].callback.clone(), state.timers[index].send_text.clone(), state.timers[index].one_shot)
+                (
+                    state.timers[index].callback.clone(),
+                    state.timers[index].send_text.clone(),
+                    state.timers[index].one_shot,
+                )
             } else {
                 return;
             }
@@ -1297,14 +1466,18 @@ impl LuaEngine {
 
     /// 设置 Lua 变量
     pub fn set_variable(&mut self, key: &str, value: &str) {
-        self.state.borrow_mut().variables.insert(key.to_string(), value.to_string());
+        self.state
+            .borrow_mut()
+            .variables
+            .insert(key.to_string(), value.to_string());
     }
 
+    #[allow(dead_code)]
     /// 设置连接状态
     pub fn set_connected(&mut self, connected: bool) {
         self.state.borrow_mut().connected = connected;
     }
-
+    #[allow(dead_code)]
     /// 取出连接请求标志（一次性消费）
     pub fn take_connect_requested(&self) -> bool {
         let val = self.state.borrow_mut().connect_requested;
@@ -1314,6 +1487,7 @@ impl LuaEngine {
         val
     }
 
+    #[allow(dead_code)]
     /// 取出断开请求标志（一次性消费）
     pub fn take_disconnect_requested(&self) -> bool {
         let val = self.state.borrow_mut().disconnect_requested;
@@ -1330,22 +1504,28 @@ impl LuaEngine {
 
     /// 获取定时器列表（interval_secs）
     pub fn timer_intervals(&self) -> Vec<u64> {
-        self.state.borrow().timers.iter()
+        self.state
+            .borrow()
+            .timers
+            .iter()
             .filter(|t| t.enabled)
             .map(|t| t.interval_secs)
             .collect()
     }
 
+    #[allow(dead_code)]
     /// 获取触发器数量
     pub fn trigger_count(&self) -> usize {
         self.state.borrow().triggers.len()
     }
 
+    #[allow(dead_code)]
     /// 获取别名数量
     pub fn alias_count(&self) -> usize {
         self.state.borrow().aliases.len()
     }
 
+    #[allow(dead_code)]
     /// 获取定时器数量
     pub fn timer_count(&self) -> usize {
         self.state.borrow().timers.len()
@@ -1353,6 +1533,7 @@ impl LuaEngine {
 }
 
 /// 添加触发器的通用实现
+#[allow(clippy::too_many_arguments)]
 fn add_trigger_impl(
     lua: &Lua,
     state_rc: &Rc<RefCell<ScriptState>>,
@@ -1369,7 +1550,9 @@ fn add_trigger_impl(
     let re_str = if is_regex {
         match_str.to_string()
     } else {
-        regex_escape(match_str).replace('*', "(.*)").replace('?', "(.)")
+        regex_escape(match_str)
+            .replace('*', "(.*)")
+            .replace('?', "(.)")
     };
 
     let re_str = if case_insensitive {
@@ -1467,7 +1650,10 @@ mod tests {
         with_engine(|engine| {
             engine.set_script_path("/home/user/scripts/main.lua");
             assert_eq!(engine.script_dir, Some("/home/user/scripts/".to_string()));
-            assert_eq!(engine.script_path, Some("/home/user/scripts/main.lua".to_string()));
+            assert_eq!(
+                engine.script_path,
+                Some("/home/user/scripts/main.lua".to_string())
+            );
         });
     }
 
@@ -1540,9 +1726,11 @@ mod tests {
     #[test]
     fn test_add_trigger() {
         with_engine(|engine| {
-            let result: i64 = eval(engine,
-                "return AddTrigger('test_trig', 'hello', '', 1, 0, 0, '', '', 0, 0)"
-            ).unwrap();
+            let result: i64 = eval(
+                engine,
+                "return AddTrigger('test_trig', 'hello', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             assert_eq!(result, 0);
             assert_eq!(engine.trigger_count(), 1);
         });
@@ -1551,9 +1739,11 @@ mod tests {
     #[test]
     fn test_add_trigger_regex() {
         with_engine(|engine| {
-            let result: i64 = eval(engine,
-                r#"return AddTrigger('regex_trig', [[^\d+hp]], '', 33, 0, 0, '', '', 0, 0)"#
-            ).unwrap();
+            let result: i64 = eval(
+                engine,
+                r#"return AddTrigger('regex_trig', [[^\d+hp]], '', 33, 0, 0, '', '', 0, 0)"#,
+            )
+            .unwrap();
             assert_eq!(result, 0);
         });
     }
@@ -1561,9 +1751,11 @@ mod tests {
     #[test]
     fn test_add_trigger_case_insensitive() {
         with_engine(|engine| {
-            let result: i64 = eval(engine,
-                "return AddTrigger('ci_trig', 'HELLO', '', 17, 0, 0, '', '', 0, 0)"
-            ).unwrap();
+            let result: i64 = eval(
+                engine,
+                "return AddTrigger('ci_trig', 'HELLO', '', 17, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             assert_eq!(result, 0);
         });
     }
@@ -1571,9 +1763,11 @@ mod tests {
     #[test]
     fn test_delete_trigger() {
         with_engine(|engine| {
-            exec(engine,
-                "AddTrigger('del_trig', 'test', '', 1, 0, 0, '', '', 0, 0)"
-            ).unwrap();
+            exec(
+                engine,
+                "AddTrigger('del_trig', 'test', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             assert_eq!(engine.trigger_count(), 1);
             let result: i64 = eval(engine, "return DeleteTrigger('del_trig')").unwrap();
             assert_eq!(result, 0);
@@ -1592,11 +1786,21 @@ mod tests {
     #[test]
     fn test_get_trigger_list() {
         with_engine(|engine| {
-            exec(engine, "AddTrigger('trig1', 'a', '', 1, 0, 0, '', '', 0, 0)").unwrap();
-            exec(engine, "AddTrigger('trig2', 'b', '', 1, 0, 0, '', '', 0, 0)").unwrap();
-            let list: Vec<String> = eval(engine,
-                "local t = GetTriggerList(); local r = {}; for i=1,#t do r[i]=t[i] end; return r"
-            ).unwrap();
+            exec(
+                engine,
+                "AddTrigger('trig1', 'a', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
+            exec(
+                engine,
+                "AddTrigger('trig2', 'b', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
+            let list: Vec<String> = eval(
+                engine,
+                "local t = GetTriggerList(); local r = {}; for i=1,#t do r[i]=t[i] end; return r",
+            )
+            .unwrap();
             assert!(list.contains(&"trig1".to_string()));
             assert!(list.contains(&"trig2".to_string()));
         });
@@ -1605,7 +1809,11 @@ mod tests {
     #[test]
     fn test_get_trigger_info_enabled() {
         with_engine(|engine| {
-            exec(engine, "AddTrigger('info_trig', 'test', '', 1, 0, 0, '', '', 0, 0)").unwrap();
+            exec(
+                engine,
+                "AddTrigger('info_trig', 'test', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             let enabled: bool = eval(engine, "return GetTriggerInfo('info_trig', 8)").unwrap();
             assert!(enabled);
         });
@@ -1614,7 +1822,11 @@ mod tests {
     #[test]
     fn test_get_trigger_info_group() {
         with_engine(|engine| {
-            exec(engine, "AddTrigger('grp_trig', 'test', '', 1, 0, 0, '', '', 0, 0)").unwrap();
+            exec(
+                engine,
+                "AddTrigger('grp_trig', 'test', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             exec(engine, "SetTriggerOption('grp_trig', 'group', 'mygroup')").unwrap();
             let group: String = eval(engine, "return GetTriggerInfo('grp_trig', 26)").unwrap();
             assert_eq!(group, "mygroup");
@@ -1624,7 +1836,11 @@ mod tests {
     #[test]
     fn test_set_trigger_option() {
         with_engine(|engine| {
-            exec(engine, "AddTrigger('opt_trig', 'test', '', 1, 0, 0, '', '', 0, 0)").unwrap();
+            exec(
+                engine,
+                "AddTrigger('opt_trig', 'test', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             exec(engine, "SetTriggerOption('opt_trig', 'enabled', false)").unwrap();
             let enabled: bool = eval(engine, "return GetTriggerInfo('opt_trig', 8)").unwrap();
             assert!(!enabled);
@@ -1634,7 +1850,11 @@ mod tests {
     #[test]
     fn test_set_trigger_option_multiline() {
         with_engine(|engine| {
-            exec(engine, "AddTrigger('ml_trig', 'test', '', 1, 0, 0, '', '', 0, 0)").unwrap();
+            exec(
+                engine,
+                "AddTrigger('ml_trig', 'test', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             let result: i64 = eval(engine,
                 "SetTriggerOption('ml_trig', 'multi_line', true); SetTriggerOption('ml_trig', 'lines_to_match', 3); return 0"
             ).unwrap();
@@ -1660,7 +1880,11 @@ mod tests {
     #[test]
     fn test_enable_trigger_group_skips_empty_group() {
         with_engine(|engine| {
-            exec(engine, "AddTrigger('nogrp', 'x', '', 1, 0, 0, '', '', 0, 0)").unwrap();
+            exec(
+                engine,
+                "AddTrigger('nogrp', 'x', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             exec(engine, "EnableTriggerGroup('somegroup', false)").unwrap();
             let enabled: bool = eval(engine, "return GetTriggerInfo('nogrp', 8)").unwrap();
             assert!(enabled); // 空group的触发器不应被影响
@@ -1670,7 +1894,11 @@ mod tests {
     #[test]
     fn test_enable_trigger() {
         with_engine(|engine| {
-            exec(engine, "AddTrigger('et', 'test', '', 1, 0, 0, '', '', 0, 0)").unwrap();
+            exec(
+                engine,
+                "AddTrigger('et', 'test', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             exec(engine, "EnableTrigger('et', false)").unwrap();
             let enabled: bool = eval(engine, "return GetTriggerInfo('et', 8)").unwrap();
             assert!(!enabled);
@@ -1743,9 +1971,11 @@ mod tests {
     #[test]
     fn test_add_trigger_ex_same_as_add_trigger() {
         with_engine(|engine| {
-            let result: i64 = eval(engine,
-                "return AddTriggerEx('ex_trig', 'test', '', 1, 0, 0, '', '', 0, 0)"
-            ).unwrap();
+            let result: i64 = eval(
+                engine,
+                "return AddTriggerEx('ex_trig', 'test', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             assert_eq!(result, 0);
             assert_eq!(engine.trigger_count(), 1);
         });
@@ -1754,8 +1984,16 @@ mod tests {
     #[test]
     fn test_trigger_omit_from_output() {
         with_engine(|engine| {
-            exec(engine, "AddTrigger('omit_trig', 'secret', '', 1, 0, 0, '', '', 0, 0)").unwrap();
-            exec(engine, "SetTriggerOption('omit_trig', 'omit_from_output', true)").unwrap();
+            exec(
+                engine,
+                "AddTrigger('omit_trig', 'secret', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
+            exec(
+                engine,
+                "SetTriggerOption('omit_trig', 'omit_from_output', true)",
+            )
+            .unwrap();
             // omit_from_output 标记已设置，验证通过 GetTriggerInfo 间接确认
             // 实际的 omit 行为由 app 层处理
             assert_eq!(engine.trigger_count(), 1);
@@ -1766,9 +2004,11 @@ mod tests {
     fn test_trigger_temporary_flag() {
         with_engine(|engine| {
             // flag 4096 = Temporary
-            let result: i64 = eval(engine,
-                "return AddTrigger('temp_trig', 'test', '', 4097, 0, 0, '', '', 0, 0)"
-            ).unwrap();
+            let result: i64 = eval(
+                engine,
+                "return AddTrigger('temp_trig', 'test', '', 4097, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             assert_eq!(result, 0);
         });
     }
@@ -1776,9 +2016,11 @@ mod tests {
     #[test]
     fn test_trigger_sequence() {
         with_engine(|engine| {
-            let result: i64 = eval(engine,
-                "return AddTrigger('seq_trig', 'test', '', 1, 0, 0, '', '', 0, 100)"
-            ).unwrap();
+            let result: i64 = eval(
+                engine,
+                "return AddTrigger('seq_trig', 'test', '', 1, 0, 0, '', '', 0, 100)",
+            )
+            .unwrap();
             assert_eq!(result, 0);
         });
     }
@@ -1786,7 +2028,11 @@ mod tests {
     #[test]
     fn test_get_trigger_info_unknown_code() {
         with_engine(|engine| {
-            exec(engine, "AddTrigger('unk_trig', 'test', '', 1, 0, 0, '', '', 0, 0)").unwrap();
+            exec(
+                engine,
+                "AddTrigger('unk_trig', 'test', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             let val: Value = eval(engine, "return GetTriggerInfo('unk_trig', 999)").unwrap();
             assert!(val.is_nil());
         });
@@ -1803,7 +2049,11 @@ mod tests {
     #[test]
     fn test_set_trigger_option_not_found() {
         with_engine(|engine| {
-            let result: i64 = eval(engine, "return SetTriggerOption('nonexistent', 'enabled', true)").unwrap();
+            let result: i64 = eval(
+                engine,
+                "return SetTriggerOption('nonexistent', 'enabled', true)",
+            )
+            .unwrap();
             assert_eq!(result, 1); // 1 = not found
         });
     }
@@ -1815,9 +2065,11 @@ mod tests {
     #[test]
     fn test_add_alias() {
         with_engine(|engine| {
-            let result: i64 = eval(engine,
-                "return AddAlias('test_alias', 'kill *', '', 1, 0, '', 0)"
-            ).unwrap();
+            let result: i64 = eval(
+                engine,
+                "return AddAlias('test_alias', 'kill *', '', 1, 0, '', 0)",
+            )
+            .unwrap();
             assert_eq!(result, 0);
             assert_eq!(engine.alias_count(), 1);
         });
@@ -1826,9 +2078,11 @@ mod tests {
     #[test]
     fn test_add_alias_regex() {
         with_engine(|engine| {
-            let result: i64 = eval(engine,
-                r#"return AddAlias('regex_alias', [[^go (\w+)$]], '', 33, 0, '', 0)"#
-            ).unwrap();
+            let result: i64 = eval(
+                engine,
+                r#"return AddAlias('regex_alias', [[^go (\w+)$]], '', 33, 0, '', 0)"#,
+            )
+            .unwrap();
             assert_eq!(result, 0);
         });
     }
@@ -1856,9 +2110,11 @@ mod tests {
         with_engine(|engine| {
             exec(engine, "AddAlias('a1', 'x', '', 1, 0, '', 0)").unwrap();
             exec(engine, "AddAlias('a2', 'y', '', 1, 0, '', 0)").unwrap();
-            let list: Vec<String> = eval(engine,
-                "local t = GetAliasList(); local r = {}; for i=1,#t do r[i]=t[i] end; return r"
-            ).unwrap();
+            let list: Vec<String> = eval(
+                engine,
+                "local t = GetAliasList(); local r = {}; for i=1,#t do r[i]=t[i] end; return r",
+            )
+            .unwrap();
             assert!(list.contains(&"a1".to_string()));
             assert!(list.contains(&"a2".to_string()));
         });
@@ -1869,7 +2125,11 @@ mod tests {
         with_engine(|engine| {
             exec(engine, "AddAlias('opt_alias', 'test', '', 1, 0, '', 0)").unwrap();
             exec(engine, "SetAliasOption('opt_alias', 'group', 'mygroup')").unwrap();
-            let result: i64 = eval(engine, "return SetAliasOption('opt_alias', 'enabled', false)").unwrap();
+            let result: i64 = eval(
+                engine,
+                "return SetAliasOption('opt_alias', 'enabled', false)",
+            )
+            .unwrap();
             assert_eq!(result, 0);
         });
     }
@@ -1877,7 +2137,11 @@ mod tests {
     #[test]
     fn test_set_alias_option_not_found() {
         with_engine(|engine| {
-            let result: i64 = eval(engine, "return SetAliasOption('nonexistent', 'enabled', true)").unwrap();
+            let result: i64 = eval(
+                engine,
+                "return SetAliasOption('nonexistent', 'enabled', true)",
+            )
+            .unwrap();
             assert_eq!(result, 1);
         });
     }
@@ -1931,10 +2195,14 @@ mod tests {
     #[test]
     fn test_alias_wildcard_question_mark() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 qm_result = nil
                 AddAlias('qm_alias', 'go ?', '', 1, 0, 'function(t) qm_result = t[1] end', 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let matched = engine.process_input("go n");
             assert!(matched);
             let result: Option<String> = eval(engine, "return qm_result").unwrap();
@@ -1949,9 +2217,11 @@ mod tests {
     #[test]
     fn test_add_timer() {
         with_engine(|engine| {
-            let result: i64 = eval(engine,
-                "return AddTimer('test_timer', 0, 0, 5, 0, 1, 0, '', 0)"
-            ).unwrap();
+            let result: i64 = eval(
+                engine,
+                "return AddTimer('test_timer', 0, 0, 5, 0, 1, 0, '', 0)",
+            )
+            .unwrap();
             assert_eq!(result, 0);
             assert_eq!(engine.timer_count(), 1);
         });
@@ -1980,9 +2250,11 @@ mod tests {
         with_engine(|engine| {
             exec(engine, "AddTimer('t1', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
             exec(engine, "AddTimer('t2', 0, 0, 10, 0, 1, 0, '', 0)").unwrap();
-            let list: Vec<String> = eval(engine,
-                "local t = GetTimerList(); local r = {}; for i=1,#t do r[i]=t[i] end; return r"
-            ).unwrap();
+            let list: Vec<String> = eval(
+                engine,
+                "local t = GetTimerList(); local r = {}; for i=1,#t do r[i]=t[i] end; return r",
+            )
+            .unwrap();
             assert!(list.contains(&"t1".to_string()));
             assert!(list.contains(&"t2".to_string()));
         });
@@ -2083,10 +2355,14 @@ mod tests {
     #[test]
     fn test_fire_timer() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 timer_result = nil
                 AddTimer('fire_t', 0, 0, 5, 0, 1, 0, 'timer_result = "fired"', 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.fire_timer(0);
             let result: Option<String> = eval(engine, "return timer_result").unwrap();
             assert_eq!(result, Some("fired".to_string()));
@@ -2107,10 +2383,14 @@ mod tests {
     #[test]
     fn test_fire_timer_disabled() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 disabled_timer_result = nil
                 AddTimer('dis_t', 0, 0, 5, 0, 0, 0, 'disabled_timer_result = true', 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.fire_timer(0);
             let result: Option<bool> = eval(engine, "return disabled_timer_result").unwrap();
             assert_eq!(result, None);
@@ -2458,7 +2738,8 @@ mod tests {
     #[test]
     fn test_make_regular_expression() {
         with_engine(|engine| {
-            let result: String = eval(engine, "return MakeRegularExpression('hello * world?')").unwrap();
+            let result: String =
+                eval(engine, "return MakeRegularExpression('hello * world?')").unwrap();
             assert_eq!(result, "hello .* world.");
         });
     }
@@ -2494,11 +2775,15 @@ mod tests {
     #[test]
     fn test_table_foreachi() {
         with_engine(|engine| {
-            let result: i64 = eval(engine, r#"
+            let result: i64 = eval(
+                engine,
+                r#"
                 local sum = 0
                 table.foreachi({10, 20, 30}, function(i, v) sum = sum + v end)
                 return sum
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert_eq!(result, 60);
         });
     }
@@ -2506,12 +2791,16 @@ mod tests {
     #[test]
     fn test_table_foreach() {
         with_engine(|engine| {
-            let result: i64 = eval(engine, r#"
+            let result: i64 = eval(
+                engine,
+                r#"
                 local sum = 0
                 local t = {a=1, b=2, c=3}
                 table.foreach(t, function(k, v) sum = sum + v end)
                 return sum
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert_eq!(result, 6);
         });
     }
@@ -2572,12 +2861,16 @@ mod tests {
     #[test]
     fn test_sqlite3_open_close() {
         with_engine(|engine| {
-            let result: i64 = eval(engine, r#"
+            let result: i64 = eval(
+                engine,
+                r#"
                 local db = sqlite3.open("/tmp/test_rustluamud.db")
                 db:exec("CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY, name TEXT)")
                 db:close()
                 return 0
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert_eq!(result, 0);
         });
     }
@@ -2585,7 +2878,9 @@ mod tests {
     #[test]
     fn test_sqlite3_insert_query() {
         with_engine(|engine| {
-            let result: i64 = eval(engine, r#"
+            let result: i64 = eval(
+                engine,
+                r#"
                 local db = sqlite3.open("/tmp/test_rustluamud2.db")
                 db:exec("DROP TABLE IF EXISTS test")
                 db:exec("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
@@ -2596,7 +2891,9 @@ mod tests {
                 stmt = nil
                 db:close()
                 return name == 'hello' and 1 or 0
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert_eq!(result, 1);
         });
     }
@@ -2616,10 +2913,14 @@ mod tests {
     #[test]
     fn test_trigger_send_text() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 AddTrigger('send_trig', 'go', '', 1, 0, 0, '', '', 0, 0)
                 SetTriggerOption('send_trig', 'send', 'north')
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.process_output("go");
             let cmds = engine.drain_commands();
             assert!(cmds.contains(&"north".to_string()));
@@ -2633,10 +2934,14 @@ mod tests {
     #[test]
     fn test_original_trigger_api() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 orig_result = nil
                 trigger([[^hello (\w+)$]], function(t) orig_result = t[1] end)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.process_output("hello Rust");
             let result: Option<String> = eval(engine, "return orig_result").unwrap();
             assert_eq!(result, Some("Rust".to_string()));
@@ -2646,10 +2951,14 @@ mod tests {
     #[test]
     fn test_original_alias_api() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 orig_alias_result = nil
                 alias('^go (.+)$', function(t) orig_alias_result = t[1] end)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let matched = engine.process_input("go north");
             assert!(matched);
             let result: Option<String> = eval(engine, "return orig_alias_result").unwrap();

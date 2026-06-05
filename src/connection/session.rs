@@ -1,4 +1,3 @@
-use std::io::{self, Read, Write};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -11,6 +10,7 @@ pub enum SessionState {
     Disconnected,
     Connecting,
     Connected,
+    #[allow(dead_code)]
     Reconnecting,
 }
 
@@ -124,7 +124,9 @@ fn strip_telnet_iac(bytes: &[u8]) -> Vec<u8> {
 
 impl Session {
     pub fn new(id: usize, config: &ConnectionConfig) -> Self {
-        let encoding = if config.encoding.as_deref() == Some("gbk") || config.encoding.as_deref() == Some("GBK") {
+        let encoding = if config.encoding.as_deref() == Some("gbk")
+            || config.encoding.as_deref() == Some("GBK")
+        {
             Encoding::Gbk
         } else {
             Encoding::Utf8
@@ -166,9 +168,9 @@ impl Session {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
-        let auto_reconnect = self.auto_reconnect;
+        let _auto_reconnect = self.auto_reconnect;
         let encoding = self.encoding.clone();
-        let session_id = self.id;
+        let _session_id = self.id;
 
         // 读取任务：从服务器接收数据，按行读取并转码
         let event_tx_read = event_tx.clone();
@@ -184,9 +186,9 @@ impl Session {
                     match reader.read(&mut one_byte).await {
                         Ok(0) => {
                             // 连接关闭
-                            let _ = event_tx_read.send(SessionEvent::StateChange(
-                                SessionState::Disconnected,
-                            )).await;
+                            let _ = event_tx_read
+                                .send(SessionEvent::StateChange(SessionState::Disconnected))
+                                .await;
                             return;
                         }
                         Ok(_) => {
@@ -196,12 +198,12 @@ impl Session {
                             }
                         }
                         Err(e) => {
-                            let _ = event_tx_read.send(SessionEvent::Error(
-                                format!("读取错误: {}", e),
-                            )).await;
-                            let _ = event_tx_read.send(SessionEvent::StateChange(
-                                SessionState::Disconnected,
-                            )).await;
+                            let _ = event_tx_read
+                                .send(SessionEvent::Error(format!("读取错误: {}", e)))
+                                .await;
+                            let _ = event_tx_read
+                                .send(SessionEvent::StateChange(SessionState::Disconnected))
+                                .await;
                             return;
                         }
                     }
@@ -239,16 +241,18 @@ impl Session {
                 let mut packet = bytes;
                 packet.extend_from_slice(b"\r\n");
                 if let Err(e) = write_half.write_all(&packet).await {
-                    let _ = event_tx_write.send(SessionEvent::Error(
-                        format!("发送失败: {}", e),
-                    )).await;
+                    let _ = event_tx_write
+                        .send(SessionEvent::Error(format!("发送失败: {}", e)))
+                        .await;
                     break;
                 }
             }
         });
 
         // 通知连接成功
-        let _ = event_tx.send(SessionEvent::StateChange(SessionState::Connected)).await;
+        let _ = event_tx
+            .send(SessionEvent::StateChange(SessionState::Connected))
+            .await;
 
         Ok(event_rx)
     }
