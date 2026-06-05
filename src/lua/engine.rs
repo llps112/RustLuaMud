@@ -1112,6 +1112,12 @@ impl LuaEngine {
         );
         package.set("path", new_path)?;
 
+        // 注册 MushClient 兼容模块（空表，避免 require 报错）
+        let loaded: Table = package.get("loaded")?;
+        for module in &["InfoBox", "Gauge", "Miniwin"] {
+            loaded.set(*module, lua.create_table()?)?;
+        }
+
         // ============================================================
         // Lua 兼容性补丁
         // ============================================================
