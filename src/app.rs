@@ -137,33 +137,11 @@ impl App {
     pub fn new(config: AppConfig) -> io::Result<Self> {
         let mut manager = ConnectionManager::new();
 
-        // 先加载配置文件中的连接
+        // 加载配置文件中的连接（load_default 已从 profiles 目录加载）
         for conn_config in &config.connections {
             if let Err(e) = manager.add_connection(conn_config) {
                 eprintln!("警告: {}", e);
             }
-        }
-
-        // 再从 profile 目录加载角色配置
-        let (profiles, skipped) = AppConfig::load_profiles(&config.general.profile_dir);
-        let profile_count = profiles.len();
-        if !profiles.is_empty() {
-            let remaining = 10 - manager.sessions.len();
-            for (i, profile) in profiles.into_iter().enumerate() {
-                if i >= remaining {
-                    eprintln!(
-                        "警告: 已达最大连接数 (10)，跳过剩余 {} 个角色配置",
-                        profile_count.saturating_sub(remaining)
-                    );
-                    break;
-                }
-                if let Err(e) = manager.add_connection(&profile) {
-                    eprintln!("警告: {}", e);
-                }
-            }
-        }
-        if skipped > 0 {
-            eprintln!("警告: {} 个角色配置文件格式错误，已跳过", skipped);
         }
 
         let terminal = Terminal::new()?;
@@ -330,15 +308,17 @@ impl App {
 
         match crate::lua::LuaEngine::new() {
             Ok(mut engine) => {
-                // 注入登录凭证到 Lua 变量
+                // 注入登录凭证到 Lua 变量和全局变量
                 if let Some(ref name) = username {
                     if !name.is_empty() {
                         engine.set_variable("char_name", name);
+                        engine.set_global("char_name", name);
                     }
                 }
                 if let Some(ref pwd) = password {
                     if !pwd.is_empty() {
                         engine.set_variable("char_password", pwd);
+                        engine.set_global("char_password", pwd);
                     }
                 }
 

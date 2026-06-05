@@ -1464,12 +1464,18 @@ impl LuaEngine {
         self.state.borrow_mut().pending_commands.drain(..).collect()
     }
 
-    /// 设置 Lua 变量
+    /// 设置 Lua 变量（内部 HashMap，通过 GetVariable 访问）
     pub fn set_variable(&mut self, key: &str, value: &str) {
         self.state
             .borrow_mut()
             .variables
             .insert(key.to_string(), value.to_string());
+    }
+
+    /// 设置 Lua 全局变量（脚本中可直接按名引用）
+    pub fn set_global(&self, name: &str, value: &str) {
+        let globals = self.lua.globals();
+        let _ = globals.set(name, value);
     }
 
     #[allow(dead_code)]
