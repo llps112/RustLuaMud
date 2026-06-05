@@ -380,9 +380,9 @@ fn coerce_to_i64(value: mlua::Value) -> mlua::Result<i64> {
         mlua::Value::Number(n) => Ok(n as i64),
         mlua::Value::String(s) => {
             let str_val = s.to_str()?;
-            str_val.parse::<i64>().map_err(|_| {
-                mlua::Error::external(format!("无法将 '{}' 转换为整数", str_val))
-            })
+            str_val
+                .parse::<i64>()
+                .map_err(|_| mlua::Error::external(format!("无法将 '{}' 转换为整数", str_val)))
         }
         _ => Err(mlua::Error::external("期望数字或可转换为数字的值")),
     }
@@ -405,9 +405,9 @@ fn coerce_to_f64(value: mlua::Value) -> mlua::Result<f64> {
         mlua::Value::Number(n) => Ok(n),
         mlua::Value::String(s) => {
             let str_val = s.to_str()?;
-            str_val.parse::<f64>().map_err(|_| {
-                mlua::Error::external(format!("无法将 '{}' 转换为数字", str_val))
-            })
+            str_val
+                .parse::<f64>()
+                .map_err(|_| mlua::Error::external(format!("无法将 '{}' 转换为数字", str_val)))
         }
         _ => Err(mlua::Error::external("期望数字或可转换为数字的值")),
     }
@@ -498,10 +498,7 @@ impl LuaEngine {
         // DeleteTemporaryTimers() — MushClient API: 删除所有临时定时器
         let state_rc_dtt = state_rc.clone();
         let delete_temp_timers_fn = lua.create_function_mut(move |_, ()| {
-            state_rc_dtt
-                .borrow_mut()
-                .timers
-                .retain(|t| !t.one_shot);
+            state_rc_dtt.borrow_mut().timers.retain(|t| !t.one_shot);
             Ok(())
         })?;
         globals.set("DeleteTemporaryTimers", delete_temp_timers_fn)?;
@@ -592,55 +589,53 @@ impl LuaEngine {
         // AddTriggerEx(name, match_str, response_text, flags, [colour], [wildcard], [sound], [script], [send_to], [sequence])
         // MushClient API 兼容：中间参数可选，可能传 nil
         let state_rc9 = state_rc.clone();
-        let add_trigger_ex_fn = lua.create_function_mut(
-            move |lua, args: mlua::MultiValue| {
-                let args: Vec<mlua::Value> = args.into_vec();
+        let add_trigger_ex_fn = lua.create_function_mut(move |lua, args: mlua::MultiValue| {
+            let args: Vec<mlua::Value> = args.into_vec();
 
-                // 至少需要4个参数: name, match_str, response_text, flags
-                if args.len() < 4 {
-                    return Err(mlua::Error::external(
-                        "AddTriggerEx 需要至少4个参数: name, match_str, response_text, flags",
-                    ));
-                }
+            // 至少需要4个参数: name, match_str, response_text, flags
+            if args.len() < 4 {
+                return Err(mlua::Error::external(
+                    "AddTriggerEx 需要至少4个参数: name, match_str, response_text, flags",
+                ));
+            }
 
-                let name: String = coerce_to_string(args[0].clone())?;
-                let match_str: String = coerce_to_string(args[1].clone())?;
-                let _response: String = coerce_to_string(args[2].clone())?;
-                let flags: i64 = coerce_to_i64(args[3].clone())?;
-                // 第5个参数 colour（可选，忽略）
-                // 第6个参数 wildcard（可选，忽略）
-                // 第7个参数 sound（可选，忽略）
-                // 第8个参数 script（可选）
-                let script = if args.len() > 7 && !args[7].is_nil() {
-                    coerce_to_string(args[7].clone())?
-                } else {
-                    String::new()
-                };
-                // 第9个参数 send_to（可选，忽略）
-                let _send_to: i64 = if args.len() > 8 && !args[8].is_nil() {
-                    coerce_to_i64(args[8].clone()).unwrap_or(0)
-                } else {
-                    0
-                };
-                // 第10个参数 sequence（可选）
-                let sequence: i64 = if args.len() > 9 && !args[9].is_nil() {
-                    coerce_to_i64(args[9].clone()).unwrap_or(0)
-                } else {
-                    0
-                };
+            let name: String = coerce_to_string(args[0].clone())?;
+            let match_str: String = coerce_to_string(args[1].clone())?;
+            let _response: String = coerce_to_string(args[2].clone())?;
+            let flags: i64 = coerce_to_i64(args[3].clone())?;
+            // 第5个参数 colour（可选，忽略）
+            // 第6个参数 wildcard（可选，忽略）
+            // 第7个参数 sound（可选，忽略）
+            // 第8个参数 script（可选）
+            let script = if args.len() > 7 && !args[7].is_nil() {
+                coerce_to_string(args[7].clone())?
+            } else {
+                String::new()
+            };
+            // 第9个参数 send_to（可选，忽略）
+            let _send_to: i64 = if args.len() > 8 && !args[8].is_nil() {
+                coerce_to_i64(args[8].clone()).unwrap_or(0)
+            } else {
+                0
+            };
+            // 第10个参数 sequence（可选）
+            let sequence: i64 = if args.len() > 9 && !args[9].is_nil() {
+                coerce_to_i64(args[9].clone()).unwrap_or(0)
+            } else {
+                0
+            };
 
-                add_trigger_impl(
-                    lua,
-                    &state_rc9,
-                    &name,
-                    &match_str,
-                    flags,
-                    &script,
-                    _send_to,
-                    sequence as i32,
-                )
-            },
-        )?;
+            add_trigger_impl(
+                lua,
+                &state_rc9,
+                &name,
+                &match_str,
+                flags,
+                &script,
+                _send_to,
+                sequence as i32,
+            )
+        })?;
         globals.set("AddTriggerEx", add_trigger_ex_fn)?;
 
         // DeleteTrigger(name)
@@ -776,58 +771,56 @@ impl LuaEngine {
         // AddAlias(name, match_str, response_text, flags, [script_name])
         // MushClient API 兼容：参数5是字符串(script_name)，可选
         let state_rc15 = state_rc.clone();
-        let add_alias_fn = lua.create_function_mut(
-            move |lua, args: mlua::MultiValue| {
-                let args: Vec<mlua::Value> = args.into_vec();
+        let add_alias_fn = lua.create_function_mut(move |lua, args: mlua::MultiValue| {
+            let args: Vec<mlua::Value> = args.into_vec();
 
-                // 至少需要4个参数: name, match_str, response_text, flags
-                if args.len() < 4 {
-                    return Err(mlua::Error::external(
-                        "AddAlias 需要至少4个参数: name, match_str, response_text, flags",
-                    ));
+            // 至少需要4个参数: name, match_str, response_text, flags
+            if args.len() < 4 {
+                return Err(mlua::Error::external(
+                    "AddAlias 需要至少4个参数: name, match_str, response_text, flags",
+                ));
+            }
+
+            let name: String = coerce_to_string(args[0].clone())?;
+            let match_str: String = coerce_to_string(args[1].clone())?;
+            let _response: String = coerce_to_string(args[2].clone())?;
+            let flags: i64 = coerce_to_i64(args[3].clone())?;
+            // 第5个参数 script_name（可选）
+            let script = if args.len() > 4 {
+                coerce_to_string(args[4].clone())?
+            } else {
+                String::new()
+            };
+
+            let re_str = if (flags & 32) != 0 {
+                convert_pcre_to_rust_regex(&match_str)
+            } else {
+                regex_escape(&match_str)
+                    .replace('*', "(.*)")
+                    .replace('?', "(.)")
+            };
+            let re = Regex::new(&re_str)
+                .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", re_str, e)))?;
+
+            let callback: Function = if script.is_empty() {
+                lua.create_function(|_, _: ()| Ok(()))?
+            } else {
+                let code = format!("return {}", script);
+                match lua.load(&code).eval::<Function>() {
+                    Ok(f) => f,
+                    Err(_) => lua.load(&script).eval()?,
                 }
+            };
 
-                let name: String = coerce_to_string(args[0].clone())?;
-                let match_str: String = coerce_to_string(args[1].clone())?;
-                let _response: String = coerce_to_string(args[2].clone())?;
-                let flags: i64 = coerce_to_i64(args[3].clone())?;
-                // 第5个参数 script_name（可选）
-                let script = if args.len() > 4 {
-                    coerce_to_string(args[4].clone())?
-                } else {
-                    String::new()
-                };
-
-                let re_str = if (flags & 32) != 0 {
-                    convert_pcre_to_rust_regex(&match_str)
-                } else {
-                    regex_escape(&match_str)
-                        .replace('*', "(.*)")
-                        .replace('?', "(.)")
-                };
-                let re = Regex::new(&re_str)
-                    .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", re_str, e)))?;
-
-                let callback: Function = if script.is_empty() {
-                    lua.create_function(|_, _: ()| Ok(()))?
-                } else {
-                    let code = format!("return {}", script);
-                    match lua.load(&code).eval::<Function>() {
-                        Ok(f) => f,
-                        Err(_) => lua.load(&script).eval()?,
-                    }
-                };
-
-                state_rc15.borrow_mut().aliases.push(Alias {
-                    name,
-                    pattern: re,
-                    callback,
-                    enabled: (flags & 1) != 0,
-                    group: String::new(),
-                });
-                Ok(Value::Integer(0))
-            },
-        )?;
+            state_rc15.borrow_mut().aliases.push(Alias {
+                name,
+                pattern: re,
+                callback,
+                enabled: (flags & 1) != 0,
+                group: String::new(),
+            });
+            Ok(Value::Integer(0))
+        })?;
         globals.set("AddAlias", add_alias_fn)?;
 
         // DeleteAlias(name)
@@ -892,51 +885,49 @@ impl LuaEngine {
         // MushClient API 兼容：参数5是字符串(response_text)，参数7是字符串(script_name)
         // sec 参数支持浮点数（如 0.10 秒）和 nil（默认 0）
         let state_rc19 = state_rc.clone();
-        let add_timer_fn = lua.create_function_mut(
-            move |lua, args: mlua::MultiValue| {
-                let args: Vec<mlua::Value> = args.into_vec();
+        let add_timer_fn = lua.create_function_mut(move |lua, args: mlua::MultiValue| {
+            let args: Vec<mlua::Value> = args.into_vec();
 
-                // 至少需要6个参数: name, hour, min, sec, response_text, flags
-                if args.len() < 6 {
-                    return Err(mlua::Error::external(
-                        "AddTimer 需要至少6个参数: name, hour, min, sec, response_text, flags",
-                    ));
-                }
+            // 至少需要6个参数: name, hour, min, sec, response_text, flags
+            if args.len() < 6 {
+                return Err(mlua::Error::external(
+                    "AddTimer 需要至少6个参数: name, hour, min, sec, response_text, flags",
+                ));
+            }
 
-                let name: String = coerce_to_string(args[0].clone())?;
-                let _hour: i64 = coerce_to_i64(args[1].clone()).unwrap_or(0);
-                let _min: i64 = coerce_to_i64(args[2].clone()).unwrap_or(0);
-                // sec 支持浮点数和 nil（MushClient 兼容）
-                let sec_millis = coerce_to_f64(args[3].clone())
-                    .map(|s| if s <= 0.0 { 1000.0 } else { s * 1000.0 })
-                    .unwrap_or(1000.0);
-                // 第5个参数 response_text：MushClient 中是字符串，忽略
-                let flags: i64 = coerce_to_i64(args[5].clone()).unwrap_or(0);
-                // 第7个参数 script_name（可选）
-                let script_name = if args.len() > 6 {
-                    coerce_to_string(args[6].clone()).unwrap_or_default()
-                } else {
-                    String::new()
-                };
+            let name: String = coerce_to_string(args[0].clone())?;
+            let _hour: i64 = coerce_to_i64(args[1].clone()).unwrap_or(0);
+            let _min: i64 = coerce_to_i64(args[2].clone()).unwrap_or(0);
+            // sec 支持浮点数和 nil（MushClient 兼容）
+            let sec_millis = coerce_to_f64(args[3].clone())
+                .map(|s| if s <= 0.0 { 1000.0 } else { s * 1000.0 })
+                .unwrap_or(1000.0);
+            // 第5个参数 response_text：MushClient 中是字符串，忽略
+            let flags: i64 = coerce_to_i64(args[5].clone()).unwrap_or(0);
+            // 第7个参数 script_name（可选）
+            let script_name = if args.len() > 6 {
+                coerce_to_string(args[6].clone()).unwrap_or_default()
+            } else {
+                String::new()
+            };
 
-                let interval_millis = sec_millis as u64;
-                let one_shot = (flags & 4) != 0;
+            let interval_millis = sec_millis as u64;
+            let one_shot = (flags & 4) != 0;
 
-                // 将脚本作为 send_text 存储，在 fire_timer 时执行
-                let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
+            // 将脚本作为 send_text 存储，在 fire_timer 时执行
+            let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
 
-                state_rc19.borrow_mut().timers.push(TimerDef {
-                    name,
-                    interval_millis,
-                    callback,
-                    enabled: (flags & 1) != 0,
-                    group: String::new(),
-                    one_shot,
-                    send_text: script_name,
-                });
-                Ok(Value::Integer(0))
-            },
-        )?;
+            state_rc19.borrow_mut().timers.push(TimerDef {
+                name,
+                interval_millis,
+                callback,
+                enabled: (flags & 1) != 0,
+                group: String::new(),
+                one_shot,
+                send_text: script_name,
+            });
+            Ok(Value::Integer(0))
+        })?;
         globals.set("AddTimer", add_timer_fn)?;
 
         // DeleteTimer(name)
@@ -1521,8 +1512,8 @@ impl LuaEngine {
         // rex.split(subject, pattern) -> 便捷函数
         rex_table.set(
             "split",
-            lua.create_function(|lua, (subject, pattern): (String, String)| {
-                match regex::Regex::new(&pattern) {
+            lua.create_function(
+                |lua, (subject, pattern): (String, String)| match regex::Regex::new(&pattern) {
                     Ok(re) => {
                         let result = lua.create_table()?;
                         let parts: Vec<&str> = re.split(&subject).collect();
@@ -1535,8 +1526,8 @@ impl LuaEngine {
                         "无效的正则表达式 '{}': {}",
                         pattern, e
                     ))),
-                }
-            })?,
+                },
+            )?,
         )?;
 
         // rex.match(subject, pattern) -> 便捷函数
@@ -2631,11 +2622,8 @@ mod tests {
     #[test]
     fn test_add_trigger_ex_same_as_add_trigger() {
         with_engine(|engine| {
-            let result: i64 = eval(
-                engine,
-                "return AddTriggerEx('ex_trig', 'test', '', 1)",
-            )
-            .unwrap();
+            let result: i64 =
+                eval(engine, "return AddTriggerEx('ex_trig', 'test', '', 1)").unwrap();
             assert_eq!(result, 0);
             assert_eq!(engine.trigger_count(), 1);
         });
@@ -2725,11 +2713,8 @@ mod tests {
     #[test]
     fn test_add_alias() {
         with_engine(|engine| {
-            let result: i64 = eval(
-                engine,
-                "return AddAlias('test_alias', 'kill *', '', 1)",
-            )
-            .unwrap();
+            let result: i64 =
+                eval(engine, "return AddAlias('test_alias', 'kill *', '', 1)").unwrap();
             assert_eq!(result, 0);
             assert_eq!(engine.alias_count(), 1);
         });
@@ -2809,10 +2794,14 @@ mod tests {
     #[test]
     fn test_alias_matching() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 alias_result = nil
                 AddAlias('match_alias', 'kill *', '', 1, 'function(t) alias_result = t[1] end')
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let matched = engine.process_input("kill goblin");
             assert!(matched);
             let result: Option<String> = eval(engine, "return alias_result").unwrap();
@@ -2877,11 +2866,8 @@ mod tests {
     #[test]
     fn test_add_timer() {
         with_engine(|engine| {
-            let result: i64 = eval(
-                engine,
-                "return AddTimer('test_timer', 0, 0, 5, '', 1)",
-            )
-            .unwrap();
+            let result: i64 =
+                eval(engine, "return AddTimer('test_timer', 0, 0, 5, '', 1)").unwrap();
             assert_eq!(result, 0);
             assert_eq!(engine.timer_count(), 1);
         });
@@ -4132,10 +4118,14 @@ mod tests {
     #[test]
     fn test_rex_match_found() {
         with_engine(|engine| {
-            let result: Table = eval(engine, r#"
+            let result: Table = eval(
+                engine,
+                r#"
                 local r = rex.new("(\\w+)")
                 return r:match("hello world")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let full: String = result.get(1).unwrap();
             assert_eq!(full, "hello");
             // 无额外捕获组（整体匹配在索引1）
@@ -4145,10 +4135,14 @@ mod tests {
     #[test]
     fn test_rex_match_with_captures() {
         with_engine(|engine| {
-            let result: Table = eval(engine, r#"
+            let result: Table = eval(
+                engine,
+                r#"
                 local r = rex.new("(\\w+)@(\\w+)")
                 return r:match("user@host")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let full: String = result.get(1).unwrap();
             let cap1: String = result.get(2).unwrap();
             let cap2: String = result.get(3).unwrap();
@@ -4161,10 +4155,14 @@ mod tests {
     #[test]
     fn test_rex_match_not_found() {
         with_engine(|engine| {
-            let result: Value = eval(engine, r#"
+            let result: Value = eval(
+                engine,
+                r#"
                 local r = rex.new("xyz")
                 return r:match("hello world")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert!(result.is_nil());
         });
     }
@@ -4172,7 +4170,9 @@ mod tests {
     #[test]
     fn test_rex_gmatch_callback() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 local r = rex.new("(\\w+)")
                 local results = {}
                 r:gmatch("hello world", function(m)
@@ -4181,7 +4181,9 @@ mod tests {
                 SetVariable("gmatch_count", tostring(#results))
                 SetVariable("gmatch_1", results[1])
                 SetVariable("gmatch_2", results[2])
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let count: String = eval(engine, "return GetVariable('gmatch_count')").unwrap();
             let first: String = eval(engine, "return GetVariable('gmatch_1')").unwrap();
             let second: String = eval(engine, "return GetVariable('gmatch_2')").unwrap();
@@ -4194,7 +4196,9 @@ mod tests {
     #[test]
     fn test_rex_gmatch_with_captures() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 local r = rex.new("([^;*\\\\]+)")
                 local results = {}
                 r:gmatch("cmd1;cmd2*cmd3", function(m)
@@ -4204,7 +4208,9 @@ mod tests {
                 SetVariable("gmatch_cap_1", results[1])
                 SetVariable("gmatch_cap_2", results[2])
                 SetVariable("gmatch_cap_3", results[3])
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let count: String = eval(engine, "return GetVariable('gmatch_cap_count')").unwrap();
             let first: String = eval(engine, "return GetVariable('gmatch_cap_1')").unwrap();
             let second: String = eval(engine, "return GetVariable('gmatch_cap_2')").unwrap();
@@ -4219,10 +4225,14 @@ mod tests {
     #[test]
     fn test_rex_split() {
         with_engine(|engine| {
-            let result: Table = eval(engine, r#"
+            let result: Table = eval(
+                engine,
+                r#"
                 local r = rex.new("[,;]+")
                 return r:split("a,b;c,d")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let first: String = result.get(1).unwrap();
             let second: String = result.get(2).unwrap();
             let third: String = result.get(3).unwrap();
@@ -4235,10 +4245,14 @@ mod tests {
     #[test]
     fn test_rex_find() {
         with_engine(|engine| {
-            let result: Table = eval(engine, r#"
+            let result: Table = eval(
+                engine,
+                r#"
                 local r = rex.new("world")
                 return r:find("hello world")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let start: i64 = result.get(1).unwrap();
             let end: i64 = result.get(2).unwrap();
             let matched: String = result.get(3).unwrap();
@@ -4251,10 +4265,14 @@ mod tests {
     #[test]
     fn test_rex_find_not_found() {
         with_engine(|engine| {
-            let result: Value = eval(engine, r#"
+            let result: Value = eval(
+                engine,
+                r#"
                 local r = rex.new("xyz")
                 return r:find("hello world")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert!(result.is_nil());
         });
     }
@@ -4262,9 +4280,13 @@ mod tests {
     #[test]
     fn test_rex_convenience_split() {
         with_engine(|engine| {
-            let result: Table = eval(engine, r#"
+            let result: Table = eval(
+                engine,
+                r#"
                 return rex.split("a,b,c", ",")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let first: String = result.get(1).unwrap();
             let second: String = result.get(2).unwrap();
             let third: String = result.get(3).unwrap();
@@ -4277,9 +4299,13 @@ mod tests {
     #[test]
     fn test_rex_convenience_match() {
         with_engine(|engine| {
-            let result: Table = eval(engine, r#"
+            let result: Table = eval(
+                engine,
+                r#"
                 return rex.match("user@host", "(\\w+)@(\\w+)")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let full: String = result.get(1).unwrap();
             let cap1: String = result.get(2).unwrap();
             let cap2: String = result.get(3).unwrap();
@@ -4292,9 +4318,13 @@ mod tests {
     #[test]
     fn test_rex_convenience_find() {
         with_engine(|engine| {
-            let result: Table = eval(engine, r#"
+            let result: Table = eval(
+                engine,
+                r#"
                 return rex.find("hello world", "world")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let start: i64 = result.get(1).unwrap();
             assert_eq!(start, 7);
         });
@@ -4304,10 +4334,14 @@ mod tests {
     fn test_rex_michen_system_pattern() {
         // 测试实际脚本中的正则: rex.new("([^;*\\\\]+)")
         with_engine(|engine| {
-            let result: Table = eval(engine, r#"
+            let result: Table = eval(
+                engine,
+                r#"
                 local r = rex.new("([^;*\\\\]+)")
                 return r:match("go north;south*east")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let full: String = result.get(1).unwrap();
             let cap1: String = result.get(2).unwrap();
             assert_eq!(full, "go north");
@@ -4319,7 +4353,9 @@ mod tests {
     fn test_rex_gmatch_michen_system_usage() {
         // 模拟脚本中 runre:gmatch(str, function(m, t) ... end) 的用法
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 local runre = rex.new("([^;*\\\\]+)")
                 local results = {}
                 runre:gmatch("go north;south*east", function(m, t)
@@ -4329,7 +4365,9 @@ mod tests {
                 SetVariable("runre_1", results[1])
                 SetVariable("runre_2", results[2])
                 SetVariable("runre_3", results[3])
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let count: String = eval(engine, "return GetVariable('runre_count')").unwrap();
             let first: String = eval(engine, "return GetVariable('runre_1')").unwrap();
             let second: String = eval(engine, "return GetVariable('runre_2')").unwrap();
@@ -5010,10 +5048,14 @@ mod tests {
     #[test]
     fn test_alias_toggle_enable() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 toggle_alias_result = nil
                 AddAlias('toggle_a', 'hello', '', 1, 'function() toggle_alias_result = true end')
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             // Initially enabled
             let h1 = engine.process_input("hello");
             assert!(h1);
@@ -5048,10 +5090,14 @@ mod tests {
     #[test]
     fn test_alias_regex_pattern() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 regex_al_result = nil
                 AddAlias('regex_a', [[^#(\d+)$]], '', 33, 'function(t) regex_al_result = t[1] end')
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let handled = engine.process_input("#5");
             assert!(handled);
             let result: Option<String> = eval(engine, "return regex_al_result").unwrap();
