@@ -197,6 +197,181 @@ struct ScriptState {
 }
 
 /// Lua 引擎与脚本运行时
+/// Lua 合法转义字符集合
+const LUA_VALID_ESCAPES: &[u8] = b"abfnrtv\\\"'0123456789xzZuU";
+
+/// 预处理 Lua 源码，修复 LuaJIT 不兼容的无效转义序列
+///
+/// 标准 Lua 5.1 对未识别的转义序列（如 `\-`, `\+`）宽松处理（保留反斜杠），
+/// 但 LuaJIT 严格拒绝。此函数在字符串字面量内将无效转义 `\X` 替换为 `\\X`，
+/// 使 LuaJIT 正确解析。
+fn fix_lua_escape_sequences(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    // 状态机：追踪当前上下文
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        Normal,       // 普通代码
+        StringSingle, // 单引号字符串
+        StringDouble, // 双引号字符串
+        LongString,   // 长字符串 [[...]]
+        LongComment,  // 长注释 --[[...]]
+        LineComment,  // 单行注释 --
+    }
+
+    let mut state = State::Normal;
+    let mut long_bracket_depth: usize = 0;
+
+    while i < bytes.len() {
+        match state {
+            State::Normal => {
+                // 检测单行注释 --
+                if bytes[i] == b'-' && i + 1 < bytes.len() && bytes[i + 1] == b'-' {
+                    // 检测长注释 --[[ 或 --[=[
+                    if i + 2 < bytes.len() && bytes[i + 2] == b'[' {
+                        let bracket_len = count_long_bracket_open(&bytes[i + 2..]);
+                        if bracket_len > 0 {
+                            result.extend_from_slice(&bytes[i..i + 2 + bracket_len]);
+                            i += 2 + bracket_len;
+                            long_bracket_depth = 1;
+                            state = State::LongComment;
+                            continue;
+                        }
+                    }
+                    result.push(bytes[i]);
+                    i += 1;
+                    state = State::LineComment;
+                    continue;
+                }
+                // 检测长字符串 [[ 或 [=[
+                if bytes[i] == b'[' {
+                    let bracket_len = count_long_bracket_open(&bytes[i..]);
+                    if bracket_len > 0 {
+                        result.extend_from_slice(&bytes[i..i + bracket_len]);
+                        i += bracket_len;
+                        long_bracket_depth = 1;
+                        state = State::LongString;
+                        continue;
+                    }
+                }
+                // 检测字符串开始
+                if bytes[i] == b'"' {
+                    result.push(bytes[i]);
+                    i += 1;
+                    state = State::StringDouble;
+                    continue;
+                }
+                if bytes[i] == b'\'' {
+                    result.push(bytes[i]);
+                    i += 1;
+                    state = State::StringSingle;
+                    continue;
+                }
+                result.push(bytes[i]);
+                i += 1;
+            }
+            State::StringDouble | State::StringSingle => {
+                if bytes[i] == b'\\' {
+                    // 转义序列
+                    if i + 1 < bytes.len() {
+                        let next = bytes[i + 1];
+                        if LUA_VALID_ESCAPES.contains(&next) {
+                            // 合法转义，原样保留
+                            result.push(bytes[i]);
+                            result.push(next);
+                            i += 2;
+                        } else {
+                            // 非法转义，将 \X 替换为 \\X
+                            result.push(b'\\');
+                            result.push(b'\\');
+                            result.push(next);
+                            i += 2;
+                        }
+                    } else {
+                        result.push(bytes[i]);
+                        i += 1;
+                    }
+                } else if (state == State::StringDouble && bytes[i] == b'"')
+                    || (state == State::StringSingle && bytes[i] == b'\'')
+                {
+                    result.push(bytes[i]);
+                    i += 1;
+                    state = State::Normal;
+                } else {
+                    result.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            State::LongString | State::LongComment => {
+                // 检测长括号关闭 ]] 或 ]=]
+                if bytes[i] == b']' {
+                    let close_len = count_long_bracket_close(&bytes[i..]);
+                    if close_len > 0 {
+                        result.extend_from_slice(&bytes[i..i + close_len]);
+                        i += close_len;
+                        long_bracket_depth -= 1;
+                        if long_bracket_depth == 0 {
+                            state = State::Normal;
+                        }
+                        continue;
+                    }
+                }
+                // 嵌套长括号（仅长字符串内）
+                if state == State::LongString && bytes[i] == b'[' {
+                    let open_len = count_long_bracket_open(&bytes[i..]);
+                    if open_len > 0 {
+                        result.extend_from_slice(&bytes[i..i + open_len]);
+                        i += open_len;
+                        long_bracket_depth += 1;
+                        continue;
+                    }
+                }
+                result.push(bytes[i]);
+                i += 1;
+            }
+            State::LineComment => {
+                result.push(bytes[i]);
+                if bytes[i] == b'\n' {
+                    state = State::Normal;
+                }
+                i += 1;
+            }
+        }
+    }
+
+    String::from_utf8(result).unwrap_or_else(|_| source.to_string())
+}
+
+/// 检测长括号开始 [[ 或 [=[ 或 [==[ 等，返回括号长度（0 表示不是长括号）
+fn count_long_bracket_open(bytes: &[u8]) -> usize {
+    if bytes.is_empty() || bytes[0] != b'[' {
+        return 0;
+    }
+    let eq_count = bytes.iter().skip(1).take_while(|&&b| b == b'=').count();
+    let bracket_pos = 1 + eq_count;
+    if bracket_pos < bytes.len() && bytes[bracket_pos] == b'[' {
+        bracket_pos + 1
+    } else {
+        0
+    }
+}
+
+/// 检测长括号关闭 ]] 或 ]=] 或 ]==] 等，返回括号长度（0 表示不是长括号）
+fn count_long_bracket_close(bytes: &[u8]) -> usize {
+    if bytes.is_empty() || bytes[0] != b']' {
+        return 0;
+    }
+    let eq_count = bytes.iter().skip(1).take_while(|&&b| b == b'=').count();
+    let bracket_pos = 1 + eq_count;
+    if bracket_pos < bytes.len() && bytes[bracket_pos] == b']' {
+        bracket_pos + 1
+    } else {
+        0
+    }
+}
+
 pub struct LuaEngine {
     lua: Lua,
     state: Rc<RefCell<ScriptState>>,
@@ -1096,6 +1271,9 @@ impl LuaEngine {
                 }
             };
 
+            // 预处理：修复 LuaJIT 不兼容的无效转义序列（如 \- \+ \? 等）
+            let code = fix_lua_escape_sequences(&code);
+
             lua.load(&code)
                 .set_name(&path)
                 .exec()
@@ -1117,6 +1295,189 @@ impl LuaEngine {
         for module in &["InfoBox", "Gauge", "Miniwin"] {
             loaded.set(*module, lua.create_table()?)?;
         }
+
+        // 注册 MushClient 兼容全局模块（rex PCRE 正则库，基于 Rust regex crate 实现）
+        let rex_table = lua.create_table()?;
+
+        // rex.new(pattern) -> 返回正则对象
+        rex_table.set(
+            "new",
+            lua.create_function(|lua, pattern: String| {
+                // Lua 字符串传到 Rust 时转义已由 Lua 处理，直接使用
+                match regex::Regex::new(&pattern) {
+                    Ok(re) => {
+                        let regex_obj = lua.create_table()?;
+                        let re_match = re.clone();
+                        let re_gmatch = re.clone();
+                        let re_split = re.clone();
+                        let re_find = re.clone();
+
+                        // regex_obj:match(subject) -> 返回匹配和捕获组
+                        regex_obj.set(
+                            "match",
+                            lua.create_function(move |lua, (_self, subject): (Table, String)| {
+                                match re_match.captures(&subject) {
+                                    Some(caps) => {
+                                        let result = lua.create_table()?;
+                                        // 第一个捕获组是整体匹配
+                                        if let Some(m) = caps.get(0) {
+                                            result.set(1, m.as_str())?;
+                                        }
+                                        // 后续捕获组
+                                        for (i, cap) in caps.iter().skip(1).enumerate() {
+                                            if let Some(c) = cap {
+                                                result.set((i + 2) as i64, c.as_str())?;
+                                            }
+                                        }
+                                        Ok(mlua::Value::Table(result))
+                                    }
+                                    None => Ok(mlua::Value::Nil),
+                                }
+                            })?,
+                        )?;
+
+                        // regex_obj:gmatch(subject, callback) -> 对每个匹配调用 callback(match, cap1, cap2, ...)
+                        regex_obj.set(
+                            "gmatch",
+                            lua.create_function(move |lua, (_self, subject, callback): (Table, String, Function)| {
+                                for caps in re_gmatch.captures_iter(&subject) {
+                                    let mut args = Vec::new();
+                                    // 第一个参数是整体匹配
+                                    if let Some(m) = caps.get(0) {
+                                        args.push(mlua::Value::String(lua.create_string(m.as_str())?));
+                                    }
+                                    // 后续捕获组
+                                    for cap in caps.iter().skip(1) {
+                                        match cap {
+                                            Some(c) => {
+                                                args.push(mlua::Value::String(lua.create_string(c.as_str())?));
+                                            }
+                                            None => {
+                                                args.push(mlua::Value::Nil);
+                                            }
+                                        }
+                                    }
+                                    // 调用回调，忽略返回值和错误
+                                    let _ = callback.call::<mlua::Value>(mlua::MultiValue::from_vec(args));
+                                }
+                                Ok(mlua::Value::Nil)
+                            })?,
+                        )?;
+
+                        // regex_obj:split(subject) -> 返回分割后的表
+                        regex_obj.set(
+                            "split",
+                            lua.create_function(move |lua, (_self, subject): (Table, String)| {
+                                let result = lua.create_table()?;
+                                let parts: Vec<&str> = re_split.split(&subject).collect();
+                                for (i, part) in parts.iter().enumerate() {
+                                    result.set((i + 1) as i64, *part)?;
+                                }
+                                Ok(mlua::Value::Table(result))
+                            })?,
+                        )?;
+
+                        // regex_obj:find(subject) -> 返回匹配起止位置
+                        regex_obj.set(
+                            "find",
+                            lua.create_function(move |lua, (_self, subject): (Table, String)| {
+                                match re_find.find(&subject) {
+                                    Some(m) => {
+                                        let result = lua.create_table()?;
+                                        // Lua 索引从 1 开始
+                                        result.set(1, (m.start() + 1) as i64)?;
+                                        result.set(2, m.end() as i64)?;
+                                        result.set(3, m.as_str())?;
+                                        Ok(mlua::Value::Table(result))
+                                    }
+                                    None => Ok(mlua::Value::Nil),
+                                }
+                            })?,
+                        )?;
+
+                        Ok(mlua::Value::Table(regex_obj))
+                    }
+                    Err(e) => Err(mlua::Error::external(format!(
+                        "无效的正则表达式 '{}': {}",
+                        pattern, e
+                    ))),
+                }
+            })?,
+        )?;
+
+        // rex.split(subject, pattern) -> 便捷函数
+        rex_table.set(
+            "split",
+            lua.create_function(|lua, (subject, pattern): (String, String)| {
+                match regex::Regex::new(&pattern) {
+                    Ok(re) => {
+                        let result = lua.create_table()?;
+                        let parts: Vec<&str> = re.split(&subject).collect();
+                        for (i, part) in parts.iter().enumerate() {
+                            result.set((i + 1) as i64, *part)?;
+                        }
+                        Ok(mlua::Value::Table(result))
+                    }
+                    Err(e) => Err(mlua::Error::external(format!(
+                        "无效的正则表达式 '{}': {}",
+                        pattern, e
+                    ))),
+                }
+            })?,
+        )?;
+
+        // rex.match(subject, pattern) -> 便捷函数
+        rex_table.set(
+            "match",
+            lua.create_function(|lua, (subject, pattern): (String, String)| {
+                match regex::Regex::new(&pattern) {
+                    Ok(re) => match re.captures(&subject) {
+                        Some(caps) => {
+                            let result = lua.create_table()?;
+                            if let Some(m) = caps.get(0) {
+                                result.set(1, m.as_str())?;
+                            }
+                            for (i, cap) in caps.iter().skip(1).enumerate() {
+                                if let Some(c) = cap {
+                                    result.set((i + 2) as i64, c.as_str())?;
+                                }
+                            }
+                            Ok(mlua::Value::Table(result))
+                        }
+                        None => Ok(mlua::Value::Nil),
+                    },
+                    Err(e) => Err(mlua::Error::external(format!(
+                        "无效的正则表达式 '{}': {}",
+                        pattern, e
+                    ))),
+                }
+            })?,
+        )?;
+
+        // rex.find(subject, pattern) -> 便捷函数
+        rex_table.set(
+            "find",
+            lua.create_function(|lua, (subject, pattern): (String, String)| {
+                match regex::Regex::new(&pattern) {
+                    Ok(re) => match re.find(&subject) {
+                        Some(m) => {
+                            let result = lua.create_table()?;
+                            result.set(1, (m.start() + 1) as i64)?;
+                            result.set(2, m.end() as i64)?;
+                            result.set(3, m.as_str())?;
+                            Ok(mlua::Value::Table(result))
+                        }
+                        None => Ok(mlua::Value::Nil),
+                    },
+                    Err(e) => Err(mlua::Error::external(format!(
+                        "无效的正则表达式 '{}': {}",
+                        pattern, e
+                    ))),
+                }
+            })?,
+        )?;
+
+        globals.set("rex", rex_table)?;
 
         // ============================================================
         // Lua 兼容性补丁
@@ -1627,6 +1988,130 @@ fn regex_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ================================================================
+    // fix_lua_escape_sequences 预处理测试
+    // ================================================================
+
+    #[test]
+    fn test_fix_escape_invalid_in_double_string() {
+        // \- 在双引号字符串中是非法转义，应变为 \\-
+        let input = r#"a,b,c,d=string.find(l,"[> ]*(%S+) \- (%w+)")"#;
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, r#"a,b,c,d=string.find(l,"[> ]*(%S+) \\- (%w+)")"#);
+    }
+
+    #[test]
+    fn test_fix_escape_invalid_in_single_string() {
+        // \- 在单引号字符串中也应修复
+        let input = r#"x = 'hello \- world'"#;
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, r#"x = 'hello \\- world'"#);
+    }
+
+    #[test]
+    fn test_fix_escape_preserves_valid() {
+        // 合法转义 \n \t \\ \" 等应保持不变
+        let input = r#"x = "hello\nworld\t\"test\\end""#;
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_fix_escape_skip_comment() {
+        // 注释中的 \- 不应被修改
+        let input = "-- this is a comment with \\- escape\nx = 1";
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_fix_escape_skip_long_comment() {
+        // 长注释中的 \- 不应被修改
+        let input = "--[[ comment with \\- escape ]]\nx = 1";
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_fix_escape_skip_long_string() {
+        // 长字符串中的 \- 不应被修改
+        let input = "x = [[ hello \\- world ]]";
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_fix_escape_multiple_invalid() {
+        // 多个非法转义
+        let input = r#"x = "\- \+ \? \* \.""#;
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, r#"x = "\\- \\+ \\? \\* \\.""#);
+    }
+
+    #[test]
+    fn test_fix_escape_already_double_backslash() {
+        // \\- 已经是合法的（\\ 是合法转义，- 是普通字符），不应被修改
+        let input = r#"x = "\\- test""#;
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_fix_escape_mixed_valid_invalid() {
+        // 混合合法和非法转义
+        let input = r#"x = "hello\nworld\-test""#;
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, r#"x = "hello\nworld\\-test""#);
+    }
+
+    #[test]
+    fn test_fix_escape_real_world_pattern() {
+        // 实际脚本中的模式
+        let input = r#"a,b,c,d=string.find(l,"[> ]*(%S+) \- (%w+)")"#;
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, r#"a,b,c,d=string.find(l,"[> ]*(%S+) \\- (%w+)")"#);
+    }
+
+    #[test]
+    fn test_fix_escape_no_change_needed() {
+        // 无需修改的代码
+        let input = r#"x = "hello world"\ny = 1"#;
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_fix_escape_line_comment_then_code() {
+        // 注释后跟代码
+        let input = "-- comment with \\- \nlocal x = \"test\\-value\"";
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, "-- comment with \\- \nlocal x = \"test\\\\-value\"");
+    }
+
+    #[test]
+    fn test_fix_escape_hex_escape() {
+        // \x41 是合法的十六进制转义，不应被修改
+        let input = r#"x = "\x41\x42""#;
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_fix_escape_digit_escape() {
+        // \123 是合法的十进制转义，不应被修改
+        let input = r#"x = "\65\66""#;
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_fix_escape_z_escape() {
+        // \z 是合法转义（跳过空白），不应被修改
+        let input = r#"x = "hello\z  world""#;
+        let output = fix_lua_escape_sequences(input);
+        assert_eq!(output, input);
+    }
 
     /// 辅助：创建引擎并执行一段 Lua 代码
     fn with_engine<F>(f: F)
@@ -3384,6 +3869,239 @@ mod tests {
             let result = exec(engine, "dofile('/nonexistent/file.lua')");
             // May or may not error depending on implementation
             let _ = result;
+        });
+    }
+
+    // ================================================================
+    // rex PCRE 兼容模块测试
+    // ================================================================
+
+    #[test]
+    fn test_rex_new_basic() {
+        with_engine(|engine| {
+            let result: Table = eval(engine, "return rex.new('hello')").unwrap();
+            // 返回一个表对象（正则对象）
+            assert!(result.len().unwrap_or(0) >= 0);
+        });
+    }
+
+    #[test]
+    fn test_rex_new_invalid_pattern() {
+        with_engine(|engine| {
+            let result = exec(engine, "return rex.new('[invalid')");
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn test_rex_match_found() {
+        with_engine(|engine| {
+            let result: Table = eval(engine, r#"
+                local r = rex.new("(\\w+)")
+                return r:match("hello world")
+            "#).unwrap();
+            let full: String = result.get(1).unwrap();
+            assert_eq!(full, "hello");
+            // 无额外捕获组（整体匹配在索引1）
+        });
+    }
+
+    #[test]
+    fn test_rex_match_with_captures() {
+        with_engine(|engine| {
+            let result: Table = eval(engine, r#"
+                local r = rex.new("(\\w+)@(\\w+)")
+                return r:match("user@host")
+            "#).unwrap();
+            let full: String = result.get(1).unwrap();
+            let cap1: String = result.get(2).unwrap();
+            let cap2: String = result.get(3).unwrap();
+            assert_eq!(full, "user@host");
+            assert_eq!(cap1, "user");
+            assert_eq!(cap2, "host");
+        });
+    }
+
+    #[test]
+    fn test_rex_match_not_found() {
+        with_engine(|engine| {
+            let result: Value = eval(engine, r#"
+                local r = rex.new("xyz")
+                return r:match("hello world")
+            "#).unwrap();
+            assert!(result.is_nil());
+        });
+    }
+
+    #[test]
+    fn test_rex_gmatch_callback() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                local r = rex.new("(\\w+)")
+                local results = {}
+                r:gmatch("hello world", function(m)
+                    table.insert(results, m)
+                end)
+                SetVariable("gmatch_count", tostring(#results))
+                SetVariable("gmatch_1", results[1])
+                SetVariable("gmatch_2", results[2])
+            "#).unwrap();
+            let count: String = eval(engine, "return GetVariable('gmatch_count')").unwrap();
+            let first: String = eval(engine, "return GetVariable('gmatch_1')").unwrap();
+            let second: String = eval(engine, "return GetVariable('gmatch_2')").unwrap();
+            assert_eq!(count, "2");
+            assert_eq!(first, "hello");
+            assert_eq!(second, "world");
+        });
+    }
+
+    #[test]
+    fn test_rex_gmatch_with_captures() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                local r = rex.new("([^;*\\\\]+)")
+                local results = {}
+                r:gmatch("cmd1;cmd2*cmd3", function(m)
+                    table.insert(results, m)
+                end)
+                SetVariable("gmatch_cap_count", tostring(#results))
+                SetVariable("gmatch_cap_1", results[1])
+                SetVariable("gmatch_cap_2", results[2])
+                SetVariable("gmatch_cap_3", results[3])
+            "#).unwrap();
+            let count: String = eval(engine, "return GetVariable('gmatch_cap_count')").unwrap();
+            let first: String = eval(engine, "return GetVariable('gmatch_cap_1')").unwrap();
+            let second: String = eval(engine, "return GetVariable('gmatch_cap_2')").unwrap();
+            let third: String = eval(engine, "return GetVariable('gmatch_cap_3')").unwrap();
+            assert_eq!(count, "3");
+            assert_eq!(first, "cmd1");
+            assert_eq!(second, "cmd2");
+            assert_eq!(third, "cmd3");
+        });
+    }
+
+    #[test]
+    fn test_rex_split() {
+        with_engine(|engine| {
+            let result: Table = eval(engine, r#"
+                local r = rex.new("[,;]+")
+                return r:split("a,b;c,d")
+            "#).unwrap();
+            let first: String = result.get(1).unwrap();
+            let second: String = result.get(2).unwrap();
+            let third: String = result.get(3).unwrap();
+            assert_eq!(first, "a");
+            assert_eq!(second, "b");
+            assert_eq!(third, "c");
+        });
+    }
+
+    #[test]
+    fn test_rex_find() {
+        with_engine(|engine| {
+            let result: Table = eval(engine, r#"
+                local r = rex.new("world")
+                return r:find("hello world")
+            "#).unwrap();
+            let start: i64 = result.get(1).unwrap();
+            let end: i64 = result.get(2).unwrap();
+            let matched: String = result.get(3).unwrap();
+            assert_eq!(start, 7);
+            assert_eq!(end, 11);
+            assert_eq!(matched, "world");
+        });
+    }
+
+    #[test]
+    fn test_rex_find_not_found() {
+        with_engine(|engine| {
+            let result: Value = eval(engine, r#"
+                local r = rex.new("xyz")
+                return r:find("hello world")
+            "#).unwrap();
+            assert!(result.is_nil());
+        });
+    }
+
+    #[test]
+    fn test_rex_convenience_split() {
+        with_engine(|engine| {
+            let result: Table = eval(engine, r#"
+                return rex.split("a,b,c", ",")
+            "#).unwrap();
+            let first: String = result.get(1).unwrap();
+            let second: String = result.get(2).unwrap();
+            let third: String = result.get(3).unwrap();
+            assert_eq!(first, "a");
+            assert_eq!(second, "b");
+            assert_eq!(third, "c");
+        });
+    }
+
+    #[test]
+    fn test_rex_convenience_match() {
+        with_engine(|engine| {
+            let result: Table = eval(engine, r#"
+                return rex.match("user@host", "(\\w+)@(\\w+)")
+            "#).unwrap();
+            let full: String = result.get(1).unwrap();
+            let cap1: String = result.get(2).unwrap();
+            let cap2: String = result.get(3).unwrap();
+            assert_eq!(full, "user@host");
+            assert_eq!(cap1, "user");
+            assert_eq!(cap2, "host");
+        });
+    }
+
+    #[test]
+    fn test_rex_convenience_find() {
+        with_engine(|engine| {
+            let result: Table = eval(engine, r#"
+                return rex.find("hello world", "world")
+            "#).unwrap();
+            let start: i64 = result.get(1).unwrap();
+            assert_eq!(start, 7);
+        });
+    }
+
+    #[test]
+    fn test_rex_michen_system_pattern() {
+        // 测试实际脚本中的正则: rex.new("([^;*\\\\]+)")
+        with_engine(|engine| {
+            let result: Table = eval(engine, r#"
+                local r = rex.new("([^;*\\\\]+)")
+                return r:match("go north;south*east")
+            "#).unwrap();
+            let full: String = result.get(1).unwrap();
+            let cap1: String = result.get(2).unwrap();
+            assert_eq!(full, "go north");
+            assert_eq!(cap1, "go north");
+        });
+    }
+
+    #[test]
+    fn test_rex_gmatch_michen_system_usage() {
+        // 模拟脚本中 runre:gmatch(str, function(m, t) ... end) 的用法
+        with_engine(|engine| {
+            exec(engine, r#"
+                local runre = rex.new("([^;*\\\\]+)")
+                local results = {}
+                runre:gmatch("go north;south*east", function(m, t)
+                    table.insert(results, m)
+                end)
+                SetVariable("runre_count", tostring(#results))
+                SetVariable("runre_1", results[1])
+                SetVariable("runre_2", results[2])
+                SetVariable("runre_3", results[3])
+            "#).unwrap();
+            let count: String = eval(engine, "return GetVariable('runre_count')").unwrap();
+            let first: String = eval(engine, "return GetVariable('runre_1')").unwrap();
+            let second: String = eval(engine, "return GetVariable('runre_2')").unwrap();
+            let third: String = eval(engine, "return GetVariable('runre_3')").unwrap();
+            assert_eq!(count, "3");
+            assert_eq!(first, "go north");
+            assert_eq!(second, "south");
+            assert_eq!(third, "east");
         });
     }
 

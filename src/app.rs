@@ -118,6 +118,27 @@ fn parse_connect_args(parts: &[&str]) -> Option<(String, u16)> {
     Some((host.to_string(), port))
 }
 
+/// 格式化 Lua 错误信息，将含路径的文本分行
+fn format_lua_error(err: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line in err.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("stack traceback:") {
+            lines.push("stack traceback:".to_string());
+        } else if trimmed.starts_with('\t') || trimmed.starts_with("[string") {
+            lines.push(trimmed.to_string());
+        } else if trimmed.contains("脚本执行错误") {
+            lines.push(trimmed.to_string());
+        } else if !trimmed.is_empty() {
+            lines.push(trimmed.to_string());
+        }
+    }
+    if lines.is_empty() {
+        lines.push(err.to_string());
+    }
+    lines
+}
+
 /// 应用主结构
 pub struct App {
     config: AppConfig,
@@ -330,8 +351,10 @@ impl App {
                             self.terminal.append_output(&msg)?;
                         }
                         Err(e) => {
-                            let msg = format!("[Lua] 连接 {} 脚本加载失败: {}", id + 1, e);
-                            self.terminal.append_output(&msg)?;
+                            let err_msg = e.to_string();
+                            for line in format_lua_error(&err_msg) {
+                                self.terminal.append_output(&format!("[Lua] 连接 {} {}", id + 1, line))?;
+                            }
                         }
                     }
                 }
@@ -624,8 +647,10 @@ impl App {
                             self.start_timers_for_session(fg);
                         }
                         Err(e) => {
-                            self.terminal
-                                .append_output(&format!("[Lua] 脚本加载失败: {}", e))?;
+                            let err_msg = e.to_string();
+                            for line in format_lua_error(&err_msg) {
+                                self.terminal.append_output(&format!("[Lua] {}", line))?;
+                            }
                         }
                     },
                     Err(e) => {
@@ -655,8 +680,10 @@ impl App {
                                 self.start_timers_for_session(fg);
                             }
                             Err(e) => {
-                                self.terminal
-                                    .append_output(&format!("[Lua] 脚本加载失败: {}", e))?;
+                                let err_msg = e.to_string();
+                                for line in format_lua_error(&err_msg) {
+                                    self.terminal.append_output(&format!("[Lua] {}", line))?;
+                                }
                             }
                         },
                         Err(e) => {
