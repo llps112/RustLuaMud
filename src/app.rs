@@ -127,7 +127,7 @@ fn format_lua_error(err: &str) -> Vec<String> {
             lines.push("stack traceback:".to_string());
         } else if trimmed.starts_with('\t') || trimmed.starts_with("[string") {
             lines.push(trimmed.to_string());
-        } else if trimmed.contains("脚本执行错误") {
+        } else if trimmed.contains("err '") {
             lines.push(trimmed.to_string());
         } else if !trimmed.is_empty() {
             lines.push(trimmed.to_string());
@@ -326,9 +326,13 @@ impl App {
         let script_path = self.manager.sessions[id].script_path.clone();
         let username = self.manager.sessions[id].username.clone();
         let password = self.manager.sessions[id].password.clone();
+        let host = self.manager.sessions[id].host.clone();
 
         match crate::lua::LuaEngine::new() {
             Ok(mut engine) => {
+                // 注入主机地址（供 GetInfo(1) 返回）
+                engine.set_host(&host);
+
                 // 注入登录凭证到 Lua 变量和全局变量
                 if let Some(ref name) = username {
                     if !name.is_empty() {
@@ -353,7 +357,7 @@ impl App {
                         Err(e) => {
                             let err_msg = e.to_string();
                             for line in format_lua_error(&err_msg) {
-                                self.terminal.append_output(&format!("[Lua] 连接 {} {}", id + 1, line))?;
+                                self.terminal.append_output(&line)?;
                             }
                         }
                     }
@@ -387,7 +391,7 @@ impl App {
             let timer_tx = self.timer_tx.clone();
             tokio::spawn(async move {
                 loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(interval)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(interval)).await;
                     if timer_tx
                         .send(TimerRequest {
                             session_id: id,

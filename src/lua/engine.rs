@@ -173,7 +173,7 @@ pub struct Alias {
 /// 定时器定义
 pub struct TimerDef {
     pub name: String,
-    pub interval_secs: u64,
+    pub interval_millis: u64,
     pub callback: Function,
     pub enabled: bool,
     pub group: String,
@@ -194,6 +194,7 @@ struct ScriptState {
     connected: bool,
     connect_requested: bool,
     disconnect_requested: bool,
+    host: String,
 }
 
 /// Lua 引擎与脚本运行时
@@ -372,6 +373,46 @@ fn count_long_bracket_close(bytes: &[u8]) -> usize {
     }
 }
 
+/// 将 Lua Value 强制转换为 i64（兼容整数、浮点数和可解析的字符串）
+fn coerce_to_i64(value: mlua::Value) -> mlua::Result<i64> {
+    match value {
+        mlua::Value::Integer(i) => Ok(i),
+        mlua::Value::Number(n) => Ok(n as i64),
+        mlua::Value::String(s) => {
+            let str_val = s.to_str()?;
+            str_val.parse::<i64>().map_err(|_| {
+                mlua::Error::external(format!("无法将 '{}' 转换为整数", str_val))
+            })
+        }
+        _ => Err(mlua::Error::external("期望数字或可转换为数字的值")),
+    }
+}
+
+/// 将 Lua Value 强制转换为 String（兼容字符串和数字）
+fn coerce_to_string(value: mlua::Value) -> mlua::Result<String> {
+    match value {
+        mlua::Value::String(s) => Ok(s.to_str()?.to_string()),
+        mlua::Value::Integer(i) => Ok(i.to_string()),
+        mlua::Value::Number(n) => Ok(n.to_string()),
+        _ => Err(mlua::Error::external("期望字符串或数字")),
+    }
+}
+
+/// 将 Lua Value 强制转换为 f64（兼容整数、浮点数和字符串，nil 返回 Err）
+fn coerce_to_f64(value: mlua::Value) -> mlua::Result<f64> {
+    match value {
+        mlua::Value::Integer(i) => Ok(i as f64),
+        mlua::Value::Number(n) => Ok(n),
+        mlua::Value::String(s) => {
+            let str_val = s.to_str()?;
+            str_val.parse::<f64>().map_err(|_| {
+                mlua::Error::external(format!("无法将 '{}' 转换为数字", str_val))
+            })
+        }
+        _ => Err(mlua::Error::external("期望数字或可转换为数字的值")),
+    }
+}
+
 pub struct LuaEngine {
     lua: Lua,
     state: Rc<RefCell<ScriptState>>,
@@ -396,6 +437,7 @@ impl LuaEngine {
             connected: false,
             connect_requested: false,
             disconnect_requested: false,
+            host: String::new(),
         }));
 
         let mut engine = Self {
@@ -444,6 +486,25 @@ impl LuaEngine {
             Ok(0)
         })?;
         globals.set("Execute", execute_fn)?;
+
+        // DiscardQueue() — MushClient API: 丢弃命令队列中所有待发送命令
+        let state_rc_dq = state_rc.clone();
+        let discard_queue_fn = lua.create_function_mut(move |_, ()| {
+            state_rc_dq.borrow_mut().pending_commands.clear();
+            Ok(())
+        })?;
+        globals.set("DiscardQueue", discard_queue_fn)?;
+
+        // DeleteTemporaryTimers() — MushClient API: 删除所有临时定时器
+        let state_rc_dtt = state_rc.clone();
+        let delete_temp_timers_fn = lua.create_function_mut(move |_, ()| {
+            state_rc_dtt
+                .borrow_mut()
+                .timers
+                .retain(|t| !t.one_shot);
+            Ok(())
+        })?;
+        globals.set("DeleteTemporaryTimers", delete_temp_timers_fn)?;
 
         // ============================================================
         // 输出
@@ -528,33 +589,46 @@ impl LuaEngine {
         )?;
         globals.set("AddTrigger", add_trigger_fn)?;
 
-        // AddTriggerEx(name, match_str, response, flags, colour, wildcard, sound, script, send_to, sequence)
+        // AddTriggerEx(name, match_str, response_text, flags, [colour], [wildcard], [sound], [script], [send_to], [sequence])
+        // MushClient API 兼容：中间参数可选，可能传 nil
         let state_rc9 = state_rc.clone();
         let add_trigger_ex_fn = lua.create_function_mut(
-            move |lua,
-                  (
-                name,
-                match_str,
-                _response,
-                flags,
-                _colour,
-                _wildcard,
-                _sound,
-                script,
-                _send_to,
-                sequence,
-            ): (
-                String,
-                String,
-                String,
-                i64,
-                i64,
-                i64,
-                String,
-                String,
-                i64,
-                i64,
-            )| {
+            move |lua, args: mlua::MultiValue| {
+                let args: Vec<mlua::Value> = args.into_vec();
+
+                // 至少需要4个参数: name, match_str, response_text, flags
+                if args.len() < 4 {
+                    return Err(mlua::Error::external(
+                        "AddTriggerEx 需要至少4个参数: name, match_str, response_text, flags",
+                    ));
+                }
+
+                let name: String = coerce_to_string(args[0].clone())?;
+                let match_str: String = coerce_to_string(args[1].clone())?;
+                let _response: String = coerce_to_string(args[2].clone())?;
+                let flags: i64 = coerce_to_i64(args[3].clone())?;
+                // 第5个参数 colour（可选，忽略）
+                // 第6个参数 wildcard（可选，忽略）
+                // 第7个参数 sound（可选，忽略）
+                // 第8个参数 script（可选）
+                let script = if args.len() > 7 && !args[7].is_nil() {
+                    coerce_to_string(args[7].clone())?
+                } else {
+                    String::new()
+                };
+                // 第9个参数 send_to（可选，忽略）
+                let _send_to: i64 = if args.len() > 8 && !args[8].is_nil() {
+                    coerce_to_i64(args[8].clone()).unwrap_or(0)
+                } else {
+                    0
+                };
+                // 第10个参数 sequence（可选）
+                let sequence: i64 = if args.len() > 9 && !args[9].is_nil() {
+                    coerce_to_i64(args[9].clone()).unwrap_or(0)
+                } else {
+                    0
+                };
+
                 add_trigger_impl(
                     lua,
                     &state_rc9,
@@ -699,21 +773,33 @@ impl LuaEngine {
         // 别名 API
         // ============================================================
 
-        // AddAlias(name, match_str, response, flags, colour, script, send_to)
+        // AddAlias(name, match_str, response_text, flags, [script_name])
+        // MushClient API 兼容：参数5是字符串(script_name)，可选
         let state_rc15 = state_rc.clone();
         let add_alias_fn = lua.create_function_mut(
-            move |lua,
-                  (name, match_str, _response, flags, _colour, script, _send_to): (
-                String,
-                String,
-                String,
-                i64,
-                i64,
-                String,
-                i64,
-            )| {
+            move |lua, args: mlua::MultiValue| {
+                let args: Vec<mlua::Value> = args.into_vec();
+
+                // 至少需要4个参数: name, match_str, response_text, flags
+                if args.len() < 4 {
+                    return Err(mlua::Error::external(
+                        "AddAlias 需要至少4个参数: name, match_str, response_text, flags",
+                    ));
+                }
+
+                let name: String = coerce_to_string(args[0].clone())?;
+                let match_str: String = coerce_to_string(args[1].clone())?;
+                let _response: String = coerce_to_string(args[2].clone())?;
+                let flags: i64 = coerce_to_i64(args[3].clone())?;
+                // 第5个参数 script_name（可选）
+                let script = if args.len() > 4 {
+                    coerce_to_string(args[4].clone())?
+                } else {
+                    String::new()
+                };
+
                 let re_str = if (flags & 32) != 0 {
-                    match_str.clone()
+                    convert_pcre_to_rust_regex(&match_str)
                 } else {
                     regex_escape(&match_str)
                         .replace('*', "(.*)")
@@ -728,7 +814,7 @@ impl LuaEngine {
                     let code = format!("return {}", script);
                     match lua.load(&code).eval::<Function>() {
                         Ok(f) => f,
-                        Err(_) => lua.load(script).eval()?,
+                        Err(_) => lua.load(&script).eval()?,
                     }
                 };
 
@@ -802,22 +888,38 @@ impl LuaEngine {
         // 定时器 API
         // ============================================================
 
-        // AddTimer(name, hour, min, sec, callback, flags, colour, script, send_to)
+        // AddTimer(name, hour, min, sec, response_text, flags, [script_name], [send_to])
+        // MushClient API 兼容：参数5是字符串(response_text)，参数7是字符串(script_name)
+        // sec 参数支持浮点数（如 0.10 秒）和 nil（默认 0）
         let state_rc19 = state_rc.clone();
         let add_timer_fn = lua.create_function_mut(
-            move |lua,
-                  (name, _hour, _min, sec, _callback, flags, _colour, script, _send_to): (
-                String,
-                i64,
-                i64,
-                i64,
-                i64,
-                i64,
-                i64,
-                String,
-                i64,
-            )| {
-                let interval = if sec <= 0 { 1 } else { sec as u64 };
+            move |lua, args: mlua::MultiValue| {
+                let args: Vec<mlua::Value> = args.into_vec();
+
+                // 至少需要6个参数: name, hour, min, sec, response_text, flags
+                if args.len() < 6 {
+                    return Err(mlua::Error::external(
+                        "AddTimer 需要至少6个参数: name, hour, min, sec, response_text, flags",
+                    ));
+                }
+
+                let name: String = coerce_to_string(args[0].clone())?;
+                let _hour: i64 = coerce_to_i64(args[1].clone()).unwrap_or(0);
+                let _min: i64 = coerce_to_i64(args[2].clone()).unwrap_or(0);
+                // sec 支持浮点数和 nil（MushClient 兼容）
+                let sec_millis = coerce_to_f64(args[3].clone())
+                    .map(|s| if s <= 0.0 { 1000.0 } else { s * 1000.0 })
+                    .unwrap_or(1000.0);
+                // 第5个参数 response_text：MushClient 中是字符串，忽略
+                let flags: i64 = coerce_to_i64(args[5].clone()).unwrap_or(0);
+                // 第7个参数 script_name（可选）
+                let script_name = if args.len() > 6 {
+                    coerce_to_string(args[6].clone()).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                let interval_millis = sec_millis as u64;
                 let one_shot = (flags & 4) != 0;
 
                 // 将脚本作为 send_text 存储，在 fire_timer 时执行
@@ -825,12 +927,12 @@ impl LuaEngine {
 
                 state_rc19.borrow_mut().timers.push(TimerDef {
                     name,
-                    interval_secs: interval,
+                    interval_millis,
                     callback,
                     enabled: (flags & 1) != 0,
                     group: String::new(),
                     one_shot,
-                    send_text: script,
+                    send_text: script_name,
                 });
                 Ok(Value::Integer(0))
             },
@@ -946,7 +1048,13 @@ impl LuaEngine {
 
         // GetInfo(code)
         let script_dir_rc = Rc::new(RefCell::new(self.script_dir.clone()));
+        let state_rc_gi = state_rc.clone();
         let get_info_fn = lua.create_function_mut(move |lua, code: i64| match code {
+            1 => {
+                // MushClient: GetInfo(1) 返回主机地址
+                let host = state_rc_gi.borrow().host.clone();
+                Ok(Value::String(lua.create_string(&host)?))
+            }
             35 => {
                 let dir = script_dir_rc.borrow().clone();
                 match dir {
@@ -957,7 +1065,6 @@ impl LuaEngine {
                     None => Ok(Value::String(lua.create_string(".\\")?)),
                 }
             }
-            1 => Ok(Value::String(lua.create_string("RustLuaMud 1.0")?)),
             _ => Ok(Value::String(lua.create_string("")?)),
         })?;
         globals.set("GetInfo", get_info_fn)?;
@@ -1097,6 +1204,10 @@ impl LuaEngine {
         let is_log_open_fn = lua.create_function(move |_, ()| Ok(Value::Boolean(true)))?;
         globals.set("IsLogOpen", is_log_open_fn)?;
 
+        // CloseLog() — MushClient API: 关闭日志文件
+        let close_log_fn = lua.create_function(move |_, ()| Ok(()))?;
+        globals.set("CloseLog", close_log_fn)?;
+
         // ============================================================
         // 数据库 API
         // ============================================================
@@ -1149,10 +1260,11 @@ impl LuaEngine {
         // timer_flag
         let timer_flag = lua.create_table()?;
         timer_flag.set("Enabled", 1i64)?;
+        timer_flag.set("AtTime", 4i64)?;
+        timer_flag.set("Replace", 1024i64)?;
         timer_flag.set("Temporary", 4096i64)?;
         timer_flag.set("OneShot", 8192i64)?;
         timer_flag.set("ActiveWhenClosed", 16384i64)?;
-        timer_flag.set("Replace", 1024i64)?;
         globals.set("timer_flag", timer_flag)?;
 
         // custom_colour
@@ -1277,7 +1389,7 @@ impl LuaEngine {
             lua.load(&code)
                 .set_name(&path)
                 .exec()
-                .map_err(|e| mlua::Error::external(format!("脚本执行错误 '{}': {}", path, e)))
+                .map_err(|e| mlua::Error::external(format!("err '{}': {}", path, e)))
         })?;
         globals.set("dofile", dofile_fn)?;
 
@@ -1303,7 +1415,8 @@ impl LuaEngine {
         rex_table.set(
             "new",
             lua.create_function(|lua, pattern: String| {
-                // Lua 字符串传到 Rust 时转义已由 Lua 处理，直接使用
+                // PCRE 兼容：预处理正则模式
+                let pattern = convert_pcre_to_rust_regex(&pattern);
                 match regex::Regex::new(&pattern) {
                     Ok(re) => {
                         let regex_obj = lua.create_table()?;
@@ -1430,6 +1543,7 @@ impl LuaEngine {
         rex_table.set(
             "match",
             lua.create_function(|lua, (subject, pattern): (String, String)| {
+                let pattern = convert_pcre_to_rust_regex(&pattern);
                 match regex::Regex::new(&pattern) {
                     Ok(re) => match re.captures(&subject) {
                         Some(caps) => {
@@ -1458,6 +1572,7 @@ impl LuaEngine {
         rex_table.set(
             "find",
             lua.create_function(|lua, (subject, pattern): (String, String)| {
+                let pattern = convert_pcre_to_rust_regex(&pattern);
                 match regex::Regex::new(&pattern) {
                     Ok(re) => match re.find(&subject) {
                         Some(m) => {
@@ -1559,6 +1674,7 @@ impl LuaEngine {
         let state_rc33 = state_rc.clone();
         let trigger_fn =
             lua.create_function_mut(move |_, (pattern, callback): (String, Function)| {
+                let pattern = convert_pcre_to_rust_regex(&pattern);
                 let re = Regex::new(&pattern)
                     .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", pattern, e)))?;
                 state_rc33.borrow_mut().triggers.push(Trigger {
@@ -1582,6 +1698,7 @@ impl LuaEngine {
         let state_rc34 = state_rc.clone();
         let alias_fn =
             lua.create_function_mut(move |_, (pattern, callback): (String, Function)| {
+                let pattern = convert_pcre_to_rust_regex(&pattern);
                 let re = Regex::new(&pattern)
                     .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", pattern, e)))?;
                 state_rc34.borrow_mut().aliases.push(Alias {
@@ -1601,7 +1718,7 @@ impl LuaEngine {
             lua.create_function_mut(move |_, (interval_secs, callback): (u64, Function)| {
                 state_rc35.borrow_mut().timers.push(TimerDef {
                     name: String::new(),
-                    interval_secs,
+                    interval_millis: interval_secs * 1000,
                     callback,
                     enabled: true,
                     group: String::new(),
@@ -1653,7 +1770,7 @@ impl LuaEngine {
             .load(&code)
             .set_name(path)
             .exec()
-            .map_err(|e| format!("脚本执行错误 '{}': {}", path, e))?;
+            .map_err(|e| format!("err '{}': {}", path, e))?;
 
         self.set_script_path(path);
         Ok(())
@@ -1839,6 +1956,11 @@ impl LuaEngine {
             .insert(key.to_string(), value.to_string());
     }
 
+    /// 设置连接主机地址（供 GetInfo(1) 返回）
+    pub fn set_host(&self, host: &str) {
+        self.state.borrow_mut().host = host.to_string();
+    }
+
     /// 设置 Lua 全局变量（脚本中可直接按名引用）
     pub fn set_global(&self, name: &str, value: &str) {
         let globals = self.lua.globals();
@@ -1875,14 +1997,14 @@ impl LuaEngine {
         self.state.borrow_mut().pending_logs.drain(..).collect()
     }
 
-    /// 获取定时器列表（interval_secs）
+    /// 获取定时器列表（interval_millis）
     pub fn timer_intervals(&self) -> Vec<u64> {
         self.state
             .borrow()
             .timers
             .iter()
             .filter(|t| t.enabled)
-            .map(|t| t.interval_secs)
+            .map(|t| t.interval_millis)
             .collect()
     }
 
@@ -1905,6 +2027,45 @@ impl LuaEngine {
     }
 }
 
+/// 将 PCRE 正则模式转换为 Rust regex 兼容语法
+///
+/// MushClient 使用 PCRE 引擎，与 Rust regex crate 存在语法差异。
+/// 此函数处理常见的兼容性问题：
+/// - `\Z` (PCRE: 字符串末尾或末尾换行前) → `$`
+/// - `\z` (PCRE: 字符串绝对末尾) → `$`
+fn convert_pcre_to_rust_regex(pattern: &str) -> String {
+    let mut result = String::with_capacity(pattern.len());
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            let next = chars[i + 1];
+            match next {
+                'Z' => {
+                    // PCRE \Z → Rust $
+                    result.push('$');
+                    i += 2;
+                }
+                'z' => {
+                    // PCRE \z → Rust $
+                    result.push('$');
+                    i += 2;
+                }
+                _ => {
+                    result.push(chars[i]);
+                    i += 1;
+                }
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    result
+}
+
 /// 添加触发器的通用实现
 #[allow(clippy::too_many_arguments)]
 fn add_trigger_impl(
@@ -1921,8 +2082,10 @@ fn add_trigger_impl(
     let is_regex = (flags & 32) != 0;
 
     let re_str = if is_regex {
-        match_str.to_string()
+        // 正则模式：先做 PCRE 兼容转换
+        convert_pcre_to_rust_regex(match_str)
     } else {
+        // 通配符模式：不需要 PCRE 转换，直接转义
         regex_escape(match_str)
             .replace('*', "(.*)")
             .replace('?', "(.)")
@@ -2470,7 +2633,7 @@ mod tests {
         with_engine(|engine| {
             let result: i64 = eval(
                 engine,
-                "return AddTriggerEx('ex_trig', 'test', '', 1, 0, 0, '', '', 0, 0)",
+                "return AddTriggerEx('ex_trig', 'test', '', 1)",
             )
             .unwrap();
             assert_eq!(result, 0);
@@ -2564,7 +2727,7 @@ mod tests {
         with_engine(|engine| {
             let result: i64 = eval(
                 engine,
-                "return AddAlias('test_alias', 'kill *', '', 1, 0, '', 0)",
+                "return AddAlias('test_alias', 'kill *', '', 1)",
             )
             .unwrap();
             assert_eq!(result, 0);
@@ -2577,7 +2740,7 @@ mod tests {
         with_engine(|engine| {
             let result: i64 = eval(
                 engine,
-                r#"return AddAlias('regex_alias', [[^go (\w+)$]], '', 33, 0, '', 0)"#,
+                r#"return AddAlias('regex_alias', [[^go (\w+)$]], '', 33)"#,
             )
             .unwrap();
             assert_eq!(result, 0);
@@ -2587,7 +2750,7 @@ mod tests {
     #[test]
     fn test_delete_alias() {
         with_engine(|engine| {
-            exec(engine, "AddAlias('del_alias', 'test', '', 1, 0, '', 0)").unwrap();
+            exec(engine, "AddAlias('del_alias', 'test', '', 1)").unwrap();
             let result: i64 = eval(engine, "return DeleteAlias('del_alias')").unwrap();
             assert_eq!(result, 0);
             assert_eq!(engine.alias_count(), 0);
@@ -2605,8 +2768,8 @@ mod tests {
     #[test]
     fn test_get_alias_list() {
         with_engine(|engine| {
-            exec(engine, "AddAlias('a1', 'x', '', 1, 0, '', 0)").unwrap();
-            exec(engine, "AddAlias('a2', 'y', '', 1, 0, '', 0)").unwrap();
+            exec(engine, "AddAlias('a1', 'x', '', 1)").unwrap();
+            exec(engine, "AddAlias('a2', 'y', '', 1)").unwrap();
             let list: Vec<String> = eval(
                 engine,
                 "local t = GetAliasList(); local r = {}; for i=1,#t do r[i]=t[i] end; return r",
@@ -2620,7 +2783,7 @@ mod tests {
     #[test]
     fn test_set_alias_option() {
         with_engine(|engine| {
-            exec(engine, "AddAlias('opt_alias', 'test', '', 1, 0, '', 0)").unwrap();
+            exec(engine, "AddAlias('opt_alias', 'test', '', 1)").unwrap();
             exec(engine, "SetAliasOption('opt_alias', 'group', 'mygroup')").unwrap();
             let result: i64 = eval(
                 engine,
@@ -2648,7 +2811,7 @@ mod tests {
         with_engine(|engine| {
             exec(engine, r#"
                 alias_result = nil
-                AddAlias('match_alias', 'kill *', '', 1, 0, 'function(t) alias_result = t[1] end', 0)
+                AddAlias('match_alias', 'kill *', '', 1, 'function(t) alias_result = t[1] end')
             "#).unwrap();
             let matched = engine.process_input("kill goblin");
             assert!(matched);
@@ -2660,7 +2823,7 @@ mod tests {
     #[test]
     fn test_alias_no_match() {
         with_engine(|engine| {
-            exec(engine, "AddAlias('no_match', 'kill *', '', 1, 0, '', 0)").unwrap();
+            exec(engine, "AddAlias('no_match', 'kill *', '', 1)").unwrap();
             let matched = engine.process_input("look");
             assert!(!matched);
         });
@@ -2671,7 +2834,7 @@ mod tests {
         with_engine(|engine| {
             exec(engine, r#"
                 regex_alias_result = nil
-                AddAlias('regex_al', [[^go (\w+)$]], '', 33, 0, 'function(t) regex_alias_result = t[1] end', 0)
+                AddAlias('regex_al', [[^go (\w+)$]], '', 33, 'function(t) regex_alias_result = t[1] end')
             "#).unwrap();
             let matched = engine.process_input("go north");
             assert!(matched);
@@ -2683,7 +2846,7 @@ mod tests {
     #[test]
     fn test_alias_disabled_not_matching() {
         with_engine(|engine| {
-            exec(engine, "AddAlias('dis_al', 'test', '', 0, 0, '', 0)").unwrap();
+            exec(engine, "AddAlias('dis_al', 'test', '', 0)").unwrap();
             let matched = engine.process_input("test");
             assert!(!matched);
         });
@@ -2696,7 +2859,7 @@ mod tests {
                 engine,
                 r#"
                 qm_result = nil
-                AddAlias('qm_alias', 'go ?', '', 1, 0, 'function(t) qm_result = t[1] end', 0)
+                AddAlias('qm_alias', 'go ?', '', 1, 'function(t) qm_result = t[1] end')
             "#,
             )
             .unwrap();
@@ -2716,7 +2879,7 @@ mod tests {
         with_engine(|engine| {
             let result: i64 = eval(
                 engine,
-                "return AddTimer('test_timer', 0, 0, 5, 0, 1, 0, '', 0)",
+                "return AddTimer('test_timer', 0, 0, 5, '', 1)",
             )
             .unwrap();
             assert_eq!(result, 0);
@@ -2727,7 +2890,7 @@ mod tests {
     #[test]
     fn test_delete_timer() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('del_timer', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('del_timer', 0, 0, 5, '', 1)").unwrap();
             let result: i64 = eval(engine, "return DeleteTimer('del_timer')").unwrap();
             assert_eq!(result, 0);
             assert_eq!(engine.timer_count(), 0);
@@ -2745,8 +2908,8 @@ mod tests {
     #[test]
     fn test_get_timer_list() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('t1', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
-            exec(engine, "AddTimer('t2', 0, 0, 10, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('t1', 0, 0, 5, '', 1)").unwrap();
+            exec(engine, "AddTimer('t2', 0, 0, 10, '', 1)").unwrap();
             let list: Vec<String> = eval(
                 engine,
                 "local t = GetTimerList(); local r = {}; for i=1,#t do r[i]=t[i] end; return r",
@@ -2760,7 +2923,7 @@ mod tests {
     #[test]
     fn test_get_timer_info() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('info_timer', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('info_timer', 0, 0, 5, '', 1)").unwrap();
             let enabled: bool = eval(engine, "return GetTimerInfo('info_timer', 6)").unwrap();
             assert!(enabled);
         });
@@ -2769,7 +2932,7 @@ mod tests {
     #[test]
     fn test_get_timer_info_group() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('grp_timer', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('grp_timer', 0, 0, 5, '', 1)").unwrap();
             exec(engine, "SetTimerOption('grp_timer', 'group', 'mygroup')").unwrap();
             let group: String = eval(engine, "return GetTimerInfo('grp_timer', 19)").unwrap();
             assert_eq!(group, "mygroup");
@@ -2787,7 +2950,7 @@ mod tests {
     #[test]
     fn test_set_timer_option() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('opt_timer', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('opt_timer', 0, 0, 5, '', 1)").unwrap();
             exec(engine, "SetTimerOption('opt_timer', 'enabled', false)").unwrap();
             let enabled: bool = eval(engine, "return GetTimerInfo('opt_timer', 6)").unwrap();
             assert!(!enabled);
@@ -2797,8 +2960,8 @@ mod tests {
     #[test]
     fn test_enable_timer_group() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('tg1', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
-            exec(engine, "AddTimer('tg2', 0, 0, 10, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('tg1', 0, 0, 5, '', 1)").unwrap();
+            exec(engine, "AddTimer('tg2', 0, 0, 10, '', 1)").unwrap();
             exec(engine, "SetTimerOption('tg1', 'group', 'grp_t')").unwrap();
             exec(engine, "SetTimerOption('tg2', 'group', 'grp_t')").unwrap();
             exec(engine, "EnableTimerGroup('grp_t', false)").unwrap();
@@ -2810,7 +2973,7 @@ mod tests {
     #[test]
     fn test_enable_timer_group_skips_empty_group() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('nogrp_t', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('nogrp_t', 0, 0, 5, '', 1)").unwrap();
             exec(engine, "EnableTimerGroup('somegroup', false)").unwrap();
             let enabled: bool = eval(engine, "return GetTimerInfo('nogrp_t', 6)").unwrap();
             assert!(enabled); // 空group的定时器不应被影响
@@ -2820,7 +2983,7 @@ mod tests {
     #[test]
     fn test_enable_timer() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('et_t', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('et_t', 0, 0, 5, '', 1)").unwrap();
             exec(engine, "EnableTimer('et_t', false)").unwrap();
             let enabled: bool = eval(engine, "return GetTimerInfo('et_t', 6)").unwrap();
             assert!(!enabled);
@@ -2841,11 +3004,11 @@ mod tests {
     #[test]
     fn test_timer_intervals() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('i1', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
-            exec(engine, "AddTimer('i2', 0, 0, 10, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('i1', 0, 0, 5, '', 1)").unwrap();
+            exec(engine, "AddTimer('i2', 0, 0, 10, '', 1)").unwrap();
             let intervals = engine.timer_intervals();
-            assert!(intervals.contains(&5));
-            assert!(intervals.contains(&10));
+            assert!(intervals.contains(&5000));
+            assert!(intervals.contains(&10000));
         });
     }
 
@@ -2856,7 +3019,7 @@ mod tests {
                 engine,
                 r#"
                 timer_result = nil
-                AddTimer('fire_t', 0, 0, 5, 0, 1, 0, 'timer_result = "fired"', 0)
+                AddTimer('fire_t', 0, 0, 5, '', 1, 'timer_result = "fired"')
             "#,
             )
             .unwrap();
@@ -2870,7 +3033,7 @@ mod tests {
     fn test_fire_timer_one_shot() {
         with_engine(|engine| {
             // flag 4 = OneShot, flag 1 = Enabled
-            exec(engine, "AddTimer('oneshot', 0, 0, 5, 0, 5, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('oneshot', 0, 0, 5, '', 5)").unwrap();
             assert_eq!(engine.timer_count(), 1);
             engine.fire_timer(0);
             assert_eq!(engine.timer_count(), 0);
@@ -2884,7 +3047,7 @@ mod tests {
                 engine,
                 r#"
                 disabled_timer_result = nil
-                AddTimer('dis_t', 0, 0, 5, 0, 0, 0, 'disabled_timer_result = true', 0)
+                AddTimer('dis_t', 0, 0, 5, '', 0, 'disabled_timer_result = true')
             "#,
             )
             .unwrap();
@@ -2897,10 +3060,30 @@ mod tests {
     #[test]
     fn test_timer_zero_interval() {
         with_engine(|engine| {
-            // 0秒间隔应被设为1秒
-            exec(engine, "AddTimer('zero_t', 0, 0, 0, 0, 1, 0, '', 0)").unwrap();
+            // 0秒间隔应被设为1秒（1000毫秒）
+            exec(engine, "AddTimer('zero_t', 0, 0, 0, '', 1)").unwrap();
             let intervals = engine.timer_intervals();
-            assert!(intervals.contains(&1));
+            assert!(intervals.contains(&1000));
+        });
+    }
+
+    #[test]
+    fn test_timer_float_sec() {
+        with_engine(|engine| {
+            // 浮点数秒应正确转换为毫秒
+            exec(engine, "AddTimer('float_t', 0, 0, 0.10, '', 1)").unwrap();
+            let intervals = engine.timer_intervals();
+            assert!(intervals.contains(&100)); // 0.10秒 = 100毫秒
+        });
+    }
+
+    #[test]
+    fn test_timer_nil_sec() {
+        with_engine(|engine| {
+            // nil 秒参数应默认为1秒（1000毫秒）
+            exec(engine, "AddTimer('nil_t', 0, 0, nil, '', 1)").unwrap();
+            let intervals = engine.timer_intervals();
+            assert!(intervals.contains(&1000));
         });
     }
 
@@ -2992,8 +3175,13 @@ mod tests {
     #[test]
     fn test_get_info_1() {
         with_engine(|engine| {
+            // 默认未设置 host 时返回空字符串
             let ver: String = eval(engine, "return GetInfo(1)").unwrap();
-            assert!(ver.starts_with("RustLuaMud"));
+            assert_eq!(ver, "");
+            // 设置 host 后返回主机地址
+            engine.set_host("ln.xkxmud.com");
+            let host: String = eval(engine, "return GetInfo(1)").unwrap();
+            assert_eq!(host, "ln.xkxmud.com");
         });
     }
 
@@ -3625,8 +3813,8 @@ mod tests {
             "AddTrigger('t1', 'test', '', 33, 0, 0, '', '', 0, 0)",
         )
         .unwrap();
-        exec(&mut engine, "AddAlias('a1', 'go', '', 33, 0, '', 0)").unwrap();
-        exec(&mut engine, "AddTimer('tm1', 0, 0, 10, 0, 1, 0, '', 0)").unwrap();
+        exec(&mut engine, "AddAlias('a1', 'go', '', 33)").unwrap();
+        exec(&mut engine, "AddTimer('tm1', 0, 0, 10, '', 1)").unwrap();
 
         assert_eq!(engine.trigger_count(), 1);
         assert_eq!(engine.alias_count(), 1);
@@ -3636,17 +3824,17 @@ mod tests {
     #[test]
     fn test_timer_intervals_with_disabled() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('t1', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
-            exec(engine, "AddTimer('t2', 0, 0, 10, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('t1', 0, 0, 5, '', 1)").unwrap();
+            exec(engine, "AddTimer('t2', 0, 0, 10, '', 1)").unwrap();
             let intervals = engine.timer_intervals();
-            assert_eq!(intervals, vec![5, 10]);
+            assert_eq!(intervals, vec![5000, 10000]);
         });
     }
 
     #[test]
     fn test_enable_timer_via_api() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('t1', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('t1', 0, 0, 5, '', 1)").unwrap();
             let result: i32 = eval(engine, "return EnableTimer('t1', false)").unwrap();
             assert_eq!(result, 0);
             let result: i32 = eval(engine, "return EnableTimer('t1', true)").unwrap();
@@ -3694,7 +3882,7 @@ mod tests {
     #[test]
     fn test_get_timer_info_codes() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('t1', 0, 1, 30, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('t1', 0, 1, 30, '', 1)").unwrap();
             // code 6 = enabled
             let en: bool = eval(engine, "return GetTimerInfo('t1', 6)").unwrap();
             assert!(en);
@@ -3707,7 +3895,7 @@ mod tests {
     #[test]
     fn test_set_alias_option_enabled() {
         with_engine(|engine| {
-            exec(engine, "AddAlias('a1', 'go', '', 33, 0, '', 0)").unwrap();
+            exec(engine, "AddAlias('a1', 'go', '', 33)").unwrap();
             exec(engine, "SetAliasOption('a1', 'enabled', false)").unwrap();
             // Verify via GetAliasList or re-enable
             exec(engine, "SetAliasOption('a1', 'enabled', true)").unwrap();
@@ -3717,7 +3905,7 @@ mod tests {
     #[test]
     fn test_set_timer_option_enabled() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('t1', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('t1', 0, 0, 5, '', 1)").unwrap();
             exec(engine, "SetTimerOption('t1', 'enabled', false)").unwrap();
             let en: bool = eval(engine, "return GetTimerInfo('t1', 6)").unwrap();
             assert!(!en);
@@ -3734,12 +3922,60 @@ mod tests {
                 engine,
                 r#"
                 ml_result = nil
-                AddTriggerEx('ml', [[line1\nline2]], '', 33, 0, 0, '', '', 0, 0, 2, false)
+                AddTriggerEx('ml', [[line1\nline2]], '', 33, 0, 0, '', '', 0, 2)
             "#,
             )
             .unwrap();
             engine.process_output("line1");
             engine.process_output("line2");
+        });
+    }
+
+    #[test]
+    fn test_pcre_z_anchor_in_trigger() {
+        // 测试 PCRE \Z 锚点在触发器正则中的兼容性
+        with_engine(|engine| {
+            // 包含 \Z 的正则模式应被正确转换为 Rust regex 的 $
+            exec(
+                engine,
+                r#"
+                pcre_result = nil
+                AddTriggerEx('pcre_z', [[^(> > > |> > |> |)一个用颅骨制成的钵。\n里面装(满了|了七、八分满|了五、六分满)\Z]], '', 33, 0, 0, '', '', 0, 2)
+            "#,
+            )
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_pcre_z_anchor_simple() {
+        // 测试简单的 \Z 转换
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                simple_z_result = nil
+                AddTriggerEx('simple_z', [[^hello\Z]], '', 33)
+            "#,
+            )
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_pcre_z_anchor_in_rex() {
+        // 测试 rex 库中的 \Z 兼容性
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                local r = rex.new([[test\Z]])
+                rex_match_result = r:match("test")
+            "#,
+            )
+            .unwrap();
+            let result: mlua::Value = eval(engine, "return rex_match_result").unwrap();
+            assert!(!result.is_nil());
         });
     }
 
@@ -4139,7 +4375,7 @@ mod tests {
             exec(
                 engine,
                 r#"
-                AddAlias('go_alias', 'go', '', 33, 0, 'function() send("north") end', 0)
+                AddAlias('go_alias', 'go', '', 33, 'function() send("north") end')
             "#,
             )
             .unwrap();
@@ -4204,7 +4440,7 @@ mod tests {
     #[test]
     fn test_delete_alias_clears() {
         with_engine(|engine| {
-            exec(engine, "AddAlias('del_me', 'go', '', 33, 0, '', 0)").unwrap();
+            exec(engine, "AddAlias('del_me', 'go', '', 33)").unwrap();
             assert_eq!(engine.alias_count(), 1);
             exec(engine, "DeleteAlias('del_me')").unwrap();
             assert_eq!(engine.alias_count(), 0);
@@ -4214,7 +4450,7 @@ mod tests {
     #[test]
     fn test_delete_timer_clears() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('del_me', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('del_me', 0, 0, 5, '', 1)").unwrap();
             assert_eq!(engine.timer_count(), 1);
             exec(engine, "DeleteTimer('del_me')").unwrap();
             assert_eq!(engine.timer_count(), 0);
@@ -4252,7 +4488,7 @@ mod tests {
     fn test_enable_alias_group_via_set_option() {
         with_engine(|engine| {
             // No EnableAliasGroup API, use SetAliasOption to set group then enable/disable
-            exec(engine, "AddAlias('g1_a1', 'x', '', 33, 0, '', 0)").unwrap();
+            exec(engine, "AddAlias('g1_a1', 'x', '', 33)").unwrap();
             exec(engine, "SetAliasOption('g1_a1', 'group', 'grp_b')").unwrap();
             exec(engine, "SetAliasOption('g1_a1', 'enabled', false)").unwrap();
             // Verify disabled
@@ -4266,7 +4502,7 @@ mod tests {
     #[test]
     fn test_enable_timer_group_via_api() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('g1_t1', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('g1_t1', 0, 0, 5, '', 1)").unwrap();
             // Set group via SetTimerOption
             exec(engine, "SetTimerOption('g1_t1', 'group', 'grp_c')").unwrap();
             // EnableTimerGroup returns nil (unit)
@@ -4542,7 +4778,7 @@ mod tests {
             exec(
                 engine,
                 r#"
-                AddTimer('cmd_timer', 0, 0, 5, 0, 1, 0, 'send("auto_command")', 0)
+                AddTimer('cmd_timer', 0, 0, 5, '', 1, 'send("auto_command")')
             "#,
             )
             .unwrap();
@@ -4574,7 +4810,7 @@ mod tests {
     fn test_timer_one_shot_auto_remove() {
         with_engine(|engine| {
             // flag 5 = Enabled(1) + OneShot(4)
-            exec(engine, "AddTimer('oneshot_t', 0, 0, 3, 0, 5, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('oneshot_t', 0, 0, 3, '', 5)").unwrap();
             assert_eq!(engine.timer_count(), 1);
             engine.fire_timer(0);
             assert_eq!(engine.timer_count(), 0);
@@ -4584,7 +4820,7 @@ mod tests {
     #[test]
     fn test_timer_repeating_stays() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('repeat_t', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('repeat_t', 0, 0, 5, '', 1)").unwrap();
             assert_eq!(engine.timer_count(), 1);
             engine.fire_timer(0);
             // Non-one-shot timer should remain
@@ -4599,7 +4835,7 @@ mod tests {
                 engine,
                 r#"
                 disabled_t_result = nil
-                AddTimer('dis_t', 0, 0, 5, 0, 0, 0, 'disabled_t_result = true', 0)
+                AddTimer('dis_t', 0, 0, 5, '', 0, 'disabled_t_result = true')
             "#,
             )
             .unwrap();
@@ -4616,7 +4852,7 @@ mod tests {
                 engine,
                 r#"
                 cycle_result = nil
-                AddTimer('cycle_t', 0, 0, 5, 0, 1, 0, 'cycle_result = "fired"', 0)
+                AddTimer('cycle_t', 0, 0, 5, '', 1, 'cycle_result = "fired"')
             "#,
             )
             .unwrap();
@@ -4642,8 +4878,8 @@ mod tests {
                 engine,
                 r#"
                 tg1_result = nil; tg2_result = nil
-                AddTimer('tg1', 0, 0, 5, 0, 1, 0, 'tg1_result = true', 0)
-                AddTimer('tg2', 0, 0, 10, 0, 1, 0, 'tg2_result = true', 0)
+                AddTimer('tg1', 0, 0, 5, '', 1, 'tg1_result = true')
+                AddTimer('tg2', 0, 0, 10, '', 1, 'tg2_result = true')
                 SetTimerOption('tg1', 'group', 'grpX')
                 SetTimerOption('tg2', 'group', 'grpX')
             "#,
@@ -4681,8 +4917,8 @@ mod tests {
     #[test]
     fn test_timer_delete_during_iteration() {
         with_engine(|engine| {
-            exec(engine, "AddTimer('del1', 0, 0, 5, 0, 1, 0, '', 0)").unwrap();
-            exec(engine, "AddTimer('del2', 0, 0, 10, 0, 1, 0, '', 0)").unwrap();
+            exec(engine, "AddTimer('del1', 0, 0, 5, '', 1)").unwrap();
+            exec(engine, "AddTimer('del2', 0, 0, 10, '', 1)").unwrap();
             assert_eq!(engine.timer_count(), 2);
             exec(engine, "DeleteTimer('del1')").unwrap();
             assert_eq!(engine.timer_count(), 1);
@@ -4700,7 +4936,7 @@ mod tests {
         with_engine(|engine| {
             exec(engine, r#"
                 alias_c1 = nil; alias_c2 = nil
-                AddAlias('multi_cap_a', 'cast * at *', '', 1, 0, 'function(t) alias_c1 = t[1]; alias_c2 = t[2] end', 0)
+                AddAlias('multi_cap_a', 'cast * at *', '', 1, 'function(t) alias_c1 = t[1]; alias_c2 = t[2] end')
             "#).unwrap();
             let handled = engine.process_input("cast fireball at goblin");
             assert!(handled);
@@ -4716,8 +4952,8 @@ mod tests {
         with_engine(|engine| {
             exec(engine, r#"
                 priority_result = nil
-                AddAlias('specific', 'kill goblin', '', 33, 0, 'function() priority_result = "specific" end', 0)
-                AddAlias('general', 'kill *', '', 33, 0, 'function() priority_result = "general" end', 0)
+                AddAlias('specific', 'kill goblin', '', 33, 'function() priority_result = "specific" end')
+                AddAlias('general', 'kill *', '', 33, 'function() priority_result = "general" end')
             "#).unwrap();
             let handled = engine.process_input("kill goblin");
             assert!(handled);
@@ -4732,7 +4968,7 @@ mod tests {
     #[test]
     fn test_alias_no_match_returns_false() {
         with_engine(|engine| {
-            exec(engine, "AddAlias('only_go', 'go *', '', 1, 0, '', 0)").unwrap();
+            exec(engine, "AddAlias('only_go', 'go *', '', 1)").unwrap();
             let handled = engine.process_input("look around");
             assert!(!handled);
         });
@@ -4744,7 +4980,7 @@ mod tests {
             exec(
                 engine,
                 r#"
-                AddAlias('kk', 'kk', '', 33, 0, 'function() send("kill") end', 0)
+                AddAlias('kk', 'kk', '', 33, 'function() send("kill") end')
             "#,
             )
             .unwrap();
@@ -4762,7 +4998,7 @@ mod tests {
                 engine,
                 r#"
                 dis_alias_result = nil
-                AddAlias('dis_al', 'test', '', 0, 0, 'function() dis_alias_result = true end', 0)
+                AddAlias('dis_al', 'test', '', 0, 'function() dis_alias_result = true end')
             "#,
             )
             .unwrap();
@@ -4776,7 +5012,7 @@ mod tests {
         with_engine(|engine| {
             exec(engine, r#"
                 toggle_alias_result = nil
-                AddAlias('toggle_a', 'hello', '', 1, 0, 'function() toggle_alias_result = true end', 0)
+                AddAlias('toggle_a', 'hello', '', 1, 'function() toggle_alias_result = true end')
             "#).unwrap();
             // Initially enabled
             let h1 = engine.process_input("hello");
@@ -4795,8 +5031,8 @@ mod tests {
     #[test]
     fn test_alias_group_management() {
         with_engine(|engine| {
-            exec(engine, "AddAlias('grp_a1', 'x', '', 1, 0, '', 0)").unwrap();
-            exec(engine, "AddAlias('grp_a2', 'y', '', 1, 0, '', 0)").unwrap();
+            exec(engine, "AddAlias('grp_a1', 'x', '', 1)").unwrap();
+            exec(engine, "AddAlias('grp_a2', 'y', '', 1)").unwrap();
             exec(engine, "SetAliasOption('grp_a1', 'group', 'combat')").unwrap();
             exec(engine, "SetAliasOption('grp_a2', 'group', 'combat')").unwrap();
             // Disable both via group (manual since no EnableAliasGroup)
@@ -4814,7 +5050,7 @@ mod tests {
         with_engine(|engine| {
             exec(engine, r#"
                 regex_al_result = nil
-                AddAlias('regex_a', [[^#(\d+)$]], '', 33, 0, 'function(t) regex_al_result = t[1] end', 0)
+                AddAlias('regex_a', [[^#(\d+)$]], '', 33, 'function(t) regex_al_result = t[1] end')
             "#).unwrap();
             let handled = engine.process_input("#5");
             assert!(handled);
@@ -4834,14 +5070,14 @@ mod tests {
                 engine,
                 r#"
                 ci_alias_result = nil
-                AddAlias('ci_al', 'HELLO', '', 33, 0, 'function() ci_alias_result = true end', 0)
+                AddAlias('ci_al', 'HELLO', '', 33, 'function() ci_alias_result = true end')
             "#,
             )
             .unwrap();
             // Use regex flag (33) with (?i) prefix for case insensitive
             exec(engine, r#"
                 ci_alias_result2 = nil
-                AddAlias('ci_al2', [[(?i)^hello$]], '', 33, 0, 'function() ci_alias_result2 = true end', 0)
+                AddAlias('ci_al2', [[(?i)^hello$]], '', 33, 'function() ci_alias_result2 = true end')
             "#).unwrap();
             let handled = engine.process_input("hello");
             assert!(handled);
@@ -4853,11 +5089,11 @@ mod tests {
     #[test]
     fn test_alias_delete_and_readd() {
         with_engine(|engine| {
-            exec(engine, "AddAlias('temp_a', 'go', '', 1, 0, '', 0)").unwrap();
+            exec(engine, "AddAlias('temp_a', 'go', '', 1)").unwrap();
             assert_eq!(engine.alias_count(), 1);
             exec(engine, "DeleteAlias('temp_a')").unwrap();
             assert_eq!(engine.alias_count(), 0);
-            exec(engine, "AddAlias('temp_a', 'go', '', 1, 0, '', 0)").unwrap();
+            exec(engine, "AddAlias('temp_a', 'go', '', 1)").unwrap();
             assert_eq!(engine.alias_count(), 1);
         });
     }
@@ -4868,7 +5104,7 @@ mod tests {
             exec(
                 engine,
                 r#"
-                AddAlias('err_al', 'boom', '', 33, 0, 'function() error("alias error") end', 0)
+                AddAlias('err_al', 'boom', '', 33, 'function() error("alias error") end')
             "#,
             )
             .unwrap();
@@ -4893,6 +5129,58 @@ mod tests {
             assert!(handled);
             let result: Option<String> = eval(engine, "return raw_input").unwrap();
             assert_eq!(result, Some("test".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_infobtn_compat_layer() {
+        // 验证 infobtn.xxx 调用通过 setmetatable 转发到 cfg.xxx
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                -- 模拟 michen_config.lua 的兼容层
+                cfg = cfg or {}
+                cfg.test_val = 0
+                function cfg.set_test()
+                    cfg.test_val = 42
+                end
+                infobtn = infobtn or {}
+                setmetatable(infobtn, {__index = function(_, key)
+                    if cfg[key] then return cfg[key] end
+                    return function() end
+                end})
+                -- 通过 infobtn 调用 cfg 的函数
+                infobtn.set_test()
+            "#,
+            )
+            .unwrap();
+            let val: i64 = eval(engine, "return cfg.test_val").unwrap();
+            assert_eq!(val, 42);
+        });
+    }
+
+    #[test]
+    fn test_infobtn_missing_method_no_error() {
+        // 验证 infobtn.xxx 调用不存在的方法不会报错（返回空函数）
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                cfg = cfg or {}
+                infobtn = infobtn or {}
+                setmetatable(infobtn, {__index = function(_, key)
+                    if cfg[key] then return cfg[key] end
+                    return function() end
+                end})
+                -- 调用不存在的方法应静默返回
+                infobtn.nonexistent()
+                compat_ok = true
+            "#,
+            )
+            .unwrap();
+            let ok: bool = eval(engine, "return compat_ok").unwrap();
+            assert!(ok);
         });
     }
 
@@ -4944,7 +5232,7 @@ mod tests {
             exec(engine, r#"
                 SetVariable('counter', '0')
                 AddTrigger('count_trig', 'tick', '', 33, 0, 0, '', 'function() SetVariable("counter", tostring(tonumber(GetVariable("counter")) + 1)) end', 0, 0)
-                AddAlias('show_count', 'count', '', 33, 0, 'function() Note("count=" .. GetVariable("counter")) end', 0)
+                AddAlias('show_count', 'count', '', 33, 'function() Note("count=" .. GetVariable("counter")) end')
             "#).unwrap();
             engine.process_output("tick");
             engine.process_output("tick");
