@@ -188,7 +188,9 @@ mod tests {
     #[test]
     fn test_add_connection() {
         let mut mgr = ConnectionManager::new();
-        let id = mgr.add_connection(&make_config("test", "localhost", 4000)).unwrap();
+        let id = mgr
+            .add_connection(&make_config("test", "localhost", 4000))
+            .unwrap();
         assert_eq!(id, 0);
         assert_eq!(mgr.sessions.len(), 1);
         assert_eq!(mgr.sessions[0].name, "test");
@@ -197,8 +199,12 @@ mod tests {
     #[test]
     fn test_add_multiple_connections() {
         let mut mgr = ConnectionManager::new();
-        let id1 = mgr.add_connection(&make_config("a", "host1", 4000)).unwrap();
-        let id2 = mgr.add_connection(&make_config("b", "host2", 5000)).unwrap();
+        let id1 = mgr
+            .add_connection(&make_config("a", "host1", 4000))
+            .unwrap();
+        let id2 = mgr
+            .add_connection(&make_config("b", "host2", 5000))
+            .unwrap();
         assert_eq!(id1, 0);
         assert_eq!(id2, 1);
         assert_eq!(mgr.sessions.len(), 2);
@@ -220,7 +226,9 @@ mod tests {
     #[test]
     fn test_add_connection_dynamic() {
         let mut mgr = ConnectionManager::new();
-        let id = mgr.add_connection_dynamic(&make_config("dyn", "h", 4000)).unwrap();
+        let id = mgr
+            .add_connection_dynamic(&make_config("dyn", "h", 4000))
+            .unwrap();
         assert_eq!(id, 0);
     }
 
@@ -299,7 +307,8 @@ mod tests {
     #[test]
     fn test_foreground_name() {
         let mut mgr = ConnectionManager::new();
-        mgr.add_connection(&make_config("alpha", "h", 4000)).unwrap();
+        mgr.add_connection(&make_config("alpha", "h", 4000))
+            .unwrap();
         assert_eq!(mgr.foreground_name(), "alpha");
     }
 

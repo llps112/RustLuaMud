@@ -32,11 +32,7 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
 }
 
 /// 构建状态栏字符串（纯逻辑，无 IO 依赖）
-fn build_status_bar(
-    sessions: &[SessionInfo],
-    foreground_id: usize,
-    total_width: usize,
-) -> String {
+fn build_status_bar(sessions: &[SessionInfo], foreground_id: usize, total_width: usize) -> String {
     let mut bar = String::new();
     for (i, info) in sessions.iter().enumerate() {
         let state_icon = match info.state {

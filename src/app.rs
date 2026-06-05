@@ -13,7 +13,11 @@ use crate::ui::{AnsiParser, Terminal};
 #[derive(Debug, PartialEq)]
 enum BuiltinCommand {
     /// /connect <名称> <主机> <端口>
-    Connect { name: String, host: String, port: u16 },
+    Connect {
+        name: String,
+        host: String,
+        port: u16,
+    },
     /// /disconnect [编号]
     Disconnect { id: Option<usize> },
     /// /close [编号]
@@ -666,10 +670,8 @@ impl App {
                         Ok(mut engine) => match engine.load_script(&path) {
                             Ok(()) => {
                                 self.manager.sessions[fg].lua_engine = Some(engine);
-                                self.terminal.append_output(&format!(
-                                    "[Lua] 脚本已重新加载: {}",
-                                    path
-                                ))?;
+                                self.terminal
+                                    .append_output(&format!("[Lua] 脚本已重新加载: {}", path))?;
                                 self.start_timers_for_session(fg);
                             }
                             Err(e) => {
@@ -916,14 +918,18 @@ mod tests {
 
     #[test]
     fn test_parse_connect_args_host_port() {
-        let parts: Vec<&str> = "/connect test mud.example.com 4000".split_whitespace().collect();
+        let parts: Vec<&str> = "/connect test mud.example.com 4000"
+            .split_whitespace()
+            .collect();
         let result = parse_connect_args(&parts);
         assert_eq!(result, Some(("mud.example.com".to_string(), 4000)));
     }
 
     #[test]
     fn test_parse_connect_args_host_colon_port() {
-        let parts: Vec<&str> = "/connect test mud.example.com:4000".split_whitespace().collect();
+        let parts: Vec<&str> = "/connect test mud.example.com:4000"
+            .split_whitespace()
+            .collect();
         let result = parse_connect_args(&parts);
         assert_eq!(result, Some(("mud.example.com".to_string(), 4000)));
     }
@@ -968,9 +974,7 @@ mod tests {
     #[test]
     fn test_parse_connect_args_host_colon_port_with_extra() {
         // host:port format with extra arg should use separate format
-        let parts: Vec<&str> = "/connect test host:4000 extra"
-            .split_whitespace()
-            .collect();
+        let parts: Vec<&str> = "/connect test host:4000 extra".split_whitespace().collect();
         let result = parse_connect_args(&parts);
         // When len != 3 and contains ':', falls to else branch
         assert_eq!(result, Some(("host:4000".to_string(), 5555)));

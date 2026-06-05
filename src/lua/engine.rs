@@ -3123,7 +3123,11 @@ mod tests {
         assert_eq!(engine.alias_count(), 0);
         assert_eq!(engine.timer_count(), 0);
 
-        exec(&mut engine, "AddTrigger('t1', 'test', '', 33, 0, 0, '', '', 0, 0)").unwrap();
+        exec(
+            &mut engine,
+            "AddTrigger('t1', 'test', '', 33, 0, 0, '', '', 0, 0)",
+        )
+        .unwrap();
         exec(&mut engine, "AddAlias('a1', 'go', '', 33, 0, '', 0)").unwrap();
         exec(&mut engine, "AddTimer('tm1', 0, 0, 10, 0, 1, 0, '', 0)").unwrap();
 
@@ -3172,7 +3176,11 @@ mod tests {
     #[test]
     fn test_get_trigger_info_codes() {
         with_engine(|engine| {
-            exec(engine, "AddTrigger('t1', 'test', '', 33, 0, 0, '', '', 0, 0)").unwrap();
+            exec(
+                engine,
+                "AddTrigger('t1', 'test', '', 33, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             // code 8 = enabled
             let en: bool = eval(engine, "return GetTriggerInfo('t1', 8)").unwrap();
             assert!(en);
@@ -3225,10 +3233,14 @@ mod tests {
     #[test]
     fn test_multiline_trigger_with_newlines() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 ml_result = nil
                 AddTriggerEx('ml', [[line1\nline2]], '', 33, 0, 0, '', '', 0, 0, 2, false)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.process_output("line1");
             engine.process_output("line2");
         });
@@ -3237,14 +3249,18 @@ mod tests {
     #[test]
     fn test_sqlite3_changes_and_rowid() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 local db = sqlite3.open(':memory:')
                 db:exec('CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)')
                 db:exec("INSERT INTO t(v) VALUES('hello')")
                 test_changes = db:changes()
                 test_rowid = db:last_insert_rowid()
                 db:close()
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let changes: i64 = eval(engine, "return test_changes").unwrap();
             let rowid: i64 = eval(engine, "return test_rowid").unwrap();
             assert_eq!(changes, 1);
@@ -3255,7 +3271,9 @@ mod tests {
     #[test]
     fn test_sqlite3_prepare_bind_step() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 local db = sqlite3.open(':memory:')
                 db:exec('CREATE TABLE t(id INTEGER, v TEXT)')
                 db:exec("INSERT INTO t(id, v) VALUES(1, 'one')")
@@ -3264,7 +3282,9 @@ mod tests {
                 test_bind_result = row and row[1] or nil
                 stmt = nil
                 db:close()
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let result: String = eval(engine, "return test_bind_result").unwrap();
             assert_eq!(result, "one");
         });
@@ -3330,10 +3350,14 @@ mod tests {
     #[test]
     fn test_timer_shorthand() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 timer_result = nil
                 timer(5, function() timer_result = "fired" end)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert_eq!(engine.timer_count(), 1);
             engine.fire_timer(0);
             let result: String = eval(engine, "return timer_result").unwrap();
@@ -3367,7 +3391,11 @@ mod tests {
     fn test_trigger_omit_from_output_flag() {
         with_engine(|engine| {
             // flag bit 4 (16) = omit from output
-            exec(engine, "AddTrigger('omit', 'hide_me', '', 49, 0, 0, '', '', 0, 0)").unwrap();
+            exec(
+                engine,
+                "AddTrigger('omit', 'hide_me', '', 49, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             engine.process_output("hide_me");
             let logs = engine.drain_logs();
             // omit trigger should not produce Note output
@@ -3378,9 +3406,13 @@ mod tests {
     #[test]
     fn test_alias_callback_sends_command() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 AddAlias('go_alias', 'go', '', 33, 0, 'function() send("north") end', 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let handled = engine.process_input("go");
             assert!(handled);
             let cmds = engine.drain_commands();
@@ -3391,12 +3423,16 @@ mod tests {
     #[test]
     fn test_trigger_keep_evaluating() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 result1 = nil
                 result2 = nil
                 AddTrigger('trig1', 'test', '', 33, 0, 0, '', 'function() result1 = 1 end', 0, 0)
                 AddTrigger('trig2', 'test', '', 33, 0, 0, '', 'function() result2 = 2 end', 0, 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.process_output("test");
             let r1: Option<i64> = eval(engine, "return result1").unwrap();
             let r2: Option<i64> = eval(engine, "return result2").unwrap();
@@ -3409,7 +3445,11 @@ mod tests {
     #[test]
     fn test_set_trigger_option_send() {
         with_engine(|engine| {
-            exec(engine, "AddTrigger('send_trig2', 'go', '', 1, 0, 0, '', '', 0, 0)").unwrap();
+            exec(
+                engine,
+                "AddTrigger('send_trig2', 'go', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             exec(engine, "SetTriggerOption('send_trig2', 'send', 'north')").unwrap();
             engine.process_output("go");
             let cmds = engine.drain_commands();
@@ -3420,7 +3460,11 @@ mod tests {
     #[test]
     fn test_delete_trigger_clears() {
         with_engine(|engine| {
-            exec(engine, "AddTrigger('del_me', 'test', '', 33, 0, 0, '', '', 0, 0)").unwrap();
+            exec(
+                engine,
+                "AddTrigger('del_me', 'test', '', 33, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             assert_eq!(engine.trigger_count(), 1);
             exec(engine, "DeleteTrigger('del_me')").unwrap();
             assert_eq!(engine.trigger_count(), 0);
@@ -3450,8 +3494,16 @@ mod tests {
     #[test]
     fn test_enable_trigger_group_via_api() {
         with_engine(|engine| {
-            exec(engine, "AddTrigger('g1_t1', 'a', '', 33, 0, 0, '', '', 0, 0)").unwrap();
-            exec(engine, "AddTrigger('g1_t2', 'b', '', 33, 0, 0, '', '', 0, 0)").unwrap();
+            exec(
+                engine,
+                "AddTrigger('g1_t1', 'a', '', 33, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
+            exec(
+                engine,
+                "AddTrigger('g1_t2', 'b', '', 33, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             // Set group via SetTriggerOption
             exec(engine, "SetTriggerOption('g1_t1', 'group', 'grp_a')").unwrap();
             exec(engine, "SetTriggerOption('g1_t2', 'group', 'grp_a')").unwrap();
@@ -3500,12 +3552,16 @@ mod tests {
     #[test]
     fn test_sqlite3_exec_error() {
         with_engine(|engine| {
-            let result: i64 = eval(engine, r#"
+            let result: i64 = eval(
+                engine,
+                r#"
                 local db = sqlite3.open(':memory:')
                 local ok, err = pcall(function() db:exec('INVALID SQL') end)
                 db:close()
                 return ok and 1 or 0
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert_eq!(result, 0);
         });
     }
@@ -3513,7 +3569,9 @@ mod tests {
     #[test]
     fn test_sqlite3_multiple_rows() {
         with_engine(|engine| {
-            let count: i64 = eval(engine, r#"
+            let count: i64 = eval(
+                engine,
+                r#"
                 local db = sqlite3.open(':memory:')
                 db:exec('CREATE TABLE t(id INTEGER, v TEXT)')
                 db:exec("INSERT INTO t VALUES(1, 'a')")
@@ -3529,7 +3587,9 @@ mod tests {
                 if row3 then c = c + 1 end
                 db:close()
                 return c
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert_eq!(count, 3);
         });
     }
@@ -3539,12 +3599,16 @@ mod tests {
         with_engine(|engine| {
             exec(engine, "SetVariable('k1', 'v1')").unwrap();
             exec(engine, "SetVariable('k2', 'v2')").unwrap();
-            let count: i64 = eval(engine, r#"
+            let count: i64 = eval(
+                engine,
+                r#"
                 local list = GetVariableList()
                 local c = 0
                 for _ in pairs(list) do c = c + 1 end
                 return c
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert_eq!(count, 2);
         });
     }
@@ -3553,10 +3617,14 @@ mod tests {
     fn test_process_output_with_trigger_and_alias_chain() {
         with_engine(|engine| {
             // Trigger fires on "prompt>" and sends a command
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 AddTrigger('auto_cmd', 'prompt>', '', 33, 0, 0, '', '', 0, 0)
                 SetTriggerOption('auto_cmd', 'send', 'look')
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.process_output("prompt>");
             let cmds = engine.drain_commands();
             assert!(cmds.contains(&"look".to_string()));
@@ -3651,10 +3719,14 @@ mod tests {
     #[test]
     fn test_trigger_send_text_with_wildcard() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 AddTrigger('auto_go', 'You see * here', '', 1, 0, 0, '', '', 0, 0)
                 SetTriggerOption('auto_go', 'send', 'examine $1')
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             // send_text 不做变量替换，直接发送
             engine.process_output("You see a sword here");
             let cmds = engine.drain_commands();
@@ -3693,8 +3765,16 @@ mod tests {
     #[test]
     fn test_trigger_duplicate_name_replaces() {
         with_engine(|engine| {
-            exec(engine, "AddTrigger('dup', 'first', '', 1, 0, 0, '', '', 0, 0)").unwrap();
-            exec(engine, "AddTrigger('dup', 'second', '', 1, 0, 0, '', '', 0, 0)").unwrap();
+            exec(
+                engine,
+                "AddTrigger('dup', 'first', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
+            exec(
+                engine,
+                "AddTrigger('dup', 'second', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
             // Both triggers exist (no uniqueness enforcement)
             assert_eq!(engine.trigger_count(), 2);
         });
@@ -3729,9 +3809,13 @@ mod tests {
     #[test]
     fn test_timer_fire_executes_send_text() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 AddTimer('cmd_timer', 0, 0, 5, 0, 1, 0, 'send("auto_command")', 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.fire_timer(0);
             let cmds = engine.drain_commands();
             // send_text is Lua code that gets executed, which calls send()
@@ -3742,10 +3826,14 @@ mod tests {
     #[test]
     fn test_timer_fire_with_callback() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 timer_cb_result = nil
                 timer(10, function() timer_cb_result = "callback_fired" end)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.fire_timer(0);
             let result: Option<String> = eval(engine, "return timer_cb_result").unwrap();
             assert_eq!(result, Some("callback_fired".to_string()));
@@ -3777,10 +3865,14 @@ mod tests {
     #[test]
     fn test_timer_disabled_not_fired() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 disabled_t_result = nil
                 AddTimer('dis_t', 0, 0, 5, 0, 0, 0, 'disabled_t_result = true', 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.fire_timer(0);
             let result: Option<bool> = eval(engine, "return disabled_t_result").unwrap();
             assert_eq!(result, None);
@@ -3790,10 +3882,14 @@ mod tests {
     #[test]
     fn test_timer_enable_disable_cycle() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 cycle_result = nil
                 AddTimer('cycle_t', 0, 0, 5, 0, 1, 0, 'cycle_result = "fired"', 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             // Disable
             exec(engine, "EnableTimer('cycle_t', false)").unwrap();
             engine.fire_timer(0);
@@ -3812,13 +3908,17 @@ mod tests {
     #[test]
     fn test_timer_group_enable_disable() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 tg1_result = nil; tg2_result = nil
                 AddTimer('tg1', 0, 0, 5, 0, 1, 0, 'tg1_result = true', 0)
                 AddTimer('tg2', 0, 0, 10, 0, 1, 0, 'tg2_result = true', 0)
                 SetTimerOption('tg1', 'group', 'grpX')
                 SetTimerOption('tg2', 'group', 'grpX')
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             exec(engine, "EnableTimerGroup('grpX', false)").unwrap();
             engine.fire_timer(0); // tg1
             engine.fire_timer(1); // tg2
@@ -3832,10 +3932,14 @@ mod tests {
     #[test]
     fn test_timer_multiple_fire() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 fire_count = 0
                 timer(5, function() fire_count = fire_count + 1 end)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.fire_timer(0);
             engine.fire_timer(0);
             engine.fire_timer(0);
@@ -3889,7 +3993,9 @@ mod tests {
             assert!(handled);
             let result: Option<String> = eval(engine, "return priority_result").unwrap();
             // Both match, both fire; last one wins since both set the same variable
-            assert!(result == Some("specific".to_string()) || result == Some("general".to_string()));
+            assert!(
+                result == Some("specific".to_string()) || result == Some("general".to_string())
+            );
         });
     }
 
@@ -3905,9 +4011,13 @@ mod tests {
     #[test]
     fn test_alias_sends_command() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 AddAlias('kk', 'kk', '', 33, 0, 'function() send("kill") end', 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let handled = engine.process_input("kk");
             assert!(handled);
             let cmds = engine.drain_commands();
@@ -3918,10 +4028,14 @@ mod tests {
     #[test]
     fn test_alias_disabled_not_matched() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 dis_alias_result = nil
                 AddAlias('dis_al', 'test', '', 0, 0, 'function() dis_alias_result = true end', 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let handled = engine.process_input("test");
             assert!(!handled);
         });
@@ -3986,10 +4100,14 @@ mod tests {
     #[test]
     fn test_alias_case_insensitive() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 ci_alias_result = nil
                 AddAlias('ci_al', 'HELLO', '', 33, 0, 'function() ci_alias_result = true end', 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             // Use regex flag (33) with (?i) prefix for case insensitive
             exec(engine, r#"
                 ci_alias_result2 = nil
@@ -4017,9 +4135,13 @@ mod tests {
     #[test]
     fn test_alias_callback_error_handled() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 AddAlias('err_al', 'boom', '', 33, 0, 'function() error("alias error") end', 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             // Should not panic
             let handled = engine.process_input("boom");
             assert!(handled);
@@ -4029,10 +4151,14 @@ mod tests {
     #[test]
     fn test_alias_input_passed_as_arg0() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 raw_input = nil
                 alias('^test$', function(t) raw_input = t[0] end)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let handled = engine.process_input("test");
             assert!(handled);
             let result: Option<String> = eval(engine, "return raw_input").unwrap();
@@ -4047,12 +4173,16 @@ mod tests {
     #[test]
     fn test_trigger_sends_command_alias_intercepts() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 AddTrigger('auto_trig', 'prompt>', '', 33, 0, 0, '', '', 0, 0)
                 SetTriggerOption('auto_trig', 'send', 'go')
                 alias_result = nil
                 alias('^go$', function() alias_result = "intercepted" end)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.process_output("prompt>");
             let cmds = engine.drain_commands();
             // Trigger sends "go" as command, but alias is for process_input not process_output

@@ -90,10 +90,8 @@ mod tests {
 
     #[test]
     fn test_enter_returns_command() {
-        let result = InputHandler::handle_key_event(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ));
+        let result =
+            InputHandler::handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(result, Some(InputEvent::Command(_))));
     }
 
@@ -105,10 +103,8 @@ mod tests {
 
     #[test]
     fn test_escape_unhandled() {
-        let result = InputHandler::handle_key_event(KeyEvent::new(
-            KeyCode::Esc,
-            KeyModifiers::NONE,
-        ));
+        let result =
+            InputHandler::handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(result.is_none());
     }
 }

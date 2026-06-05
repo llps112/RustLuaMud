@@ -159,7 +159,9 @@ mod tests {
         let long_name = "a".repeat(200);
         logger.log(&long_name, "msg");
         let date = Local::now().format("%Y%m%d");
-        let file = dir.path().join(format!("a{}_{}.log", "a".repeat(199), date));
+        let file = dir
+            .path()
+            .join(format!("a{}_{}.log", "a".repeat(199), date));
         assert!(file.exists());
     }
 }
