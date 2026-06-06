@@ -46,11 +46,8 @@ impl UserData for LuaDb {
                 let mut stmt = conn
                     .prepare(&sql)
                     .map_err(|e| mlua::Error::external(e.to_string()))?;
-                let col_names: Vec<String> = stmt
-                    .column_names()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+                let col_names: Vec<String> =
+                    stmt.column_names().iter().map(|s| s.to_string()).collect();
                 let mut rows = stmt
                     .query([])
                     .map_err(|e| mlua::Error::external(e.to_string()))?;
@@ -72,13 +69,9 @@ impl UserData for LuaDb {
                                 rusqlite::types::ValueRef::Real(f) => {
                                     rusqlite::types::Value::Real(f)
                                 }
-                                rusqlite::types::ValueRef::Text(s) => {
-                                    rusqlite::types::Value::Text(
-                                        std::str::from_utf8(s)
-                                            .unwrap_or("")
-                                            .to_string(),
-                                    )
-                                }
+                                rusqlite::types::ValueRef::Text(s) => rusqlite::types::Value::Text(
+                                    std::str::from_utf8(s).unwrap_or("").to_string(),
+                                ),
                                 rusqlite::types::ValueRef::Blob(b) => {
                                     rusqlite::types::Value::Blob(b.to_vec())
                                 }
@@ -2438,7 +2431,10 @@ mod tests {
     fn test_set_script_path() {
         with_engine(|engine| {
             engine.set_script_path("/home/user/scripts/main.lua");
-            assert_eq!(*engine.script_dir.borrow(), Some("/home/user/scripts/".to_string()));
+            assert_eq!(
+                *engine.script_dir.borrow(),
+                Some("/home/user/scripts/".to_string())
+            );
             assert_eq!(
                 engine.script_path,
                 Some("/home/user/scripts/main.lua".to_string())
@@ -4192,7 +4188,9 @@ mod tests {
             exec(engine, "ColourNote('red', 'blue', 'colored text')").unwrap();
             let logs = engine.drain_logs();
             // red=31, blue=44 → \x1B[31;44mcolored text\x1B[0m
-            assert!(logs.iter().any(|l| l.contains("\x1b[31;44mcolored text\x1b[0m")));
+            assert!(logs
+                .iter()
+                .any(|l| l.contains("\x1b[31;44mcolored text\x1b[0m")));
         });
     }
 
