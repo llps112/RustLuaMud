@@ -438,9 +438,10 @@ impl App {
         };
         let name = self.manager.sessions[session_id].name.clone();
         for msg in logs {
-            // 日志写入文件
-            self.logger.log(&name, &msg);
-            // 如果是前台连接，也在终端显示
+            // 日志写入文件（剥离 ANSI 码）
+            let clean = crate::ui::AnsiParser::strip_ansi(&msg);
+            self.logger.log(&name, &clean);
+            // 如果是前台连接，也在终端显示（保留 ANSI 码以显示颜色）
             if session_id == self.manager.foreground_id {
                 self.terminal.append_output(&format!("[Lua] {}", msg))?;
             }
@@ -797,7 +798,8 @@ impl App {
                             let logs = engine.drain_logs();
                             let name = self.manager.sessions[id].name.clone();
                             for msg in logs {
-                                self.logger.log(&name, &msg);
+                                let clean = crate::ui::AnsiParser::strip_ansi(&msg);
+                                self.logger.log(&name, &clean);
                                 if id == self.manager.foreground_id {
                                     self.terminal.append_output(&format!("[Lua] {}", msg))?;
                                 }

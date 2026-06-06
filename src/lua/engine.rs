@@ -39,6 +39,86 @@ impl UserData for LuaDb {
             Ok(conn.changes() as i64)
         });
 
+        methods.add_method("nrows", |lua, this, sql: String| {
+            // 收集所有行数据到 Vec，避免在锁内创建 Lua 对象
+            let rows_data: Vec<Vec<(String, rusqlite::types::Value)>> = {
+                let conn = this.conn.lock().unwrap();
+                let mut stmt = conn
+                    .prepare(&sql)
+                    .map_err(|e| mlua::Error::external(e.to_string()))?;
+                let col_names: Vec<String> = stmt
+                    .column_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                let mut rows = stmt
+                    .query([])
+                    .map_err(|e| mlua::Error::external(e.to_string()))?;
+                let mut result = Vec::new();
+                while let Some(row) = rows
+                    .next()
+                    .map_err(|e| mlua::Error::external(e.to_string()))?
+                {
+                    let mut row_data = Vec::with_capacity(col_names.len());
+                    for (i, col_name) in col_names.iter().enumerate() {
+                        let val = row
+                            .get_ref(i)
+                            .ok()
+                            .map(|r| match r {
+                                rusqlite::types::ValueRef::Null => rusqlite::types::Value::Null,
+                                rusqlite::types::ValueRef::Integer(n) => {
+                                    rusqlite::types::Value::Integer(n)
+                                }
+                                rusqlite::types::ValueRef::Real(f) => {
+                                    rusqlite::types::Value::Real(f)
+                                }
+                                rusqlite::types::ValueRef::Text(s) => {
+                                    rusqlite::types::Value::Text(
+                                        std::str::from_utf8(s)
+                                            .unwrap_or("")
+                                            .to_string(),
+                                    )
+                                }
+                                rusqlite::types::ValueRef::Blob(b) => {
+                                    rusqlite::types::Value::Blob(b.to_vec())
+                                }
+                            })
+                            .unwrap_or(rusqlite::types::Value::Null);
+                        row_data.push((col_name.clone(), val));
+                    }
+                    result.push(row_data);
+                }
+                result
+            };
+
+            // 在锁外创建 Lua 迭代器，将数据移入闭包
+            let mut idx = 0usize;
+            let iter_fn = lua.create_function_mut(move |lua, ()| {
+                if idx >= rows_data.len() {
+                    return Ok(None);
+                }
+                let row_data = &rows_data[idx];
+                let table = lua.create_table()?;
+                for (col_name, val) in row_data {
+                    let lua_val = match val {
+                        rusqlite::types::Value::Null => mlua::Value::Nil,
+                        rusqlite::types::Value::Integer(n) => mlua::Value::Integer(*n),
+                        rusqlite::types::Value::Real(f) => mlua::Value::Number(*f),
+                        rusqlite::types::Value::Text(s) => {
+                            mlua::Value::String(lua.create_string(s)?)
+                        }
+                        rusqlite::types::Value::Blob(b) => {
+                            mlua::Value::String(lua.create_string(b)?)
+                        }
+                    };
+                    table.set(col_name.clone(), lua_val)?;
+                }
+                idx += 1;
+                Ok(Some(table))
+            })?;
+            Ok(iter_fn)
+        });
+
         methods.add_method("last_insert_rowid", |_, this, ()| {
             let conn = this.conn.lock().unwrap();
             Ok(conn.last_insert_rowid())
@@ -413,11 +493,63 @@ fn coerce_to_f64(value: mlua::Value) -> mlua::Result<f64> {
     }
 }
 
+/// 将 MUSHclient 颜色名称映射为 ANSI 前景色代码
+fn colour_to_ansi_fg(name: &str) -> u8 {
+    match name.to_lowercase().as_str() {
+        "black" => 30,
+        "red" => 31,
+        "green" => 32,
+        "yellow" => 33,
+        "blue" => 34,
+        "magenta" => 35,
+        "cyan" => 36,
+        "white" => 37,
+        "darkred" => 31,
+        "darkgreen" => 32,
+        "darkblue" => 34,
+        "darkcyan" => 36,
+        "darkmagenta" => 35,
+        "darkyellow" => 33,
+        "darkgray" | "darkgrey" => 90,
+        "lightred" | "brightred" => 91,
+        "lightgreen" | "brightgreen" => 92,
+        "lightyellow" | "brightyellow" => 93,
+        "lightblue" | "brightblue" => 94,
+        "lightmagenta" | "brightmagenta" => 95,
+        "lightcyan" | "brightcyan" => 96,
+        "lightgray" | "lightgrey" | "brightwhite" => 97,
+        _ => 39, // 默认前景色
+    }
+}
+
+/// 将 MUSHclient 颜色名称映射为 ANSI 背景色代码
+fn colour_to_ansi_bg(name: &str) -> u8 {
+    match name.to_lowercase().as_str() {
+        "black" => 40,
+        "red" => 41,
+        "green" => 42,
+        "yellow" => 43,
+        "blue" => 44,
+        "magenta" => 45,
+        "cyan" => 46,
+        "white" => 47,
+        "darkgray" | "darkgrey" => 100,
+        "lightred" | "brightred" => 101,
+        "lightgreen" | "brightgreen" => 102,
+        "lightyellow" | "brightyellow" => 103,
+        "lightblue" | "brightblue" => 104,
+        "lightmagenta" | "brightmagenta" => 105,
+        "lightcyan" | "brightcyan" => 106,
+        "lightgray" | "lightgrey" | "brightwhite" => 107,
+        _ => 49, // 默认背景色
+    }
+}
+
 pub struct LuaEngine {
     lua: Lua,
     state: Rc<RefCell<ScriptState>>,
     script_path: Option<String>,
-    script_dir: Option<String>,
+    script_dir: Rc<RefCell<Option<String>>>,
 }
 
 impl LuaEngine {
@@ -440,11 +572,13 @@ impl LuaEngine {
             host: String::new(),
         }));
 
+        let script_dir = Rc::new(RefCell::new(None::<String>));
+
         let mut engine = Self {
             lua,
             state,
             script_path: None,
-            script_dir: None,
+            script_dir,
         };
         engine.register_api()?;
         Ok(engine)
@@ -453,9 +587,9 @@ impl LuaEngine {
     /// 设置脚本路径（同时提取目录）
     pub fn set_script_path(&mut self, path: &str) {
         if let Some(pos) = path.rfind('/') {
-            self.script_dir = Some(path[..pos + 1].to_string());
+            *self.script_dir.borrow_mut() = Some(path[..pos + 1].to_string());
         } else {
-            self.script_dir = Some("./".to_string());
+            *self.script_dir.borrow_mut() = Some("./".to_string());
         }
         self.script_path = Some(path.to_string());
     }
@@ -519,7 +653,9 @@ impl LuaEngine {
         let state_rc5 = state_rc.clone();
         let colour_note_fn =
             lua.create_function_mut(move |_, (fg, bg, text): (String, String, String)| {
-                let msg = format!("[{}:{}]: {}", fg, bg, text);
+                let fg_code = colour_to_ansi_fg(&fg);
+                let bg_code = colour_to_ansi_bg(&bg);
+                let msg = format!("\x1b[{};{}m{}\x1b[0m", fg_code, bg_code, text);
                 state_rc5.borrow_mut().pending_logs.push(msg);
                 Ok(())
             })?;
@@ -1038,7 +1174,7 @@ impl LuaEngine {
         // ============================================================
 
         // GetInfo(code)
-        let script_dir_rc = Rc::new(RefCell::new(self.script_dir.clone()));
+        let script_dir_rc = self.script_dir.clone();
         let state_rc_gi = state_rc.clone();
         let get_info_fn = lua.create_function_mut(move |lua, code: i64| match code {
             1 => {
@@ -1747,6 +1883,9 @@ impl LuaEngine {
     /// 加载并执行 Lua 脚本文件
     /// 自动检测编码：先尝试 UTF-8，失败（GBK 编码）则自动转码
     pub fn load_script(&mut self, path: &str) -> Result<(), String> {
+        // 先设置脚本路径，确保脚本执行时 GetInfo(35) 能返回正确目录
+        self.set_script_path(path);
+
         let bytes = std::fs::read(path).map_err(|e| format!("读取脚本失败 '{}': {}", path, e))?;
 
         let code = match std::str::from_utf8(&bytes) {
@@ -1763,7 +1902,6 @@ impl LuaEngine {
             .exec()
             .map_err(|e| format!("err '{}': {}", path, e))?;
 
-        self.set_script_path(path);
         Ok(())
     }
 
@@ -2300,7 +2438,7 @@ mod tests {
     fn test_set_script_path() {
         with_engine(|engine| {
             engine.set_script_path("/home/user/scripts/main.lua");
-            assert_eq!(engine.script_dir, Some("/home/user/scripts/".to_string()));
+            assert_eq!(*engine.script_dir.borrow(), Some("/home/user/scripts/".to_string()));
             assert_eq!(
                 engine.script_path,
                 Some("/home/user/scripts/main.lua".to_string())
@@ -2312,7 +2450,7 @@ mod tests {
     fn test_set_script_path_no_slash() {
         with_engine(|engine| {
             engine.set_script_path("main.lua");
-            assert_eq!(engine.script_dir, Some("./".to_string()));
+            assert_eq!(*engine.script_dir.borrow(), Some("./".to_string()));
         });
     }
 
@@ -2357,7 +2495,8 @@ mod tests {
         with_engine(|engine| {
             exec(engine, "ColourNote('red', 'black', 'test')").unwrap();
             let logs = engine.drain_logs();
-            assert!(logs.iter().any(|l| l.contains("test")));
+            // 应生成 ANSI 转义序列：\x1B[31;40mtest\x1B[0m
+            assert!(logs.iter().any(|l| l.contains("\x1b[31;40mtest\x1b[0m")));
         });
     }
 
@@ -4052,7 +4191,8 @@ mod tests {
         with_engine(|engine| {
             exec(engine, "ColourNote('red', 'blue', 'colored text')").unwrap();
             let logs = engine.drain_logs();
-            assert!(logs.iter().any(|l| l.contains("colored text")));
+            // red=31, blue=44 → \x1B[31;44mcolored text\x1B[0m
+            assert!(logs.iter().any(|l| l.contains("\x1b[31;44mcolored text\x1b[0m")));
         });
     }
 
@@ -4595,6 +4735,52 @@ mod tests {
             )
             .unwrap();
             assert_eq!(count, 3);
+        });
+    }
+
+    #[test]
+    fn test_sqlite3_nrows() {
+        with_engine(|engine| {
+            let count: i64 = eval(
+                engine,
+                r#"
+                local db = sqlite3.open(':memory:')
+                db:exec('CREATE TABLE Room(RoomNO INTEGER, Name TEXT)')
+                db:exec("INSERT INTO Room VALUES(1, 'dali')")
+                db:exec("INSERT INTO Room VALUES(2, 'changan')")
+                db:exec("INSERT INTO Room VALUES(3, 'beijing')")
+                local c = 0
+                for row in db:nrows('SELECT * FROM Room') do
+                    c = c + 1
+                end
+                db:close()
+                return c
+            "#,
+            )
+            .unwrap();
+            assert_eq!(count, 3);
+        });
+    }
+
+    #[test]
+    fn test_sqlite3_nrows_column_names() {
+        with_engine(|engine| {
+            let name: String = eval(
+                engine,
+                r#"
+                local db = sqlite3.open(':memory:')
+                db:exec('CREATE TABLE t(id INTEGER, v TEXT)')
+                db:exec("INSERT INTO t VALUES(1, 'hello')")
+                local result = ""
+                for row in db:nrows('SELECT * FROM t') do
+                    result = row.v
+                end
+                db:close()
+                return result
+            "#,
+            )
+            .unwrap();
+            assert_eq!(name, "hello");
         });
     }
 
