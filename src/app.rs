@@ -1307,7 +1307,9 @@ mod tests {
 
     #[test]
     fn test_term_settings_serde_round_trip() {
-        let settings = TermSettings { keep_command: false };
+        let settings = TermSettings {
+            keep_command: false,
+        };
         let json = serde_json::to_string(&settings).unwrap();
         assert_eq!(json, r#"{"keep_command":false}"#);
         let deserialized: TermSettings = serde_json::from_str(&json).unwrap();
