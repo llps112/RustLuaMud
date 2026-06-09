@@ -944,4 +944,167 @@ mod tests {
         let result = parser.process_line("hello\x1bworld");
         assert_eq!(result, "hello\x1bworld");
     }
+
+    // ---- 新增覆盖测试 ----
+
+    #[test]
+    fn test_ansi_state_reset_sequence_inactive() {
+        let state = AnsiState::default();
+        assert_eq!(state.reset_sequence(), "");
+    }
+
+    #[test]
+    fn test_ansi_state_reset_sequence_active() {
+        let mut state = AnsiState::default();
+        state.foreground = Some(1);
+        assert_eq!(state.reset_sequence(), "\x1b[0m");
+    }
+
+    #[test]
+    fn test_ansi_parser_default() {
+        let parser: AnsiParser = Default::default();
+        assert_eq!(parser.missing_resets, 0);
+        assert!(parser.logs().is_empty());
+    }
+
+    #[test]
+    fn test_ansi_parser_config_default() {
+        let config = AnsiParserConfig::default();
+        assert!(config.strict);
+        assert_eq!(config.max_log_entries, 100);
+    }
+
+    #[test]
+    fn test_apply_sgr_rgb_background() {
+        let parser = AnsiParser::lenient();
+        let state = parser.scan_line("\x1b[48;2;255;0;0mrgb red bg");
+        assert!(state.is_active());
+        assert!(state.background.is_some());
+        // 255+0+0=85 => gray=85/11=7 => 232+7=239
+        assert_eq!(state.background.unwrap(), 239);
+    }
+
+    #[test]
+    fn test_apply_sgr_21_bold_off_underline_on() {
+        let parser = AnsiParser::lenient();
+        let state = parser.scan_line("\x1b[1;21m");
+        assert!(!state.bold);
+        assert!(state.underline);
+    }
+
+    #[test]
+    fn test_apply_sgr_22_bold_dim_off() {
+        let parser = AnsiParser::lenient();
+        let state = parser.scan_line("\x1b[1;2;22m");
+        assert!(!state.bold);
+        assert!(!state.dim);
+    }
+
+    #[test]
+    fn test_apply_sgr_empty_param_in_middle() {
+        let parser = AnsiParser::lenient();
+        let state = parser.scan_line("\x1b[31;;32m");
+        assert_eq!(state.foreground, Some(2));
+    }
+
+    #[test]
+    fn test_apply_sgr_invalid_param() {
+        let parser = AnsiParser::lenient();
+        // 70000 > u16::MAX(65535)，解析失败被跳过；仍属 CSI 参数字节范围
+        let state = parser.scan_line("\x1b[31;70000;32m");
+        assert_eq!(state.foreground, Some(2)); // 32→green
+    }
+
+    #[test]
+    fn test_apply_sgr_oversize_param() {
+        let parser = AnsiParser::lenient();
+        // 超大数可能被解析为 u16 但无对应 SGR 含义，应被忽略
+        let state = parser.scan_line("\x1b[31;9999m");
+        assert_eq!(state.foreground, Some(1)); // 31→red
+    }
+
+    #[test]
+    fn test_process_line_long_text_preview_truncation() {
+        let mut parser = AnsiParser::with_logging();
+        let long_text = "a".repeat(100);
+        let input = format!("\x1b[31m{}", long_text);
+        let result = parser.process_line(&input);
+        assert!(result.ends_with("\x1b[0m"));
+        assert_eq!(parser.missing_resets, 1);
+        assert_eq!(parser.logs().len(), 1);
+        assert!(parser.logs()[0].raw_preview.ends_with("..."));
+        assert_eq!(parser.logs()[0].raw_preview.len(), 63);
+    }
+
+    #[test]
+    fn test_scan_into_with_non_sgr_csi() {
+        let parser = AnsiParser::lenient();
+        let mut state = AnsiState::default();
+        parser.scan_into("\x1b[?25h\x1b[31mred", &mut state);
+        assert_eq!(state.foreground, Some(1));
+        assert!(!state.bold);
+    }
+
+    #[test]
+    fn test_process_line_strict_log_exceed_max() {
+        let config = AnsiParserConfig {
+            strict: true,
+            max_log_entries: 3,
+        };
+        let mut parser = AnsiParser::new(config);
+        for i in 0..5 {
+            let input = format!("\x1b[{}mtest", 31 + i);
+            parser.process_line(&input);
+        }
+        assert_eq!(parser.missing_resets, 5);
+        assert_eq!(parser.logs().len(), 3);
+    }
+
+    #[test]
+    fn test_strip_ansi_complex_non_sgr() {
+        assert_eq!(strip_ansi("\x1b[?25hshow"), "show");
+        assert_eq!(strip_ansi("\x1b[2Jclear"), "clear");
+        assert_eq!(strip_ansi("\x1b[Hhome"), "home");
+    }
+
+    #[test]
+    fn test_apply_sgr_default_foreground() {
+        let state = AnsiParser::lenient().scan_line("\x1b[39m");
+        assert_eq!(state.foreground, None);
+    }
+
+    #[test]
+    fn test_apply_sgr_default_background() {
+        let state = AnsiParser::lenient().scan_line("\x1b[49m");
+        assert_eq!(state.background, None);
+    }
+
+    #[test]
+    fn test_apply_sgr_unknown_param() {
+        let parser = AnsiParser::lenient();
+        let state = parser.scan_line("\x1b[31;200m");
+        assert_eq!(state.foreground, Some(1));
+    }
+
+    #[test]
+    fn test_apply_sgr_bright_bg() {
+        let state = AnsiParser::lenient().scan_line("\x1b[105mbright");
+        assert_eq!(state.background, Some(13));
+    }
+
+    #[test]
+    fn test_scan_into_empty_string() {
+        let parser = AnsiParser::lenient();
+        let mut state = AnsiState::default();
+        parser.scan_into("", &mut state);
+        assert!(!state.is_active());
+    }
+
+    #[test]
+    fn test_scan_into_only_text() {
+        let parser = AnsiParser::lenient();
+        let mut state = AnsiState::default();
+        parser.scan_into("hello world", &mut state);
+        assert!(!state.is_active());
+    }
 }

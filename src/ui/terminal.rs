@@ -812,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn test_state_handle_key_home_end() {
+    fn test_clear_on_next_key_home_end_cancel() {
         let mut state = TerminalState::new(80, 24);
         state.input_buffer = "abc".to_string();
         state.input_cursor = 2;
@@ -941,5 +941,157 @@ mod tests {
         assert!(state.status_bar_cache.is_some());
         let bar = state.status_bar_cache.as_ref().unwrap();
         assert!(bar.contains("test"));
+    }
+
+    // ---- 新增覆盖测试 ----
+
+    #[test]
+    fn test_push_output_with_ansi_auto_reset() {
+        let mut state = TerminalState::new(80, 24);
+        // 行尾没有 \x1b[0m，应自动追加
+        state.push_output("\x1b[31mred text");
+        assert_eq!(state.output_lines.len(), 1);
+        assert!(state.output_lines[0].ends_with("\x1b[0m"));
+        assert!(state.output_lines[0].starts_with("\x1b[31m"));
+    }
+
+    #[test]
+    fn test_push_output_with_ansi_already_reset() {
+        let mut state = TerminalState::new(80, 24);
+        // 行尾已有 \x1b[0m，不应重复追加
+        state.push_output("\x1b[32mgreen\x1b[0m");
+        assert_eq!(state.output_lines[0], "\x1b[32mgreen\x1b[0m");
+    }
+
+    #[test]
+    fn test_push_output_plain_text() {
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("plain text");
+        assert_eq!(state.output_lines[0], "plain text");
+    }
+
+    #[test]
+    fn test_keep_command_empty_enter_no_history() {
+        let mut state = TerminalState::new(80, 24);
+        state.keep_command = true;
+        // 空 Enter，不应加入历史
+        let result = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(result, Some(String::new()));
+        assert!(state.history.is_empty());
+        // input_buffer 仍为空，clear_on_next_key 已置位（不影响）
+        assert!(state.clear_on_next_key);
+        assert!(state.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn test_keep_command_ctrl_c_clears_flag() {
+        let mut state = TerminalState::new(80, 24);
+        state.keep_command = true;
+        state.input_buffer = "hello".to_string();
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(state.clear_on_next_key);
+        // Ctrl+C 不清除标志（直接返回 None），但输入内容应保持不变
+        let result = state.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(result, None);
+        assert_eq!(state.input_buffer, "hello");
+    }
+
+    #[test]
+    fn test_input_display_scroll() {
+        let mut state = TerminalState::new(10, 24); // 窄终端触发滚动
+        state.input_buffer = "hello world".to_string();
+        // 光标在末尾（超出可用宽度），应从偏移显示
+        state.input_cursor = state.input_buffer.chars().count();
+        state.input_height = 1;
+        let (display, cursor_x) = state.input_display();
+        // 可用宽度 = 10 - 2("> ") = 8
+        // cursor = 11, display_start = 11 - 8 + 1 = 4
+        // display = "o world" (偏移 4, 取 8 字符)
+        assert!(!display.is_empty());
+        assert!(cursor_x >= 2); // 至少是 prompt 宽度
+    }
+
+    #[test]
+    fn test_input_display_no_scroll_needed() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hi".to_string();
+        state.input_cursor = 2;
+        let (display, cursor_x) = state.input_display();
+        assert_eq!(display, "hi");
+        assert_eq!(cursor_x, 4); // "> " + 2
+    }
+
+    #[test]
+    fn test_state_handle_key_arrow_left_right() {
+        let mut state = TerminalState::new(80, 24);
+        state.keep_command = true;
+        state.input_buffer = "ab".to_string();
+        state.input_cursor = 2;
+        state.clear_on_next_key = true;
+        // 按左键应取消 clear_on_next_key
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(!state.clear_on_next_key);
+        assert_eq!(state.input_cursor, 1);
+    }
+
+    #[test]
+    fn test_clear_on_next_key_home_end_flag() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 3;
+        state.clear_on_next_key = true;
+        // Home 取消标志并回到开头
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert!(!state.clear_on_next_key);
+        assert_eq!(state.input_cursor, 0);
+        // End 到末尾
+        let _ = state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(state.input_cursor, 5);
+    }
+
+    #[test]
+    fn test_state_handle_key_delete_in_middle() {
+        let mut state = TerminalState::new(80, 24);
+        state.clear_on_next_key = true;
+        state.input_buffer = "abcd".to_string();
+        state.input_cursor = 2;
+        // Delete 取消 clear_on_next_key 并删除当前字符
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert!(!state.clear_on_next_key);
+        assert_eq!(state.input_buffer, "abd");
+    }
+
+    #[test]
+    fn test_state_handle_key_up_down_history() {
+        let mut state = TerminalState::new(80, 24);
+        state.keep_command = false; // 默认清空，方便测试历史
+        state.input_buffer = "cmd1".to_string();
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        state.input_buffer = "cmd2".to_string();
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // Up 进入历史
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "cmd2");
+        // Up 再次
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "cmd1");
+        // Down
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "cmd2");
+        // Down 到底回到空白
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(state.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn test_state_handle_key_up_down_history_cancels_flag() {
+        let mut state = TerminalState::new(80, 24);
+        state.keep_command = true;
+        state.input_buffer = "cmd".to_string();
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(state.clear_on_next_key);
+        // Up 取消标志
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert!(!state.clear_on_next_key);
     }
 }

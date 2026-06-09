@@ -1289,4 +1289,51 @@ mod tests {
         assert_eq!(parse_builtin_command(""), BuiltinCommand::Unknown);
         assert_eq!(parse_builtin_command("hello"), BuiltinCommand::Unknown);
     }
+
+    #[test]
+    fn test_parse_builtin_set_partial_arg() {
+        // 只有 option 没有 value
+        assert_eq!(
+            parse_builtin_command("/set keep_command"),
+            BuiltinCommand::Unknown
+        );
+    }
+
+    #[test]
+    fn test_term_settings_default() {
+        let settings = TermSettings::default();
+        assert!(settings.keep_command);
+    }
+
+    #[test]
+    fn test_term_settings_serde_round_trip() {
+        let settings = TermSettings { keep_command: false };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert_eq!(json, r#"{"keep_command":false}"#);
+        let deserialized: TermSettings = serde_json::from_str(&json).unwrap();
+        assert!(!deserialized.keep_command);
+
+        let settings2 = TermSettings { keep_command: true };
+        let json2 = serde_json::to_string(&settings2).unwrap();
+        assert_eq!(json2, r#"{"keep_command":true}"#);
+        let deserialized2: TermSettings = serde_json::from_str(&json2).unwrap();
+        assert!(deserialized2.keep_command);
+    }
+
+    #[test]
+    fn test_term_settings_json_field_case() {
+        // 验证反序列化项名称大小写敏感
+        let json = r#"{"keep_command":true}"#;
+        let settings: TermSettings = serde_json::from_str(json).unwrap();
+        assert!(settings.keep_command);
+
+        let json_false = r#"{"keep_command":false}"#;
+        let settings_false: TermSettings = serde_json::from_str(json_false).unwrap();
+        assert!(!settings_false.keep_command);
+    }
+
+    #[test]
+    fn test_term_settings_path() {
+        assert_eq!(TermSettings::path(), "profiles/terminal.json");
+    }
 }
