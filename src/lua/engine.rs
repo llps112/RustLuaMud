@@ -762,6 +762,178 @@ impl LuaEngine {
         })?;
         globals.set("DiscardQueue", discard_queue_fn)?;
 
+        // Simulate(text...) — MushClient API: 模拟 MUD 输出，触发匹配的触发器
+        // Lua 特性：多个参数会被拼接
+        let state_rc_sim = state_rc.clone();
+        let simulate_fn = lua.create_function(move |lua, args: mlua::MultiValue| {
+            let mut text = String::new();
+            for v in args.iter() {
+                match v {
+                    mlua::Value::String(s) => {
+                        text.push_str(&s.to_string_lossy());
+                    }
+                    mlua::Value::Integer(n) => {
+                        text.push_str(&n.to_string());
+                    }
+                    mlua::Value::Number(n) => {
+                        text.push_str(&n.to_string());
+                    }
+                    _ => {}
+                }
+            }
+            // 按换行符分割，逐行处理
+            for line in text.split('\n') {
+                let line = line.trim_end_matches('\r');
+                if line.is_empty() {
+                    continue;
+                }
+
+                let clean_line = crate::ui::AnsiParser::strip_ansi(line);
+                let clean_line = clean_line.trim_end_matches('\r').to_string();
+
+                // 维护最近行缓冲区
+                {
+                    let mut state = state_rc_sim.borrow_mut();
+                    state.recent_lines.push(clean_line.clone());
+                    if state.recent_lines.len() > 20 {
+                        state.recent_lines.remove(0);
+                    }
+                }
+
+                let gbk_line = encoding_rs::GBK.encode(&clean_line).0.into_owned();
+
+                // 收集匹配结果（与 process_output 相同的逻辑，但不清空 pending_commands）
+                let matches: Vec<(usize, Vec<String>)> = {
+                    let state = state_rc_sim.borrow();
+                    let mut result = Vec::new();
+                    for (i, trigger) in state.triggers.iter().enumerate() {
+                        if !trigger.enabled {
+                            continue;
+                        }
+                        match &trigger.pattern {
+                            TriggerPattern::Gbk(gbk_re) => {
+                                if trigger.multiline && trigger.lines_to_match > 1 {
+                                    let n = trigger.lines_to_match;
+                                    if state.recent_lines.len() >= n {
+                                        let combined: String = state
+                                            .recent_lines
+                                            .iter()
+                                            .rev()
+                                            .take(n)
+                                            .rev()
+                                            .cloned()
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        let gbk_combined =
+                                            encoding_rs::GBK.encode(&combined).0.into_owned();
+                                        if let Some(caps) = gbk_re.captures(&gbk_combined) {
+                                            let caps_list: Vec<String> = caps
+                                                .iter()
+                                                .skip(1)
+                                                .flatten()
+                                                .map(|m| {
+                                                    let (cow, _, _) =
+                                                        encoding_rs::GBK.decode(m.as_bytes());
+                                                    cow.into_owned()
+                                                })
+                                                .collect();
+                                            result.push((i, caps_list));
+                                        }
+                                    }
+                                } else if let Some(caps) = gbk_re.captures(&gbk_line) {
+                                    let caps_list: Vec<String> = caps
+                                        .iter()
+                                        .skip(1)
+                                        .flatten()
+                                        .map(|m| {
+                                            let (cow, _, _) =
+                                                encoding_rs::GBK.decode(m.as_bytes());
+                                            cow.into_owned()
+                                        })
+                                        .collect();
+                                    result.push((i, caps_list));
+                                }
+                            }
+                            TriggerPattern::Utf8(utf8_re) => {
+                                if trigger.multiline && trigger.lines_to_match > 1 {
+                                    let n = trigger.lines_to_match;
+                                    if state.recent_lines.len() >= n {
+                                        let combined: String = state
+                                            .recent_lines
+                                            .iter()
+                                            .rev()
+                                            .take(n)
+                                            .rev()
+                                            .cloned()
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        if let Some(caps) = utf8_re.captures(&combined) {
+                                            let caps_list: Vec<String> = caps
+                                                .iter()
+                                                .skip(1)
+                                                .flatten()
+                                                .map(|m| m.as_str().to_string())
+                                                .collect();
+                                            result.push((i, caps_list));
+                                        }
+                                    }
+                                } else if let Some(caps) = utf8_re.captures(&clean_line) {
+                                    let caps_list: Vec<String> = caps
+                                        .iter()
+                                        .skip(1)
+                                        .flatten()
+                                        .map(|m| m.as_str().to_string())
+                                        .collect();
+                                    result.push((i, caps_list));
+                                }
+                            }
+                        }
+                    }
+                    result
+                };
+
+                // 判断是否需要 omit_from_output
+                let mut any_omit = false;
+
+                // 逐个触发回调
+                for (idx, caps_list) in matches {
+                    let (callback, send_text, trigger_name, omit) = {
+                        let state = state_rc_sim.borrow();
+                        (
+                            state.triggers[idx].callback.clone(),
+                            state.triggers[idx].send_text.clone(),
+                            state.triggers[idx].name.clone(),
+                            state.triggers[idx].omit_from_output,
+                        )
+                    };
+                    if omit {
+                        any_omit = true;
+                    }
+                    // MUSHclient 触发器回调签名: function(name, line, wildcards)
+                    if let Ok(wildcards_table) = lua.create_table() {
+                        for (i, m) in caps_list.iter().enumerate() {
+                            let _ = wildcards_table.set(i + 1, m.as_str());
+                        }
+                        let _ = callback.call::<()>((
+                            trigger_name.as_str(),
+                            clean_line.as_str(),
+                            wildcards_table,
+                        ));
+                    }
+                    if !send_text.is_empty() {
+                        state_rc_sim.borrow_mut().pending_commands.push(send_text);
+                    }
+                }
+
+                // 添加到日志（显示在输出窗口），除非被 omit
+                if !any_omit {
+                    state_rc_sim.borrow_mut().pending_logs.push(line.to_string());
+                }
+            }
+            Ok(())
+        })?;
+        globals.set("Simulate", simulate_fn)?;
+
         // DeleteTemporaryTimers() — MushClient API: 删除所有临时定时器
         let state_rc_dtt = state_rc.clone();
         let delete_temp_timers_fn = lua.create_function_mut(move |_, ()| {
@@ -3384,6 +3556,77 @@ mod tests {
         with_engine(|engine| {
             let result: i64 = eval(engine, "return DeleteAlias('nonexistent')").unwrap();
             assert_eq!(result, 1);
+        });
+    }
+
+    #[test]
+    fn test_process_input_cfg_skill_xue_alias() {
+        with_engine(|engine| {
+            // 设置 cfg 表并定义 skill_xue 函数
+            exec(
+                engine,
+                r#"
+                cfg = {}
+                skills_xue = nil
+                function cfg.skill_xue(...)
+                    local args = {...}
+                    if args[1] ~= nil and args[1] ~= "" then
+                        skills_xue = args[1]
+                    end
+                end
+                "#,
+            )
+            .unwrap();
+            // 注册两个别名：无参数（显示）和有参数（设置）
+            exec(
+                engine,
+                r#"AddAlias('test_skill_xue_display', [[^#cfg skill_xue$]], [[cfg.skill_xue()]], 33)"#,
+            )
+            .unwrap();
+            exec(
+                engine,
+                r#"AddAlias('test_skill_xue_set', [[^#cfg skill_xue\s+(.+)$]], [[cfg.skill_xue('%1')]], 33)"#,
+            )
+            .unwrap();
+            // 测试1：匹配并设置值
+            let handled = engine.process_input("#cfg skill_xue sword|blade|force");
+            assert!(handled);
+            let result: String = eval(engine, "return skills_xue or 'nil'").unwrap();
+            assert_eq!(result, "sword|blade|force");
+            // 测试2：无参数显示当前值（不修改）
+            let handled2 = engine.process_input("#cfg skill_xue");
+            assert!(handled2); // 应该匹配 display 别名
+            let result2: String = eval(engine, "return skills_xue or 'nil'").unwrap();
+            assert_eq!(result2, "sword|blade|force"); // 值未被修改
+        });
+    }
+
+    #[test]
+    fn test_process_input_cfg_skill_lingwu_alias() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                cfg = {}
+                skills_lingwu = nil
+                function cfg.skill_lingwu(...)
+                    local args = {...}
+                    if args[1] ~= nil and args[1] ~= "" then
+                        skills_lingwu = args[1]
+                    end
+                end
+                "#,
+            )
+            .unwrap();
+            exec(
+                engine,
+                r#"AddAlias('test_skill_lingwu_set', [[^#cfg skill_lingwu\s+(.+)$]], [[cfg.skill_lingwu('%1')]], 33)"#,
+            )
+            .unwrap();
+            let handled = engine.process_input("#cfg skill_lingwu parry|dodge");
+            assert!(handled);
+            let result: String = eval(engine, "return skills_lingwu or 'nil'").unwrap();
+            assert_eq!(result, "parry|dodge");
         });
     }
 
@@ -7125,6 +7368,163 @@ mod tests {
             "#,
             )
             .unwrap();
+        });
+    }
+
+    // ================================================================
+    // Simulate API 测试
+    // ================================================================
+
+    #[test]
+    fn test_simulate_basic_trigger() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                sim_result = ""
+                AddTrigger('sim_test', 'Exits: (.+)', '', 33, 0, 0, '', 'function(n,l,w) sim_result = w[1] end', 0, 0)
+            "#,
+            )
+            .unwrap();
+            exec(engine, r#"Simulate("Exits: north\n")"#).unwrap();
+            let result: String = eval(engine, "return sim_result").unwrap();
+            assert_eq!(result, "north");
+        });
+    }
+
+    #[test]
+    fn test_simulate_multiple_args_concatenated() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                sim_result = ""
+                AddTrigger('sim_multi', 'hello (.+)', '', 33, 0, 0, '', 'function(n,l,w) sim_result = w[1] end', 0, 0)
+            "#,
+            )
+            .unwrap();
+            // MUSHclient Lua 特性：多个参数拼接
+            exec(engine, r#"Simulate("hello ", "world\n")"#).unwrap();
+            let result: String = eval(engine, "return sim_result").unwrap();
+            assert_eq!(result, "world");
+        });
+    }
+
+    #[test]
+    fn test_simulate_does_not_clear_pending_commands() {
+        with_engine(|engine| {
+            // 先用 Execute 压入一个命令
+            exec(engine, "Execute('look')").unwrap();
+            let cmds_before = engine.drain_commands();
+            assert_eq!(cmds_before, vec!["look"]);
+
+            // 再用 Execute 压入命令，然后 Simulate 不应清空它
+            exec(engine, "Execute('score')").unwrap();
+            exec(
+                engine,
+                r#"
+                AddTrigger('sim_noclear', 'test_line', '', 1, 0, 0, '', '', 0, 0)
+            "#,
+            )
+            .unwrap();
+            exec(engine, r#"Simulate("test_line\n")"#).unwrap();
+            let cmds = engine.drain_commands();
+            assert!(cmds.contains(&"score".to_string()), "Simulate should not clear pending_commands, got: {:?}", cmds);
+        });
+    }
+
+    #[test]
+    fn test_simulate_adds_to_pending_logs() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                AddTrigger('sim_log', 'visible line', '', 1, 0, 0, '', '', 0, 0)
+            "#,
+            )
+            .unwrap();
+            exec(engine, r#"Simulate("visible line\n")"#).unwrap();
+            let logs = engine.drain_logs();
+            assert!(logs.iter().any(|l| l.contains("visible line")), "Simulate should add text to pending_logs, got: {:?}", logs);
+        });
+    }
+
+    #[test]
+    fn test_simulate_omit_from_output() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                AddTrigger('sim_omit', 'hide_me', '', 33, 0, 0, '', '', 0, 0)
+                SetTriggerOption('sim_omit', 'omit_from_output', true)
+            "#,
+            )
+            .unwrap();
+            exec(engine, r#"Simulate("hide_me\n")"#).unwrap();
+            let logs = engine.drain_logs();
+            assert!(!logs.iter().any(|l| l.contains("hide_me")), "omit_from_output should suppress log, got: {:?}", logs);
+        });
+    }
+
+    #[test]
+    fn test_simulate_multiline() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                sim_result = ""
+                AddTrigger('sim_ml', 'line1', '', 1, 0, 0, '', 'function() sim_result = sim_result .. "1" end', 0, 0)
+                AddTrigger('sim_ml2', 'line2', '', 1, 0, 0, '', 'function() sim_result = sim_result .. "2" end', 0, 0)
+            "#,
+            )
+            .unwrap();
+            exec(engine, r#"Simulate("line1\nline2\n")"#).unwrap();
+            let result: String = eval(engine, "return sim_result").unwrap();
+            assert_eq!(result, "12");
+        });
+    }
+
+    #[test]
+    fn test_simulate_trigger_callback_sends_command() {
+        with_engine(|engine| {
+            // 触发器回调中调用 Execute 发送命令
+            exec(
+                engine,
+                r#"
+                AddTrigger('sim_send', 'go_now', '', 33, 0, 0, '', 'function() Execute("go north") end', 0, 0)
+            "#,
+            )
+            .unwrap();
+            exec(engine, r#"Simulate("go_now\n")"#).unwrap();
+            let cmds = engine.drain_commands();
+            assert!(cmds.contains(&"go north".to_string()), "Simulate trigger callback should add to pending_commands via Execute, got: {:?}", cmds);
+        });
+    }
+
+    #[test]
+    fn test_simulate_empty_lines_skipped() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                sim_count = 0
+                AddTrigger('sim_empty', '.+', '', 33, 0, 0, '', 'function() sim_count = sim_count + 1 end', 0, 0)
+            "#,
+            )
+            .unwrap();
+            // 只有中间一行非空
+            exec(engine, r#"Simulate("\nhello\n\n")"#).unwrap();
+            let count: i64 = eval(engine, "return sim_count").unwrap();
+            assert_eq!(count, 1);
+        });
+    }
+
+    #[test]
+    fn test_simulate_no_return_value() {
+        with_engine(|engine| {
+            // Simulate returns nothing (nil in Lua)
+            let result: mlua::Value = eval(engine, r#"return Simulate("anything\n")"#).unwrap();
+            assert!(matches!(result, mlua::Value::Nil));
         });
     }
 }

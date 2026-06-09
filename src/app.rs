@@ -411,6 +411,31 @@ impl App {
                 if let Some(ref path) = script_path {
                     match engine.load_script(path) {
                         Ok(()) => {
+                            // 排空脚本加载期间 Execute 等压入的命令（如 "/set_dl()"、"score" 等）
+                            let queued_cmds = engine.drain_commands();
+                            for cmd in &queued_cmds {
+                                if cmd.starts_with('/') {
+                                    let lua_code = &cmd[1..];
+                                    if let Err(e) = engine.eval_code(lua_code) {
+                                        self.terminal.append_output(&format!(
+                                            "[Lua] 执行排队命令失败: {}",
+                                            e
+                                        ))?;
+                                    }
+                                } else {
+                                    if let Err(e) = self.manager.send_to(id, cmd) {
+                                        self.terminal
+                                            .append_output(&format!("[发送错误] {}", e))?;
+                                    }
+                                }
+                            }
+
+                            // 排空并显示脚本加载期间的 Lua 日志
+                            let logs = engine.drain_logs();
+                            for msg in logs {
+                                self.terminal.append_output(&msg)?;
+                            }
+
                             let msg = format!("[Lua] 连接 {} 脚本已加载: {}", id + 1, path);
                             self.terminal.append_output(&msg)?;
                         }
@@ -505,6 +530,7 @@ impl App {
         if session_id >= self.manager.sessions.len() {
             return Ok(());
         }
+        let mut any_fired = false;
         loop {
             // 先检查是否有到期的定时器，确保 engine 引用在调用 self 方法前被释放
             let should_fire = self.manager.sessions[session_id]
@@ -515,6 +541,7 @@ impl App {
             if !should_fire {
                 break;
             }
+            any_fired = true;
             let commands = self.manager.sessions[session_id]
                 .lua_engine
                 .as_ref()
@@ -525,8 +552,8 @@ impl App {
             }
             self.drain_lua_logs(session_id)?;
         }
-        // 定时器回调可能调用了 SetStatus，刷新状态栏
-        if session_id == self.manager.foreground_id {
+        // 仅在定时器真正触发时才刷新状态栏（避免每 50ms 写终端，破坏鼠标选中）
+        if any_fired && session_id == self.manager.foreground_id {
             self.update_status_bar()?;
         }
         Ok(())

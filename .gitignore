@@ -12,3 +12,5 @@ scripts/michen_xkx.lua
 scripts/xkxMAP.db
 /xkxMAP.db
 scripts/config_*.lua
+/tarpaulin-report.html
+coverage_reports/
