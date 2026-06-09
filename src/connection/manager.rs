@@ -153,6 +153,11 @@ impl ConnectionManager {
             .map(|s| SessionInfo {
                 name: s.name.clone(),
                 state: s.state.clone(),
+                status_text: s
+                    .lua_engine
+                    .as_ref()
+                    .map(|e| e.status_text())
+                    .unwrap_or_default(),
             })
             .collect()
     }

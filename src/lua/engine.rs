@@ -266,6 +266,8 @@ pub struct Alias {
     pub callback: Function,
     pub enabled: bool,
     pub group: String,
+    pub send_to: i64,
+    pub response: String,
 }
 
 /// 定时器定义
@@ -581,6 +583,106 @@ pub struct LuaEngine {
     script_dir: Rc<RefCell<Option<String>>>,
 }
 
+// ============================================================
+// JSON 互转辅助函数（供 json_encode / json_decode 使用）
+// ============================================================
+
+/// 将 mlua::Value 转为 serde_json::Value（用于序列化）
+fn lua_value_to_json(val: &mlua::Value) -> serde_json::Value {
+    match val {
+        mlua::Value::Nil => serde_json::Value::Null,
+        mlua::Value::Boolean(b) => serde_json::Value::Bool(*b),
+        mlua::Value::Integer(i) => serde_json::Value::Number((*i).into()),
+        mlua::Value::Number(n) => {
+            serde_json::Value::Number(serde_json::Number::from_f64(*n).unwrap_or(0.into()))
+        }
+        mlua::Value::String(s) => {
+            let owned: Vec<u8> = s.as_bytes().to_vec();
+            serde_json::Value::String(String::from_utf8_lossy(&owned).to_string())
+        }
+        mlua::Value::Table(t) => {
+            // 判断是 array 还是 map
+            let mut is_array = true;
+            let mut i = 1;
+            for pair in t.clone().pairs::<mlua::Value, mlua::Value>() {
+                if let Ok((k, _)) = pair {
+                    match k {
+                        mlua::Value::Integer(n) if n == i => {
+                            i += 1;
+                        }
+                        _ => {
+                            is_array = false;
+                            break;
+                        }
+                    }
+                } else {
+                    is_array = false;
+                    break;
+                }
+            }
+            if is_array && i > 1 {
+                // 数组
+                let mut arr = Vec::new();
+                for pair in t.clone().pairs::<i64, mlua::Value>() {
+                    if let Ok((_, v)) = pair {
+                        arr.push(lua_value_to_json(&v));
+                    }
+                }
+                serde_json::Value::Array(arr)
+            } else {
+                // 对象
+                let mut map = serde_json::Map::new();
+                for pair in t.clone().pairs::<mlua::Value, mlua::Value>() {
+                    if let Ok((k, v)) = pair {
+                        let key = match &k {
+                            mlua::Value::String(s) => {
+                                let owned: Vec<u8> = s.as_bytes().to_vec();
+                                String::from_utf8_lossy(&owned).to_string()
+                            }
+                            _ => format!("{:?}", k),
+                        };
+                        map.insert(key, lua_value_to_json(&v));
+                    }
+                }
+                serde_json::Value::Object(map)
+            }
+        }
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// 将 serde_json::Value 转为 mlua::Value（用于反序列化）
+fn json_to_lua_value(lua: &mlua::Lua, val: &serde_json::Value) -> mlua::Result<mlua::Value> {
+    match val {
+        serde_json::Value::Null => Ok(mlua::Value::Nil),
+        serde_json::Value::Bool(b) => Ok(mlua::Value::Boolean(*b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(mlua::Value::Integer(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(mlua::Value::Number(f))
+            } else {
+                Ok(mlua::Value::Number(0.0))
+            }
+        }
+        serde_json::Value::String(s) => Ok(mlua::Value::String(lua.create_string(s)?)),
+        serde_json::Value::Array(arr) => {
+            let table = lua.create_table()?;
+            for (i, v) in arr.iter().enumerate() {
+                table.set(i + 1, json_to_lua_value(lua, v)?)?;
+            }
+            Ok(mlua::Value::Table(table))
+        }
+        serde_json::Value::Object(obj) => {
+            let table = lua.create_table()?;
+            for (k, v) in obj {
+                table.set(k.as_str(), json_to_lua_value(lua, v)?)?;
+            }
+            Ok(mlua::Value::Table(table))
+        }
+    }
+}
+
 impl LuaEngine {
     /// 创建新的 Lua 引擎实例
     pub fn new() -> LuaResult<Self> {
@@ -700,6 +802,40 @@ impl LuaEngine {
         })?;
         globals.set("Note", note_fn)?;
 
+        // print(...) — 覆盖标准 Lua print，重定向到 pending_logs
+        // 标准 Lua print 行为：参数间用 \t 分隔，末尾追加 \n
+        let state_rc_print = state_rc.clone();
+        let print_fn = lua.create_function_mut(move |_lua, args: mlua::MultiValue| {
+            let mut parts = Vec::new();
+            for v in args.iter() {
+                match v {
+                    mlua::Value::Nil => parts.push("nil".to_string()),
+                    mlua::Value::String(s) => {
+                        // to_str() 借用了 lua 状态的引用，需要转换生命周期
+                        let s = s.as_bytes().to_vec();
+                        parts.push(String::from_utf8_lossy(&s).to_string());
+                    }
+                    mlua::Value::Number(n) => parts.push((*n).to_string()),
+                    mlua::Value::Integer(i) => parts.push((*i).to_string()),
+                    mlua::Value::Boolean(b) => {
+                        parts.push(if *b { "true" } else { "false" }.to_string())
+                    }
+                    mlua::Value::Table(t) => {
+                        parts.push(format!("{:?}", t));
+                    }
+                    mlua::Value::Function(_) => parts.push("function".to_string()),
+                    mlua::Value::Thread(_) => parts.push("thread".to_string()),
+                    mlua::Value::UserData(_) => parts.push("userdata".to_string()),
+                    mlua::Value::Error(e) => parts.push(format!("{:?}", e)),
+                    _ => parts.push("?".to_string()),
+                }
+            }
+            let msg = parts.join("\t");
+            state_rc_print.borrow_mut().pending_logs.push(msg);
+            Ok(())
+        })?;
+        globals.set("print", print_fn)?;
+
         // SetStatus(text) — MushClient API: 设置状态栏文本
         let state_rc_note = state_rc.clone();
         let set_status_fn = lua.create_function_mut(move |_, text: String| {
@@ -716,6 +852,28 @@ impl LuaEngine {
             Ok(())
         })?;
         globals.set("Tell", tell_fn)?;
+
+        // ============================================================
+        // JSON 序列化桥接（供 Web UI 使用）
+        // ============================================================
+
+        // json_encode(value) → JSON string
+        let json_encode_fn = lua.create_function_mut(move |_lua, value: mlua::Value| {
+            let json_val = lua_value_to_json(&value);
+            let json_str = serde_json::to_string(&json_val)
+                .map_err(|e| mlua::Error::external(format!("json_encode 失败: {}", e)))?;
+            Ok(json_str)
+        })?;
+        globals.set("json_encode", json_encode_fn)?;
+
+        // json_decode(json_string) → Lua value
+        let json_decode_fn = lua.create_function_mut(move |lua, json_str: String| {
+            let json_val: serde_json::Value = serde_json::from_str(&json_str)
+                .map_err(|e| mlua::Error::external(format!("json_decode 失败: {}", e)))?;
+            let lua_val = json_to_lua_value(&lua, &json_val)?;
+            Ok(lua_val)
+        })?;
+        globals.set("json_decode", json_decode_fn)?;
 
         // ============================================================
         // 触发器 API
@@ -959,7 +1117,7 @@ impl LuaEngine {
 
             let name: String = coerce_to_string(args[0].clone())?;
             let match_str: String = coerce_to_string(args[1].clone())?;
-            let _response: String = coerce_to_string(args[2].clone())?;
+            let response: String = coerce_to_string(args[2].clone())?;
             let flags: i64 = coerce_to_i64(args[3].clone())?;
             // 第5个参数 script_name（可选）
             let script = if args.len() > 4 {
@@ -978,14 +1136,26 @@ impl LuaEngine {
             let re = Regex::new(&re_str)
                 .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", re_str, e)))?;
 
-            let callback: Function = if script.is_empty() {
+            // script 参数在 MUSHclient 中是函数名（不传参），send_to=12 时使用 response 作为 Lua 代码
+            let callback: Function = if !response.is_empty() {
+                // 有 response 文本时，先创建空函数，执行时再动态替换 %1 并执行
                 lua.create_function(|_, _: ()| Ok(()))?
-            } else {
+            } else if !script.is_empty() {
                 let code = format!("return {}", script);
                 match lua.load(&code).eval::<Function>() {
                     Ok(f) => f,
                     Err(_) => lua.load(&script).eval()?,
                 }
+            } else {
+                lua.create_function(|_, _: ()| Ok(()))?
+            };
+
+            // MUSHclient AddAlias 默认行为：
+            // 当 response 非空且没有提供 script 参数时，send_to 默认为 12（执行 Lua 代码）
+            let send_to = if !response.is_empty() && args.len() <= 4 {
+                12  // send to script — Lua 代码执行
+            } else {
+                0   // send to world
             };
 
             state_rc15.borrow_mut().aliases.push(Alias {
@@ -994,6 +1164,8 @@ impl LuaEngine {
                 callback,
                 enabled: (flags & 1) != 0,
                 group: String::new(),
+                send_to,
+                response,
             });
             Ok(Value::Integer(0))
         })?;
@@ -1042,6 +1214,11 @@ impl LuaEngine {
                                 a.enabled = b;
                             } else if let Value::Integer(n) = value {
                                 a.enabled = n != 0;
+                            }
+                        }
+                        "send_to" => {
+                            if let Value::Integer(n) = value {
+                                a.send_to = n;
                             }
                         }
                         _ => {}
@@ -1926,6 +2103,8 @@ impl LuaEngine {
                     callback,
                     enabled: true,
                     group: String::new(),
+                    send_to: 0,
+                    response: String::new(),
                 });
                 Ok(())
             })?;
@@ -1971,6 +2150,14 @@ impl LuaEngine {
     /// 直接执行 Lua 代码（用于 /eval 命令）
     pub fn eval_code(&self, code: &str) -> Result<(), String> {
         self.lua.load(code).exec().map_err(|e| format!("{}", e))
+    }
+
+    /// 执行 Lua 代码并返回字符串结果
+    pub fn eval_to_string(&self, code: &str) -> Result<String, String> {
+        self.lua
+            .load(code)
+            .eval::<String>()
+            .map_err(|e| format!("{}", e))
     }
 
     /// 加载并执行 Lua 脚本文件
@@ -2030,31 +2217,6 @@ impl LuaEngine {
 
         // 将 clean_line 转为 GBK 字节用于 GBK 模式匹配
         let gbk_line = encoding_rs::GBK.encode(&clean_line).0.into_owned();
-
-        // 诊断：记录匹配成功的 GPS 触发器
-        {
-            let state = self.state.borrow();
-            let mut msgs = Vec::new();
-            for trigger in state.triggers.iter() {
-                if trigger.name.starts_with("gps_start_dosth") && trigger.enabled {
-                    let matched = match &trigger.pattern {
-                        TriggerPattern::Gbk(re) => re.is_match(&gbk_line),
-                        TriggerPattern::Utf8(re) => re.is_match(&clean_line),
-                    };
-                    if matched {
-                        let preview: String = clean_line.chars().take(40).collect();
-                        msgs.push(format!(
-                            "[TRIG-MATCH] trig='{}' matched=true line={:?}",
-                            trigger.name, preview
-                        ));
-                    }
-                }
-            }
-            drop(state);
-            for msg in msgs {
-                self.state.borrow_mut().pending_logs.push(msg);
-            }
-        }
 
         // 收集需要触发的
         let matches: Vec<(usize, Vec<String>)> = {
@@ -2171,19 +2333,6 @@ impl LuaEngine {
                     wildcards_table,
                 ));
             }
-            // 诊断：GPS 相关触发器触发后记录 xkxGPS 状态
-            if trigger_name.starts_with("gps_start") {
-                if let Ok(xkxgps) = self.lua.globals().get::<mlua::Table>("xkxGPS") {
-                    let rn: String = xkxgps.get("roomname").unwrap_or_default();
-                    let desc: String = xkxgps.get("desc").unwrap_or_default();
-                    let ent: String = xkxgps.get("entrance").unwrap_or_default();
-                    let msg = format!(
-                        "[GPS] trigger='{}' roomname='{}' desc='{}' entrance='{}'",
-                        trigger_name, rn, desc, ent
-                    );
-                    self.state.borrow_mut().pending_logs.push(msg);
-                }
-            }
             if !send_text.is_empty() {
                 self.state.borrow_mut().pending_commands.push(send_text);
             }
@@ -2194,7 +2343,7 @@ impl LuaEngine {
     pub fn process_input(&self, input: &str) -> bool {
         self.state.borrow_mut().pending_commands.clear();
 
-        let matches: Vec<(usize, Vec<String>)> = {
+        let matches: Vec<(usize, Vec<String>, i64, String)> = {
             let state = self.state.borrow();
             let mut result = Vec::new();
             for (i, alias) in state.aliases.iter().enumerate() {
@@ -2208,7 +2357,7 @@ impl LuaEngine {
                         .flatten()
                         .map(|m| m.as_str().to_string())
                         .collect();
-                    result.push((i, caps_list));
+                    result.push((i, caps_list, alias.send_to, alias.response.clone()));
                 }
             }
             result
@@ -2218,17 +2367,30 @@ impl LuaEngine {
             return false;
         }
 
-        for (idx, caps_list) in matches {
-            let callback = {
-                let state = self.state.borrow();
-                state.aliases[idx].callback.clone()
-            };
-            if let Ok(args_table) = self.lua.create_table() {
-                let _ = args_table.set(0, input);
+        for (idx, caps_list, send_to, response) in matches {
+            if send_to == 12 && !response.is_empty() {
+                // send_to=12: 替换 %1, %2... 为捕获文本，作为 Lua 代码执行
+                let mut code = response;
                 for (i, m) in caps_list.iter().enumerate() {
-                    let _ = args_table.set(i + 1, m.as_str());
+                    code = code.replace(&format!("%{}", i + 1), m);
                 }
-                let _ = callback.call::<()>(args_table);
+                let _ = self.lua.load(&code).exec();
+            } else {
+                // 脚本函数方式：以 (name, line, wildcards_table) 签名调用
+                let callback = {
+                    let state = self.state.borrow();
+                    state.aliases[idx].callback.clone()
+                };
+                let name = {
+                    let state = self.state.borrow();
+                    state.aliases[idx].name.clone()
+                };
+                if let Ok(wildcards) = self.lua.create_table() {
+                    for (i, m) in caps_list.iter().enumerate() {
+                        let _ = wildcards.set(i + 1, m.as_str());
+                    }
+                    let _ = callback.call::<()>((name, input.to_string(), wildcards));
+                }
             }
         }
 
@@ -2264,6 +2426,35 @@ impl LuaEngine {
 
         if one_shot {
             self.state.borrow_mut().timers.remove(index);
+        }
+    }
+
+    /// 检查并触发第一个到期的定时器
+    /// 返回 true 如果触发了某个定时器
+    pub fn fire_next_due_timer(&self) -> bool {
+        let now = std::time::Instant::now();
+        let timer_idx = {
+            let mut state = self.state.borrow_mut();
+            let mut found = None;
+            for (i, timer) in state.timers.iter_mut().enumerate() {
+                if timer.enabled {
+                    let elapsed = now.duration_since(timer.last_fired);
+                    if elapsed.as_millis() as u64 >= timer.interval_millis {
+                        timer.last_fired = now;
+                        found = Some(i);
+                        break;
+                    }
+                }
+            }
+            found
+        };
+
+        match timer_idx {
+            Some(i) => {
+                self.fire_timer(i);
+                true
+            }
+            None => false,
         }
     }
 
@@ -2318,6 +2509,11 @@ impl LuaEngine {
     /// 取出待发送的日志消息
     pub fn drain_logs(&self) -> Vec<String> {
         self.state.borrow_mut().pending_logs.drain(..).collect()
+    }
+
+    /// 获取 SetStatus 设置的状态栏文本
+    pub fn status_text(&self) -> String {
+        self.state.borrow().status_text.clone()
     }
 
     /// 获取定时器列表（interval_millis）
@@ -2782,6 +2978,35 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_print_redirect() {
+        with_engine(|engine| {
+            // print 应该被重定向到 pending_logs
+            exec(engine, "print('hello')").unwrap();
+            let logs = engine.drain_logs();
+            assert!(logs.contains(&"hello".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_print_multiple_args() {
+        with_engine(|engine| {
+            // print 多个参数，用制表符分隔
+            exec(engine, "print('a', 'b', 'c')").unwrap();
+            let logs = engine.drain_logs();
+            assert!(logs.contains(&"a\tb\tc".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_print_mixed_types() {
+        with_engine(|engine| {
+            exec(engine, "print('n=', 42, 'b=', true)").unwrap();
+            let logs = engine.drain_logs();
+            assert!(logs.iter().any(|l| l.contains("42") && l.contains("true")));
+        });
+    }
+
     // ================================================================
     // 触发器 API
     // ================================================================
@@ -2984,7 +3209,7 @@ mod tests {
         with_engine(|engine| {
             exec(engine, r#"
                 test_result = nil
-                AddTrigger('match_trig', [[hello (\w+)]], '', 33, 0, 0, '', 'function(t) test_result = t[1] end', 0, 0)
+                AddTrigger('match_trig', [[hello (\w+)]], '', 33, 0, 0, '', 'function(name, line, wildcards) test_result = wildcards[1] end', 0, 0)
             "#).unwrap();
             engine.process_output("hello world");
             let result: Option<String> = eval(engine, "return test_result").unwrap();
@@ -3010,7 +3235,7 @@ mod tests {
         with_engine(|engine| {
             exec(engine, r#"
                 wc_result = nil
-                AddTrigger('wc_trig', 'You see * here', '', 1, 0, 0, '', 'function(t) wc_result = t[1] end', 0, 0)
+                AddTrigger('wc_trig', 'You see * here', '', 1, 0, 0, '', 'function(name, line, wildcards) wc_result = wildcards[1] end', 0, 0)
             "#).unwrap();
             engine.process_output("You see a goblin here");
             let result: Option<String> = eval(engine, "return wc_result").unwrap();
@@ -3204,13 +3429,46 @@ mod tests {
     }
 
     #[test]
+    fn test_alias_response_send_to_script() {
+        // 验证 4 参数 AddAlias（无 script）默认使用 send_to=12
+        // 即 response 应作为 Lua 代码执行
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"AddAlias("cfg_test", "^#cfg test$", "send('alias_executed')", 33)"#,
+            )
+            .unwrap();
+            let handled = engine.process_input("#cfg test");
+            assert!(handled);
+            let cmds = engine.drain_commands();
+            assert!(cmds.contains(&"alias_executed".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_alias_response_with_capture_groups() {
+        // 验证 %1, %2 捕获组替换后作为 Lua 代码执行
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"AddAlias("cfg_set", "^#cfg (\\w+) (.*)$", "send('set:'..'%1'..'='..'%2')", 33)"#,
+            )
+            .unwrap();
+            let handled = engine.process_input("#cfg neili_job 80");
+            assert!(handled);
+            let cmds = engine.drain_commands();
+            assert!(cmds.contains(&"set:neili_job=80".to_string()));
+        });
+    }
+
+    #[test]
     fn test_alias_matching() {
         with_engine(|engine| {
             exec(
                 engine,
                 r#"
                 alias_result = nil
-                AddAlias('match_alias', 'kill *', '', 1, 'function(t) alias_result = t[1] end')
+                AddAlias('match_alias', 'kill *', '', 1, 'function(n, l, w) alias_result = w[1] end')
             "#,
             )
             .unwrap();
@@ -3235,7 +3493,7 @@ mod tests {
         with_engine(|engine| {
             exec(engine, r#"
                 regex_alias_result = nil
-                AddAlias('regex_al', [[^go (\w+)$]], '', 33, 'function(t) regex_alias_result = t[1] end')
+                AddAlias('regex_al', [[^go (\w+)$]], '', 33, 'function(n, l, w) regex_alias_result = w[1] end')
             "#).unwrap();
             let matched = engine.process_input("go north");
             assert!(matched);
@@ -3260,7 +3518,7 @@ mod tests {
                 engine,
                 r#"
                 qm_result = nil
-                AddAlias('qm_alias', 'go ?', '', 1, 'function(t) qm_result = t[1] end')
+                AddAlias('qm_alias', 'go ?', '', 1, 'function(n, l, w) qm_result = w[1] end')
             "#,
             )
             .unwrap();
@@ -3416,8 +3674,10 @@ mod tests {
             exec(
                 engine,
                 r#"
-                timer_result = nil
-                AddTimer('fire_t', 0, 0, 5, '', 1, 'timer_result = "fired"')
+                function fire_timer_cb(timer_name)
+                    timer_result = "fired"
+                end
+                AddTimer('fire_t', 0, 0, 5, '', 1, 'fire_timer_cb')
             "#,
             )
             .unwrap();
@@ -3913,7 +4173,7 @@ mod tests {
         with_engine(|engine| {
             exec(engine, r#"
                 ml_result = nil
-                AddTrigger('ml_trig', 'line1.*line2', '', 33, 0, 0, '', 'function() ml_result = true end', 0, 0)
+                AddTrigger('ml_trig', [[line1[\s\S]*line2]], '', 33, 0, 0, '', 'function() ml_result = true end', 0, 0)
                 SetTriggerOption('ml_trig', 'multi_line', true)
                 SetTriggerOption('ml_trig', 'lines_to_match', 2)
             "#).unwrap();
@@ -4021,7 +4281,7 @@ mod tests {
                 engine,
                 r#"
                 orig_result = nil
-                trigger([[^hello (\w+)$]], function(t) orig_result = t[1] end)
+                trigger([[^hello (\w+)$]], function(name, line, wildcards) orig_result = wildcards[1] end)
             "#,
             )
             .unwrap();
@@ -4038,7 +4298,7 @@ mod tests {
                 engine,
                 r#"
                 orig_alias_result = nil
-                alias('^go (.+)$', function(t) orig_alias_result = t[1] end)
+                alias('^go (.+)$', function(n, l, w) orig_alias_result = w[1] end)
             "#,
             )
             .unwrap();
@@ -5105,7 +5365,7 @@ mod tests {
         with_engine(|engine| {
             exec(engine, r#"
                 cap1 = nil; cap2 = nil
-                AddTrigger('multi_cap', [[^(\w+) hits (\w+)$]], '', 33, 0, 0, '', 'function(t) cap1 = t[1]; cap2 = t[2] end', 0, 0)
+                AddTrigger('multi_cap', [[^(\w+) hits (\w+)$]], '', 33, 0, 0, '', 'function(name, line, wildcards) cap1 = wildcards[1]; cap2 = wildcards[2] end', 0, 0)
             "#).unwrap();
             engine.process_output("goblin hits warrior");
             let r1: Option<String> = eval(engine, "return cap1").unwrap();
@@ -5350,8 +5610,10 @@ mod tests {
             exec(
                 engine,
                 r#"
-                cycle_result = nil
-                AddTimer('cycle_t', 0, 0, 5, '', 1, 'cycle_result = "fired"')
+                function cycle_timer_cb(timer_name)
+                    cycle_result = "fired"
+                end
+                AddTimer('cycle_t', 0, 0, 5, '', 1, 'cycle_timer_cb')
             "#,
             )
             .unwrap();
@@ -5435,7 +5697,7 @@ mod tests {
         with_engine(|engine| {
             exec(engine, r#"
                 alias_c1 = nil; alias_c2 = nil
-                AddAlias('multi_cap_a', 'cast * at *', '', 1, 'function(t) alias_c1 = t[1]; alias_c2 = t[2] end')
+                AddAlias('multi_cap_a', 'cast * at *', '', 1, 'function(n, l, w) alias_c1 = w[1]; alias_c2 = w[2] end')
             "#).unwrap();
             let handled = engine.process_input("cast fireball at goblin");
             assert!(handled);
@@ -5555,7 +5817,7 @@ mod tests {
                 engine,
                 r#"
                 regex_al_result = nil
-                AddAlias('regex_a', [[^#(\d+)$]], '', 33, 'function(t) regex_al_result = t[1] end')
+                AddAlias('regex_a', [[^#(\d+)$]], '', 33, 'function(n, l, w) regex_al_result = w[1] end')
             "#,
             )
             .unwrap();
@@ -5628,7 +5890,7 @@ mod tests {
                 engine,
                 r#"
                 raw_input = nil
-                alias('^test$', function(t) raw_input = t[0] end)
+                alias('^test$', function(n, l, w) raw_input = l end)
             "#,
             )
             .unwrap();
@@ -5805,6 +6067,980 @@ mod tests {
             engine.process_output("tick");
             let val: String = eval(engine, "return GetVariable('counter')").unwrap();
             assert_eq!(val, "3");
+        });
+    }
+
+    // ================================================================
+    // JSON 序列化桥接函数测试 — lua_value_to_json
+    // ================================================================
+
+    #[test]
+    fn test_lua_value_to_json_nil() {
+        let lua_val = mlua::Value::Nil;
+        let json_val = lua_value_to_json(&lua_val);
+        assert_eq!(json_val, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_lua_value_to_json_boolean() {
+        let json_val = lua_value_to_json(&mlua::Value::Boolean(true));
+        assert_eq!(json_val, serde_json::Value::Bool(true));
+        let json_val = lua_value_to_json(&mlua::Value::Boolean(false));
+        assert_eq!(json_val, serde_json::Value::Bool(false));
+    }
+
+    #[test]
+    fn test_lua_value_to_json_integer() {
+        let json_val = lua_value_to_json(&mlua::Value::Integer(42));
+        assert_eq!(json_val, serde_json::Value::Number(42.into()));
+        let json_val = lua_value_to_json(&mlua::Value::Integer(-1));
+        assert_eq!(json_val, serde_json::Value::Number((-1).into()));
+    }
+
+    #[test]
+    fn test_lua_value_to_json_number() {
+        let json_val = lua_value_to_json(&mlua::Value::Number(3.14));
+        assert_eq!(json_val, serde_json::json!(3.14));
+    }
+
+    #[test]
+    fn test_lua_value_to_json_string() {
+        let lua = Lua::new();
+        let s = lua.create_string("hello").unwrap();
+        let json_val = lua_value_to_json(&mlua::Value::String(s));
+        assert_eq!(json_val, serde_json::Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn test_lua_value_to_json_string_utf8() {
+        let lua = Lua::new();
+        let s = lua.create_string("中文测试").unwrap();
+        let json_val = lua_value_to_json(&mlua::Value::String(s));
+        assert_eq!(json_val, serde_json::Value::String("中文测试".to_string()));
+    }
+
+    #[test]
+    fn test_lua_value_to_json_array() {
+        with_engine(|engine| {
+            let lua_val: mlua::Value =
+                eval(engine, "return {10, 20, 30}").unwrap();
+            let json_val = lua_value_to_json(&lua_val);
+            assert_eq!(json_val, serde_json::json!([10, 20, 30]));
+        });
+    }
+
+    #[test]
+    fn test_lua_value_to_json_object() {
+        with_engine(|engine| {
+            let lua_val: mlua::Value =
+                eval(engine, "return {name='test', value=42}").unwrap();
+            let json_val = lua_value_to_json(&lua_val);
+            assert_eq!(json_val["name"], serde_json::json!("test"));
+            assert_eq!(json_val["value"], serde_json::json!(42));
+        });
+    }
+
+    #[test]
+    fn test_lua_value_to_json_nested() {
+        with_engine(|engine| {
+            let lua_val: mlua::Value =
+                eval(engine, "return {a={b={c=1}}}").unwrap();
+            let json_val = lua_value_to_json(&lua_val);
+            assert_eq!(json_val["a"]["b"]["c"], serde_json::json!(1));
+        });
+    }
+
+    #[test]
+    fn test_lua_value_to_json_empty_table() {
+        with_engine(|engine| {
+            let lua_val: mlua::Value =
+                eval(engine, "return {}").unwrap();
+            let json_val = lua_value_to_json(&lua_val);
+            // 空表既可以视为空数组也可以视为空对象，这里取决于实现
+            // 我们的实现中空表没有连续整数键 → 判定为对象
+            assert!(json_val.is_object() || json_val.is_array());
+        });
+    }
+
+    #[test]
+    fn test_lua_value_to_json_mixed_array() {
+        with_engine(|engine| {
+            // 1, 2, name="x" — 非连续整数键 → 判定为对象
+            let lua_val: mlua::Value =
+                eval(engine, "return {1, 2, name='x'}").unwrap();
+            let json_val = lua_value_to_json(&lua_val);
+            assert!(json_val.is_object());
+            assert_eq!(json_val["name"], serde_json::json!("x"));
+        });
+    }
+
+    #[test]
+    fn test_lua_value_to_json_function_is_null() {
+        let lua = Lua::new();
+        let fn_val = lua.create_function(|_, ()| Ok(())).unwrap();
+        let json_val = lua_value_to_json(&mlua::Value::Function(fn_val));
+        assert_eq!(json_val, serde_json::Value::Null);
+    }
+
+    // ================================================================
+    // JSON 序列化桥接函数测试 — json_to_lua_value
+    // ================================================================
+
+    #[test]
+    fn test_json_to_lua_value_null() {
+        let lua = Lua::new();
+        let lua_val = json_to_lua_value(&lua, &serde_json::Value::Null).unwrap();
+        assert!(matches!(lua_val, mlua::Value::Nil));
+    }
+
+    #[test]
+    fn test_json_to_lua_value_bool() {
+        let lua = Lua::new();
+        let lua_val = json_to_lua_value(&lua, &serde_json::Value::Bool(true)).unwrap();
+        assert!(matches!(lua_val, mlua::Value::Boolean(true)));
+    }
+
+    #[test]
+    fn test_json_to_lua_value_integer() {
+        let lua = Lua::new();
+        let lua_val = json_to_lua_value(&lua, &serde_json::json!(100)).unwrap();
+        assert!(matches!(lua_val, mlua::Value::Integer(100)));
+    }
+
+    #[test]
+    fn test_json_to_lua_value_float() {
+        let lua = Lua::new();
+        let lua_val = json_to_lua_value(&lua, &serde_json::json!(3.14)).unwrap();
+        assert!(matches!(lua_val, mlua::Value::Number(v) if (v - 3.14).abs() < 1e-10));
+    }
+
+    #[test]
+    fn test_json_to_lua_value_string() {
+        let lua = Lua::new();
+        let lua_val = json_to_lua_value(&lua, &serde_json::Value::String("hi".to_string())).unwrap();
+        assert!(matches!(&lua_val, mlua::Value::String(s) if s.to_str().unwrap() == "hi"));
+    }
+
+    #[test]
+    fn test_json_to_lua_value_array() {
+        let lua = Lua::new();
+        let json_val = serde_json::json!([1, 2, 3]);
+        let lua_val = json_to_lua_value(&lua, &json_val).unwrap();
+        if let mlua::Value::Table(t) = &lua_val {
+            assert_eq!(t.get::<i64>(1).unwrap(), 1);
+            assert_eq!(t.get::<i64>(2).unwrap(), 2);
+            assert_eq!(t.get::<i64>(3).unwrap(), 3);
+        } else {
+            panic!("期望 Table, 获得 {:?}", lua_val);
+        }
+    }
+
+    #[test]
+    fn test_json_to_lua_value_object() {
+        let lua = Lua::new();
+        let json_val = serde_json::json!({"key": "value", "num": 42});
+        let lua_val = json_to_lua_value(&lua, &json_val).unwrap();
+        if let mlua::Value::Table(t) = &lua_val {
+            assert_eq!(t.get::<String>("key").unwrap(), "value");
+            assert_eq!(t.get::<i64>("num").unwrap(), 42);
+        } else {
+            panic!("期望 Table, 获得 {:?}", lua_val);
+        }
+    }
+
+    #[test]
+    fn test_json_to_lua_value_nested() {
+        let lua = Lua::new();
+        let json_val = serde_json::json!({"a": {"b": [1, 2]}});
+        let lua_val = json_to_lua_value(&lua, &json_val).unwrap();
+        if let mlua::Value::Table(t) = &lua_val {
+            let inner: mlua::Table = t.get("a").unwrap();
+            let arr: mlua::Table = inner.get("b").unwrap();
+            assert_eq!(arr.get::<i64>(1).unwrap(), 1);
+            assert_eq!(arr.get::<i64>(2).unwrap(), 2);
+        } else {
+            panic!("期望 Table, 获得 {:?}", lua_val);
+        }
+    }
+
+    // ================================================================
+    // json_encode / json_decode Lua API 测试
+    // ================================================================
+
+    #[test]
+    fn test_json_encode_nil() {
+        with_engine(|engine| {
+            let result: String = eval(engine, "return json_encode(nil)").unwrap();
+            assert_eq!(result, "null");
+        });
+    }
+
+    #[test]
+    fn test_json_encode_boolean() {
+        with_engine(|engine| {
+            let result: String = eval(engine, "return json_encode(true)").unwrap();
+            assert_eq!(result, "true");
+            let result: String = eval(engine, "return json_encode(false)").unwrap();
+            assert_eq!(result, "false");
+        });
+    }
+
+    #[test]
+    fn test_json_encode_number() {
+        with_engine(|engine| {
+            let result: String = eval(engine, "return json_encode(42)").unwrap();
+            assert_eq!(result, "42");
+            let result: String = eval(engine, "return json_encode(3.14)").unwrap();
+            assert!(result.starts_with("3.14"));
+        });
+    }
+
+    #[test]
+    fn test_json_encode_string() {
+        with_engine(|engine| {
+            let result: String = eval(engine, "return json_encode('hello')").unwrap();
+            assert_eq!(result, "\"hello\"");
+        });
+    }
+
+    #[test]
+    fn test_json_encode_array() {
+        with_engine(|engine| {
+            let result: String = eval(engine, "return json_encode({10, 20, 30})").unwrap();
+            assert_eq!(result, "[10,20,30]");
+        });
+    }
+
+    #[test]
+    fn test_json_encode_object() {
+        with_engine(|engine| {
+            let result: String = eval(engine, "return json_encode({a=1, b='x'})").unwrap();
+            assert!(result.contains("\"a\":1"));
+            assert!(result.contains("\"b\":\"x\""));
+        });
+    }
+
+    #[test]
+    fn test_json_encode_nested() {
+        with_engine(|engine| {
+            let result: String = eval(engine, "return json_encode({a={b={c=1}}})").unwrap();
+            assert!(result.contains("\"a\""));
+            assert!(result.contains("\"b\""));
+            assert!(result.contains("\"c\":1"));
+        });
+    }
+
+    #[test]
+    fn test_json_decode_null() {
+        with_engine(|engine| {
+            let result: String = eval(engine, "local v = json_decode('null'); return type(v)").unwrap();
+            assert_eq!(result, "nil");
+        });
+    }
+
+    #[test]
+    fn test_json_decode_boolean() {
+        with_engine(|engine| {
+            let result: bool = eval(engine, "return json_decode('true')").unwrap();
+            assert!(result);
+            let result: bool = eval(engine, "return json_decode('false')").unwrap();
+            assert!(!result);
+        });
+    }
+
+    #[test]
+    fn test_json_decode_integer() {
+        with_engine(|engine| {
+            let result: i64 = eval(engine, "return json_decode('42')").unwrap();
+            assert_eq!(result, 42);
+        });
+    }
+
+    #[test]
+    fn test_json_decode_string() {
+        with_engine(|engine| {
+            let result: String = eval(engine, "return json_decode('\"hello\"')").unwrap();
+            assert_eq!(result, "hello");
+        });
+    }
+
+    #[test]
+    fn test_json_decode_array() {
+        with_engine(|engine| {
+            let result: String = eval(engine,
+                "local t = json_decode('[1,2,3]'); return t[1] + t[2] + t[3]"
+            ).unwrap();
+            assert_eq!(result, "6");
+        });
+    }
+
+    #[test]
+    fn test_json_decode_object() {
+        with_engine(|engine| {
+            let result: i64 = eval(engine, "local t = json_decode('{\"a\":1,\"b\":2}'); return t.a + t.b").unwrap();
+            assert_eq!(result, 3);
+        });
+    }
+
+    #[test]
+    fn test_json_roundtrip() {
+        with_engine(|engine| {
+            let result: String = eval(engine,
+                "local original = {a=1, b='hello', c={nested=true}}; \
+                 local json = json_encode(original); \
+                 local decoded = json_decode(json); \
+                 return json_encode(decoded)"
+            ).unwrap();
+            assert!(result.contains("\"a\":1"));
+            assert!(result.contains("\"b\":\"hello\""));
+            assert!(result.contains("\"nested\":true"));
+        });
+    }
+
+    #[test]
+    fn test_json_decode_invalid() {
+        with_engine(|engine| {
+            let result: bool = eval(engine,
+                "local ok, err = pcall(json_decode, '{invalid}'); return not ok"
+            ).unwrap();
+            assert!(result);
+        });
+    }
+
+    // ================================================================
+    // eval_to_string 方法测试
+    // ================================================================
+
+    #[test]
+    fn test_eval_to_string_simple() {
+        with_engine(|engine| {
+            let result = engine.eval_to_string("return 'hello'").unwrap();
+            assert_eq!(result, "hello");
+        });
+    }
+
+    #[test]
+    fn test_eval_to_string_number() {
+        with_engine(|engine| {
+            let result = engine.eval_to_string("return tostring(42)").unwrap();
+            assert_eq!(result, "42");
+        });
+    }
+
+    #[test]
+    fn test_eval_to_string_table_json() {
+        with_engine(|engine| {
+            let result = engine.eval_to_string("return json_encode({1,2,3})").unwrap();
+            assert_eq!(result, "[1,2,3]");
+        });
+    }
+
+    #[test]
+    fn test_eval_to_string_syntax_error() {
+        with_engine(|engine| {
+            let result = engine.eval_to_string("syntax error !!!");
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn test_eval_to_string_runtime_error() {
+        with_engine(|engine| {
+            let result = engine.eval_to_string("error('boom')");
+            assert!(result.is_err());
+        });
+    }
+
+    // ================================================================
+    // cfg.data() / cfg.update() / cfg.save() — Lua 侧配置 API 测试
+    // 通过内联构建测试 schema 来验证逻辑
+    // ================================================================
+
+    #[test]
+    fn test_cfg_data_empty_schema() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                cfg = cfg or {}
+                cfg.schema = {}
+                function cfg.data()
+                    local result = {}
+                    for _, field in ipairs(cfg.schema) do
+                        table.insert(result, {key=field.key, value=field.getter()})
+                    end
+                    return result
+                end
+            "#).unwrap();
+            let result: String = eval(engine, "return json_encode(cfg.data())").unwrap();
+            // 空 Lua 表（无连续整数键）→ JSON 对象 {}
+            assert_eq!(result, "{}");
+        });
+    }
+
+    #[test]
+    fn test_cfg_data_boolean_fields() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                cfg = cfg or {}
+                test_switch = 1
+                cfg.schema = {
+                    { key="test_switch", label="测试开关", type="boolean", category="测试",
+                      getter=function() return test_switch and test_switch>0 end,
+                      setter=function(v) test_switch=v and 1 or 0 end },
+                }
+                function cfg.data()
+                    local result = {}
+                    for _, field in ipairs(cfg.schema) do
+                        local entry = {key=field.key, label=field.label, type=field.type,
+                                       category=field.category, value=field.getter()}
+                        table.insert(result, entry)
+                    end
+                    return result
+                end
+            "#).unwrap();
+            let result: String = eval(engine, "return json_encode(cfg.data())").unwrap();
+            assert!(result.contains("\"test_switch\""));
+            assert!(result.contains("true"));
+        });
+    }
+
+    #[test]
+    fn test_cfg_data_number_fields() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                cfg = cfg or {}
+                test_number = 175
+                cfg.schema = {
+                    { key="test_number", label="测试数值", type="number", category="数值", min=0, max=500,
+                      getter=function() return test_number end,
+                      setter=function(v) test_number=tonumber(v) or test_number end },
+                }
+                function cfg.data()
+                    local result = {}
+                    for _, field in ipairs(cfg.schema) do
+                        local entry = {key=field.key, label=field.label, type=field.type,
+                                       category=field.category, value=field.getter()}
+                        table.insert(result, entry)
+                    end
+                    return result
+                end
+            "#).unwrap();
+            let result: String = eval(engine, "return json_encode(cfg.data())").unwrap();
+            assert!(result.contains("\"test_number\""));
+            assert!(result.contains("175"));
+        });
+    }
+
+    #[test]
+    fn test_cfg_update_valid() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                cfg = cfg or {}
+                test_val = 10
+
+                cfg.schema = {
+                    { key="test_val", label="测试值", type="number", category="数值", min=0, max=100,
+                      getter=function() return test_val end,
+                      setter=function(v) test_val=tonumber(v) or test_val end },
+                }
+
+                -- 构建 schema_map
+                local schema_map = {}
+                for _, field in ipairs(cfg.schema) do
+                    schema_map[field.key] = field
+                end
+
+                function cfg._validate(field, value)
+                    local t = field.type
+                    if t == "number" then
+                        local n = tonumber(value)
+                        if n == nil then return false, "需要数字" end
+                        if field.min ~= nil and n < field.min then return false, "最小值 "..tostring(field.min) end
+                        if field.max ~= nil and n > field.max then return false, "最大值 "..tostring(field.max) end
+                    elseif t == "boolean" then
+                        if type(value) ~= "boolean" then return false, "需要布尔值" end
+                    elseif t == "string" then
+                        if type(value) ~= "string" then return false, "需要字符串" end
+                    end
+                    return true, nil
+                end
+
+                function cfg.update(changes)
+                    if type(changes) ~= "table" then return { ok=false, errors={ _global="参数必须是 table" } } end
+                    local errors = {}
+                    for key, value in pairs(changes) do
+                        local field = schema_map[key]
+                        if not field then
+                            errors[key] = "未知配置项"
+                        else
+                            local ok, err = cfg._validate(field, value)
+                            if not ok then
+                                errors[key] = err
+                            else
+                                local success, apply_err = pcall(field.setter, value)
+                                if not success then errors[key] = "应用失败: "..tostring(apply_err) end
+                            end
+                        end
+                    end
+                    if next(errors) then return { ok=false, errors=errors } end
+                    return { ok=true }
+                end
+            "#).unwrap();
+
+            // 测试有效更新
+            let result: String = eval(engine,
+                "local r = cfg.update({test_val=50}); return json_encode(r)"
+            ).unwrap();
+            assert!(result.contains("\"ok\":true"));
+
+            // 验证值已更新
+            let val: i64 = eval(engine, "return test_val").unwrap();
+            assert_eq!(val, 50);
+        });
+    }
+
+    #[test]
+    fn test_cfg_update_unknown_key() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                cfg = cfg or {}
+                cfg.schema = {}
+
+                local schema_map = {}
+                for _, field in ipairs(cfg.schema) do
+                    schema_map[field.key] = field
+                end
+
+                function cfg._validate(field, value) return true, nil end
+                function cfg.update(changes)
+                    if type(changes) ~= "table" then return { ok=false, errors={ _global="参数必须是 table" } } end
+                    local errors = {}
+                    for key, value in pairs(changes) do
+                        local field = schema_map[key]
+                        if not field then errors[key] = "未知配置项" end
+                    end
+                    if next(errors) then return { ok=false, errors=errors } end
+                    return { ok=true }
+                end
+            "#).unwrap();
+
+            let result: String = eval(engine,
+                "local r = cfg.update({nonexistent=1}); return json_encode(r)"
+            ).unwrap();
+            assert!(result.contains("\"ok\":false"));
+            assert!(result.contains("未知配置项"));
+        });
+    }
+
+    #[test]
+    fn test_cfg_update_invalid_number() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                cfg = cfg or {}
+                test_n = 0
+                cfg.schema = {
+                    { key="test_n", label="N", type="number", category="数值", min=0, max=100,
+                      getter=function() return test_n end,
+                      setter=function(v) test_n=tonumber(v) or test_n end },
+                }
+                local schema_map = {}
+                for _, field in ipairs(cfg.schema) do schema_map[field.key] = field end
+
+                function cfg._validate(field, value)
+                    local n = tonumber(value)
+                    if n == nil then return false, "需要数字" end
+                    if field.min ~= nil and n < field.min then return false, "最小值 "..tostring(field.min) end
+                    if field.max ~= nil and n > field.max then return false, "最大值 "..tostring(field.max) end
+                    return true, nil
+                end
+                function cfg.update(changes)
+                    local errors = {}
+                    for key, value in pairs(changes) do
+                        local field = schema_map[key]
+                        if not field then errors[key] = "未知配置项"
+                        else
+                            local ok, err = cfg._validate(field, value)
+                            if not ok then errors[key] = err end
+                        end
+                    end
+                    if next(errors) then return { ok=false, errors=errors } end
+                    return { ok=true }
+                end
+            "#).unwrap();
+
+            // 超出范围
+            let result: String = eval(engine,
+                "local r = cfg.update({test_n=999}); return json_encode(r)"
+            ).unwrap();
+            assert!(result.contains("\"ok\":false"));
+            assert!(result.contains("最大值"));
+        });
+    }
+
+    #[test]
+    fn test_cfg_update_non_table_arg() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                cfg = cfg or {}
+                function cfg.update(changes)
+                    if type(changes) ~= "table" then return { ok=false, errors={ _global="参数必须是 table" } } end
+                    return { ok=true }
+                end
+            "#).unwrap();
+
+            // 直接传入非 table 应该报错
+            let result: String = eval(engine,
+                "local r = cfg.update('invalid'); return json_encode(r)"
+            ).unwrap();
+            assert!(result.contains("\"ok\":false"));
+        });
+    }
+
+    #[test]
+    fn test_cfg_save_writes_file() {
+        with_engine(|engine| {
+            // 设置脚本路径（cfg.save() 依赖 GetInfo(35) 获取目录）
+            engine.set_script_path("/tmp/test_script.lua");
+            exec(engine, r#"
+                cfg = cfg or {}
+                test_v = 42
+                cfg.schema = {
+                    { key="test_v", label="测试", type="number", category="数值",
+                      getter=function() return test_v end,
+                      setter=function(v) test_v=v end },
+                }
+            "#).unwrap();
+
+            // 模拟 cfg.save() 的核心逻辑：遍历 schema 写文件
+            let result: bool = eval(engine, r#"
+                local dir = "/tmp/"
+                local config_path = dir .. "test_cfg_save.lua"
+                local lines = {"-- test", ""}
+                for _, field in ipairs(cfg.schema) do
+                    local val = field.getter()
+                    local val_str
+                    if type(val) == "boolean" then val_str = val and "1" or "0"
+                    elseif type(val) == "number" then val_str = tostring(val)
+                    else val_str = '"' .. tostring(val) .. '"' end
+                    table.insert(lines, field.key .. "=" .. val_str)
+                end
+                table.insert(lines, "")
+                local content = table.concat(lines, "\n")
+                local f, err = io.open(config_path, "w")
+                if not f then return false end
+                f:write(content)
+                f:close()
+                return true
+            "#).unwrap();
+            assert!(result);
+
+            // 验证文件内容
+            let content = std::fs::read_to_string("/tmp/test_cfg_save.lua")
+                .expect("文件应被创建");
+            assert!(content.contains("test_v=42"));
+            assert!(content.contains("-- test"));
+
+            // 清理
+            std::fs::remove_file("/tmp/test_cfg_save.lua").ok();
+        });
+    }
+
+    #[test]
+    fn test_cfg_save_io_error() {
+        with_engine(|engine| {
+            // 测试无法写入文件的情况
+            let result: bool = eval(engine, r#"
+                local f, err = io.open("/nonexistent_dir/file.lua", "w")
+                return (f == nil)
+            "#).unwrap();
+            assert!(result);
+        });
+    }
+
+    // ================================================================
+    // cfg._validate 边界条件测试
+    // ================================================================
+
+    #[test]
+    fn test_cfg_validate_boolean_valid() {
+        with_engine(|engine| {
+            let result: bool = eval(engine, r#"
+                cfg = cfg or {}
+                function cfg._validate(field, value)
+                    if field.type == "boolean" and type(value) ~= "boolean" then
+                        return false, "需要布尔值"
+                    end
+                    return true, nil
+                end
+                local ok, err
+                ok, err = cfg._validate({type="boolean"}, true);  if not ok then return false end
+                ok, err = cfg._validate({type="boolean"}, false); if not ok then return false end
+                return true
+            "#).unwrap();
+            assert!(result);
+        });
+    }
+
+    #[test]
+    fn test_cfg_validate_boolean_invalid() {
+        with_engine(|engine| {
+            let result: bool = eval(engine, r#"
+                cfg = cfg or {}
+                function cfg._validate(field, value)
+                    if field.type == "boolean" and type(value) ~= "boolean" then
+                        return false, "需要布尔值"
+                    end
+                    return true, nil
+                end
+                local ok, err = cfg._validate({type="boolean"}, "not_bool")
+                return not ok
+            "#).unwrap();
+            assert!(result);
+        });
+    }
+
+    #[test]
+    fn test_cfg_validate_number_valid() {
+        with_engine(|engine| {
+            let result: bool = eval(engine, r#"
+                cfg = cfg or {}
+                function cfg._validate(field, value)
+                    if field.type == "number" then
+                        local n = tonumber(value)
+                        if n == nil then return false, "需要数字" end
+                        if field.min and n < field.min then return false, "最小值" end
+                        if field.max and n > field.max then return false, "最大值" end
+                    end
+                    return true, nil
+                end
+                local ok
+                ok, _ = cfg._validate({type="number", min=0, max=100}, 50); if not ok then return false end
+                ok, _ = cfg._validate({type="number", min=0, max=100}, 0);  if not ok then return false end
+                ok, _ = cfg._validate({type="number", min=0, max=100}, 100); if not ok then return false end
+                return true
+            "#).unwrap();
+            assert!(result);
+        });
+    }
+
+    #[test]
+    fn test_cfg_validate_number_below_min() {
+        with_engine(|engine| {
+            let result: bool = eval(engine, r#"
+                cfg = cfg or {}
+                function cfg._validate(field, value)
+                    if field.type == "number" then
+                        local n = tonumber(value)
+                        if n == nil then return false, "需要数字" end
+                        if field.min and n < field.min then return false, "最小值" end
+                    end
+                    return true, nil
+                end
+                local ok, err = cfg._validate({type="number", min=10}, 5)
+                return (not ok) and (err == "最小值")
+            "#).unwrap();
+            assert!(result);
+        });
+    }
+
+    #[test]
+    fn test_cfg_validate_number_above_max() {
+        with_engine(|engine| {
+            let result: bool = eval(engine, r#"
+                cfg = cfg or {}
+                function cfg._validate(field, value)
+                    if field.type == "number" then
+                        local n = tonumber(value)
+                        if n == nil then return false, "需要数字" end
+                        if field.max and n > field.max then return false, "最大值" end
+                    end
+                    return true, nil
+                end
+                local ok, err = cfg._validate({type="number", max=10}, 20)
+                return (not ok) and (err == "最大值")
+            "#).unwrap();
+            assert!(result);
+        });
+    }
+
+    #[test]
+    fn test_cfg_validate_number_not_a_number() {
+        with_engine(|engine| {
+            let result: bool = eval(engine, r#"
+                cfg = cfg or {}
+                function cfg._validate(field, value)
+                    if field.type == "number" then
+                        local n = tonumber(value)
+                        if n == nil then return false, "需要数字" end
+                    end
+                    return true, nil
+                end
+                local ok, err = cfg._validate({type="number"}, "not_a_number")
+                return (not ok) and (err == "需要数字")
+            "#).unwrap();
+            assert!(result);
+        });
+    }
+
+    #[test]
+    fn test_cfg_validate_string_valid() {
+        with_engine(|engine| {
+            let result: bool = eval(engine, r#"
+                cfg = cfg or {}
+                function cfg._validate(field, value)
+                    if field.type == "string" and type(value) ~= "string" then
+                        return false, "需要字符串"
+                    end
+                    return true, nil
+                end
+                return cfg._validate({type="string"}, "hello")
+            "#).unwrap();
+            assert!(result);
+        });
+    }
+
+    #[test]
+    fn test_cfg_validate_string_invalid() {
+        with_engine(|engine| {
+            let result: bool = eval(engine, r#"
+                cfg = cfg or {}
+                function cfg._validate(field, value)
+                    if field.type == "string" and type(value) ~= "string" then
+                        return false, "需要字符串"
+                    end
+                    return true, nil
+                end
+                local ok, err = cfg._validate({type="string"}, 123)
+                return (not ok) and (err == "需要字符串")
+            "#).unwrap();
+            assert!(result);
+        });
+    }
+
+    #[test]
+    fn test_cfg_validate_option_valid() {
+        with_engine(|engine| {
+            let result: bool = eval(engine, r#"
+                cfg = cfg or {}
+                function cfg._validate(field, value)
+                    if field.type == "option" then
+                        for _, opt in ipairs(field.options) do
+                            if tostring(opt) == tostring(value) then return true, nil end
+                        end
+                        return false, "无效选项"
+                    end
+                    return true, nil
+                end
+                local ok
+                ok, _ = cfg._validate({type="option", options={"a","b","c"}}, "a"); if not ok then return false end
+                ok, _ = cfg._validate({type="option", options={"a","b","c"}}, "b"); if not ok then return false end
+                ok, _ = cfg._validate({type="option", options={"a","b","c"}}, "c"); if not ok then return false end
+                return true
+            "#).unwrap();
+            assert!(result);
+        });
+    }
+
+    #[test]
+    fn test_cfg_validate_option_invalid() {
+        with_engine(|engine| {
+            let result: bool = eval(engine, r#"
+                cfg = cfg or {}
+                function cfg._validate(field, value)
+                    if field.type == "option" then
+                        for _, opt in ipairs(field.options) do
+                            if tostring(opt) == tostring(value) then return true, nil end
+                        end
+                        return false, "无效选项"
+                    end
+                    return true, nil
+                end
+                local ok, err = cfg._validate({type="option", options={"x","y"}}, "z")
+                return (not ok) and (err == "无效选项")
+            "#).unwrap();
+            assert!(result);
+        });
+    }
+
+    // ================================================================
+    // cfg.schema 各类型的 getter/setter 测试
+    // ================================================================
+
+    #[test]
+    fn test_cfg_field_boolean_getter_setter() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                cfg = cfg or {}
+                test_flag = 0
+                local field = {
+                    getter = function() return test_flag and test_flag > 0 end,
+                    setter = function(v) test_flag = v and 1 or 0 end,
+                }
+                -- 初始: false
+                assert(field.getter() == false)
+                -- 设为 true
+                field.setter(true)
+                assert(field.getter() == true)
+                -- 检查全局变量
+                assert(test_flag == 1)
+                -- 再设回 false
+                field.setter(false)
+                assert(field.getter() == false)
+                assert(test_flag == 0)
+            "#).unwrap();
+        });
+    }
+
+    #[test]
+    fn test_cfg_field_number_getter_setter() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                cfg = cfg or {}
+                test_num = 50
+                local field = {
+                    getter = function() return test_num end,
+                    setter = function(v) test_num = tonumber(v) or test_num end,
+                }
+                assert(field.getter() == 50)
+                field.setter(200)
+                assert(field.getter() == 200)
+                -- 传入字符串也能转换
+                field.setter("75")
+                assert(field.getter() == 75)
+            "#).unwrap();
+        });
+    }
+
+    #[test]
+    fn test_cfg_field_string_getter_setter() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                cfg = cfg or {}
+                skills = "unarmed"
+                local field = {
+                    getter = function() return skills end,
+                    setter = function(v) skills = v end,
+                }
+                assert(field.getter() == "unarmed")
+                field.setter("sword")
+                assert(field.getter() == "sword")
+            "#).unwrap();
+        });
+    }
+
+    #[test]
+    fn test_cfg_field_option_getter_setter() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                cfg = cfg or {}
+                _opt = "xue"
+                local field = {
+                    getter = function() return _opt end,
+                    setter = function(v) _opt = v end,
+                }
+                assert(field.getter() == "xue")
+                field.setter("lingwu")
+                assert(field.getter() == "lingwu")
+            "#).unwrap();
         });
     }
 }

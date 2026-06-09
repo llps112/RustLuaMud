@@ -159,8 +159,8 @@ mod tests {
         let date = Local::now().format("%Y%m%d");
         let log_file = dir.path().join(format!("sess_{}.log", date));
         let content = fs::read_to_string(&log_file).unwrap();
-        // 时间戳格式 [HH:MM:SS]
-        let re = regex::Regex::new(r"\[\d{2}:\d{2}:\d{2}\]").unwrap();
+        // 时间戳格式 [HH:MM:SS.mmm]
+        let re = regex::Regex::new(r"\[\d{2}:\d{2}:\d{2}\.\d{3}\]").unwrap();
         assert!(re.is_match(&content));
     }
 

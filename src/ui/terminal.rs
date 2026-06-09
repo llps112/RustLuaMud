@@ -8,11 +8,21 @@ use crossterm::{
 use std::io::{self, Write};
 
 use crate::connection::{SessionInfo, SessionState};
+use crate::ui::ensure_ansi_reset;
 
 /// 透传原始字符串，让终端原生处理制表符（\t）
 /// 终端驱动会按当前光标列位置执行 TAB 跳格，与 MushClient 行为一致
 fn expand_tabs(s: &str) -> String {
     s.to_string()
+}
+
+/// 将字符索引转换为字节偏移量
+/// 字符索引 = 第 N 个 Unicode 字符，字节偏移 = 该字符在 UTF-8 编码中的起始字节位置
+fn char_pos_to_byte_pos(s: &str, char_pos: usize) -> usize {
+    s.char_indices()
+        .nth(char_pos)
+        .map(|(pos, _)| pos)
+        .unwrap_or(s.len())
 }
 
 /// 按显示宽度截取字符串，确保不超过 max_width 列
@@ -31,7 +41,7 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
     result
 }
 
-/// 构建状态栏字符串（纯逻辑，无 IO 依赖）
+/// 构建 session 状态栏字符串（纯逻辑，无 IO 依赖）
 fn build_status_bar(sessions: &[SessionInfo], foreground_id: usize, total_width: usize) -> String {
     let mut bar = String::new();
     for (i, info) in sessions.iter().enumerate() {
@@ -61,6 +71,17 @@ fn build_status_bar(sessions: &[SessionInfo], foreground_id: usize, total_width:
     bar
 }
 
+/// 构建 Lua SetStatus 状态栏字符串（前台连接的自定义状态文本）
+fn build_lua_status_text(sessions: &[SessionInfo], foreground_id: usize, total_width: usize) -> String {
+    if let Some(fg) = sessions.get(foreground_id) {
+        if !fg.status_text.is_empty() {
+            let truncated: String = fg.status_text.chars().take(total_width).collect();
+            return truncated;
+        }
+    }
+    String::new()
+}
+
 /// 终端状态（纯数据，可脱离 IO 测试）
 pub struct TerminalState {
     /// 输出缓冲区（滚动回看用）
@@ -79,10 +100,18 @@ pub struct TerminalState {
     pub height: u16,
     /// 状态栏高度
     pub status_height: u16,
+    /// Lua 状态栏高度
+    pub lua_status_height: u16,
     /// 输入行高度
     pub input_height: u16,
-    /// 状态栏缓存
+    /// 状态栏缓存（session 连接信息）
     pub status_bar_cache: Option<String>,
+    /// Lua 状态栏缓存（SetStatus 文本）
+    pub lua_status_cache: Option<String>,
+    /// 是否在 Enter 后保留命令栏输入内容
+    pub keep_command: bool,
+    /// Enter 后下次按键先清空输入（模拟"全选替换"行为）
+    pub clear_on_next_key: bool,
 }
 
 impl TerminalState {
@@ -97,23 +126,28 @@ impl TerminalState {
             width,
             height,
             status_height: 1,
+            lua_status_height: 1,
             input_height: 1,
             status_bar_cache: None,
+            lua_status_cache: None,
+            keep_command: true,
+            clear_on_next_key: false,
         }
     }
 
     /// 获取输出区可用行数
     pub fn output_height(&self) -> u16 {
         self.height
-            .saturating_sub(self.status_height + self.input_height)
+            .saturating_sub(self.status_height + self.lua_status_height + self.input_height)
     }
 
     /// 追加输出行到缓冲区（纯逻辑，不涉及 IO）
+    /// 自动确保每行行尾 ANSI 状态为 reset，防止颜色泄漏到后续行
     pub fn push_output(&mut self, line: &str) {
         for part in line.split_inclusive('\n') {
             let trimmed = part.trim_end_matches('\n').trim_end_matches('\r');
             if !trimmed.is_empty() {
-                self.output_lines.push(trimmed.to_string());
+                self.output_lines.push(ensure_ansi_reset(trimmed));
             }
         }
         // 限制缓冲区大小
@@ -136,27 +170,38 @@ impl TerminalState {
                     self.history.push(cmd.clone());
                     self.history_pos = self.history.len();
                 }
-                self.input_buffer.clear();
-                self.input_cursor = 0;
+                if self.keep_command {
+                    // 保留文本，光标回到行首，下次按键替换旧内容
+                    self.input_cursor = 0;
+                    self.clear_on_next_key = true;
+                } else {
+                    self.input_buffer.clear();
+                    self.input_cursor = 0;
+                }
                 Some(cmd)
             }
 
             (KeyModifiers::NONE, KeyCode::Backspace) => {
+                self.clear_on_next_key = false;
                 if self.input_cursor > 0 {
                     self.input_cursor -= 1;
-                    self.input_buffer.remove(self.input_cursor);
+                    let byte_pos = char_pos_to_byte_pos(&self.input_buffer, self.input_cursor);
+                    self.input_buffer.remove(byte_pos);
                 }
                 None
             }
 
             (KeyModifiers::NONE, KeyCode::Delete) => {
-                if self.input_cursor < self.input_buffer.len() {
-                    self.input_buffer.remove(self.input_cursor);
+                self.clear_on_next_key = false;
+                if self.input_cursor < self.input_buffer.chars().count() {
+                    let byte_pos = char_pos_to_byte_pos(&self.input_buffer, self.input_cursor);
+                    self.input_buffer.remove(byte_pos);
                 }
                 None
             }
 
             (KeyModifiers::NONE, KeyCode::Left) => {
+                self.clear_on_next_key = false;
                 if self.input_cursor > 0 {
                     self.input_cursor -= 1;
                 }
@@ -164,22 +209,25 @@ impl TerminalState {
             }
 
             (KeyModifiers::NONE, KeyCode::Right) => {
-                if self.input_cursor < self.input_buffer.len() {
+                self.clear_on_next_key = false;
+                if self.input_cursor < self.input_buffer.chars().count() {
                     self.input_cursor += 1;
                 }
                 None
             }
 
             (KeyModifiers::NONE, KeyCode::Up) => {
+                self.clear_on_next_key = false;
                 if self.history_pos > 0 {
                     self.history_pos -= 1;
                     self.input_buffer = self.history[self.history_pos].clone();
-                    self.input_cursor = self.input_buffer.len();
+                    self.input_cursor = self.input_buffer.chars().count();
                 }
                 None
             }
 
             (KeyModifiers::NONE, KeyCode::Down) => {
+                self.clear_on_next_key = false;
                 if self.history_pos < self.history.len() {
                     self.history_pos += 1;
                     if self.history_pos < self.history.len() {
@@ -187,23 +235,32 @@ impl TerminalState {
                     } else {
                         self.input_buffer.clear();
                     }
-                    self.input_cursor = self.input_buffer.len();
+                    self.input_cursor = self.input_buffer.chars().count();
                 }
                 None
             }
 
             (KeyModifiers::NONE, KeyCode::Home) => {
+                self.clear_on_next_key = false;
                 self.input_cursor = 0;
                 None
             }
 
             (KeyModifiers::NONE, KeyCode::End) => {
-                self.input_cursor = self.input_buffer.len();
+                self.clear_on_next_key = false;
+                self.input_cursor = self.input_buffer.chars().count();
                 None
             }
 
             (KeyModifiers::NONE, KeyCode::Char(c)) => {
-                self.input_buffer.insert(self.input_cursor, c);
+                // 全选替换：若 clear_on_next_key 为真，先清空输入
+                if self.clear_on_next_key {
+                    self.input_buffer.clear();
+                    self.input_cursor = 0;
+                    self.clear_on_next_key = false;
+                }
+                let byte_pos = char_pos_to_byte_pos(&self.input_buffer, self.input_cursor);
+                self.input_buffer.insert(byte_pos, c);
                 self.input_cursor += 1;
                 None
             }
@@ -216,6 +273,12 @@ impl TerminalState {
     pub fn update_status_bar(&mut self, sessions: &[SessionInfo], foreground_id: usize) {
         let bar = build_status_bar(sessions, foreground_id, self.width as usize);
         self.status_bar_cache = Some(bar);
+    }
+
+    /// 更新 Lua 状态栏缓存（纯逻辑）
+    pub fn update_lua_status_bar(&mut self, sessions: &[SessionInfo], foreground_id: usize) {
+        let text = build_lua_status_text(sessions, foreground_id, self.width as usize);
+        self.lua_status_cache = if text.is_empty() { None } else { Some(text) };
     }
 
     /// 获取当前可见的输出行
@@ -233,12 +296,13 @@ impl TerminalState {
     pub fn input_display(&self) -> (String, usize) {
         let prompt_len: usize = 2; // "> "
         let avail_width = self.width as usize - prompt_len;
+        let char_count = self.input_buffer.chars().count();
         let display_start = if self.input_cursor > avail_width {
             self.input_cursor - avail_width + 1
         } else {
             0
         };
-        let display_end = std::cmp::min(display_start + avail_width, self.input_buffer.len());
+        let display_end = std::cmp::min(display_start + avail_width, char_count);
         let display_str: String = self
             .input_buffer
             .chars()
@@ -288,39 +352,61 @@ impl Terminal {
         Ok(())
     }
 
-    /// 完整刷新屏幕
+    /// 完整刷新屏幕（包括状态栏 + 输出区 + 输入行）
     fn refresh_all(&self, stdout: &mut io::Stdout) -> io::Result<()> {
+        // session 状态栏（顶部）
         if let Some(ref bar) = self.state.status_bar_cache {
             queue!(stdout, cursor::MoveTo(0, 0))?;
             queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
             queue!(stdout, Print(bar))?;
         }
 
-        let output_height = self.state.output_height() as usize;
-        let visible = self.state.visible_output_lines();
-        for (i, line) in visible.iter().enumerate() {
-            queue!(
-                stdout,
-                cursor::MoveTo(0, self.state.status_height + i as u16)
-            )?;
+        self.draw_output_area(stdout)?;
+
+        // Lua 状态栏（输出区下方、输入行上方）
+        let lua_bar_y = self.state.height.saturating_sub(self.state.input_height + self.state.lua_status_height);
+        if let Some(ref text) = self.state.lua_status_cache {
+            queue!(stdout, cursor::MoveTo(0, lua_bar_y))?;
             queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-            let expanded = expand_tabs(line);
-            queue!(stdout, Print(&expanded))?;
-        }
-        // 清除输出区剩余行
-        for i in visible.len()..output_height {
-            queue!(
-                stdout,
-                cursor::MoveTo(0, self.state.status_height + i as u16)
-            )?;
+            queue!(stdout, Print(text))?;
+        } else {
+            queue!(stdout, cursor::MoveTo(0, lua_bar_y))?;
             queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
         }
+
         self.draw_input_line(stdout)?;
         stdout.flush()?;
         Ok(())
     }
 
-    /// 绘制状态栏
+    /// 仅刷新输出区和输入行（不重绘状态栏，避免闪烁）
+    fn refresh_output_area(&self, stdout: &mut io::Stdout) -> io::Result<()> {
+        self.draw_output_area(stdout)?;
+        self.draw_input_line(stdout)?;
+        stdout.flush()?;
+        Ok(())
+    }
+
+    /// 绘制输出区所有可见行
+    fn draw_output_area(&self, stdout: &mut io::Stdout) -> io::Result<()> {
+        let output_height = self.state.output_height() as usize;
+        let visible = self.state.visible_output_lines();
+        for (i, line) in visible.iter().enumerate() {
+            let row = self.state.status_height + i as u16;
+            queue!(stdout, cursor::MoveTo(0, row))?;
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+            let expanded = expand_tabs(line);
+            queue!(stdout, Print(&expanded))?;
+        }
+        for i in visible.len()..output_height {
+            let row = self.state.status_height + i as u16;
+            queue!(stdout, cursor::MoveTo(0, row))?;
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+        }
+        Ok(())
+    }
+
+    /// 绘制 session 状态栏（顶部）
     pub fn draw_status_bar(
         &mut self,
         stdout: &mut io::Stdout,
@@ -332,21 +418,42 @@ impl Terminal {
             queue!(stdout, cursor::MoveTo(0, 0))?;
             queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
             queue!(stdout, Print(bar))?;
-            stdout.flush()?;
         }
         Ok(())
     }
 
-    /// 追加一行输出
+    /// 绘制 Lua 状态栏（输出区下方、输入行上方）
+    pub fn draw_lua_status_bar(
+        &mut self,
+        stdout: &mut io::Stdout,
+        sessions: &[SessionInfo],
+        foreground_id: usize,
+    ) -> io::Result<()> {
+        self.state.update_lua_status_bar(sessions, foreground_id);
+        let lua_bar_y = self.state.height.saturating_sub(self.state.input_height + self.state.lua_status_height);
+        if let Some(ref text) = self.state.lua_status_cache {
+            queue!(stdout, cursor::MoveTo(0, lua_bar_y))?;
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+            queue!(stdout, style::SetForegroundColor(style::Color::DarkGreen))?;
+            queue!(stdout, Print(text))?;
+            queue!(stdout, style::ResetColor)?;
+        } else {
+            queue!(stdout, cursor::MoveTo(0, lua_bar_y))?;
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+        }
+        Ok(())
+    }
+
+    /// 追加一行输出（仅刷新输出区 + 输入行，不重绘状态栏避免闪烁）
     pub fn append_output(&mut self, line: &str) -> io::Result<()> {
         self.state.push_output(line);
         let mut stdout = io::stdout();
-        self.refresh_all(&mut stdout)?;
+        self.refresh_output_area(&mut stdout)?;
         Ok(())
     }
 
     /// 绘制输入行
-    fn draw_input_line(&self, stdout: &mut io::Stdout) -> io::Result<()> {
+    pub fn draw_input_line(&self, stdout: &mut io::Stdout) -> io::Result<()> {
         let input_y = self.state.height.saturating_sub(1);
         queue!(stdout, cursor::MoveTo(0, input_y))?;
         queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
@@ -360,9 +467,12 @@ impl Terminal {
     }
 
     /// 处理键盘事件，返回是否需要发送命令
+    /// 注：仅重绘输入行（不触发 refresh_all），Enter 后的全屏刷新由调用方负责
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<String> {
         let result = self.state.handle_key(key);
-        let _ = self.refresh_all(&mut io::stdout());
+        let mut stdout = io::stdout();
+        let _ = self.draw_input_line(&mut stdout);
+        let _ = stdout.flush();
         result
     }
 
@@ -492,7 +602,7 @@ mod tests {
     #[test]
     fn test_state_output_height() {
         let state = TerminalState::new(80, 24);
-        assert_eq!(state.output_height(), 22); // 24 - 1 (status) - 1 (input)
+        assert_eq!(state.output_height(), 21); // 24 - 1 (status) - 1 (lua_status) - 1 (input)
     }
 
     #[test]
@@ -520,6 +630,7 @@ mod tests {
     #[test]
     fn test_state_handle_key_enter() {
         let mut state = TerminalState::new(80, 24);
+        state.keep_command = false; // 覆盖默认值，测试清空行为
         state.input_buffer = "hello".to_string();
         state.input_cursor = 5;
         let result = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -527,6 +638,74 @@ mod tests {
         assert!(state.input_buffer.is_empty());
         assert_eq!(state.input_cursor, 0);
         assert_eq!(state.history, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_keep_command_enter_preserves_buffer() {
+        let mut state = TerminalState::new(80, 24);
+        state.keep_command = true;
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 5;
+        let result = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(result, Some("hello".to_string()));
+        // 缓冲区应被保留
+        assert_eq!(state.input_buffer, "hello");
+        // 光标回到行首
+        assert_eq!(state.input_cursor, 0);
+        assert!(state.clear_on_next_key);
+        assert_eq!(state.history, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_keep_command_clear_on_next_key_replaces() {
+        let mut state = TerminalState::new(80, 24);
+        state.keep_command = true;
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 5;
+        // Enter 提交，保留文本
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "hello");
+        assert!(state.clear_on_next_key);
+        // 输入字符 'w'，应替换旧文本
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "w");
+        assert_eq!(state.input_cursor, 1);
+        assert!(!state.clear_on_next_key);
+        // 继续输入 'o'，正常追加
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "wo");
+    }
+
+    #[test]
+    fn test_keep_command_clear_on_next_key_cancel_by_nav() {
+        let mut state = TerminalState::new(80, 24);
+        state.keep_command = true;
+        state.input_buffer = "hello".to_string();
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(state.clear_on_next_key);
+        // 按方向键取消全选状态
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(!state.clear_on_next_key);
+        // clear_on_next_key 已取消，正常插入（光标此时在位置 1，即 "e" 之前）
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "hXello");
+        // End 再到末尾
+        let _ = state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        // 清除 clear_on_next_key
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "hXello!");
+    }
+
+    #[test]
+    fn test_keep_command_toggle_on_by_default() {
+        let mut state = TerminalState::new(80, 24);
+        // 默认 keep_command = true
+        assert!(state.keep_command);
+        state.input_buffer = "test".to_string();
+        state.input_cursor = 4;
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // 应保留（默认行为）
+        assert_eq!(state.input_buffer, "test");
     }
 
     #[test]
@@ -714,10 +893,12 @@ mod tests {
             SessionInfo {
                 name: "mud1".to_string(),
                 state: SessionState::Connected,
+                status_text: String::new(),
             },
             SessionInfo {
                 name: "mud2".to_string(),
                 state: SessionState::Disconnected,
+                status_text: String::new(),
             },
         ];
         let bar = build_status_bar(&sessions, 0, 80);
@@ -731,6 +912,7 @@ mod tests {
         let sessions = vec![SessionInfo {
             name: "mud1".to_string(),
             state: SessionState::Connected,
+            status_text: String::new(),
         }];
         let bar = build_status_bar(&sessions, 0, 80);
         // Foreground should have yellow highlight
@@ -743,6 +925,7 @@ mod tests {
         let sessions = vec![SessionInfo {
             name: "test".to_string(),
             state: SessionState::Connected,
+            status_text: String::new(),
         }];
         state.update_status_bar(&sessions, 0);
         assert!(state.status_bar_cache.is_some());

@@ -69,6 +69,10 @@ password = "your_password"
 
 ## 内置命令
 
+> **重要规则：`scripts/class/` 目录下的 Lua 脚本文件（即从 MushClient 直接拷贝的原始脚本）禁止任何修改。** 这些文件是 100% 兼容 MushClient 的原始客户端脚本，仅用于搜索和查阅。实际的脚本触发和执行也使用这些原始文件。如需新增或修改功能，应在其他脚本文件中实现。
+>
+> `scripts/class-utf8/` 目录是 `scripts/class/` 的 UTF-8 编码副本，仅用于搜索目的，由程序维护者也应保持与原始文件一致。
+
 | 命令 | 说明 |
 |------|------|
 | `/connect <名> <主机:端口>` | 添加并连接新角色 |
@@ -79,6 +83,43 @@ password = "your_password"
 | `/load <脚本路径>` | 为前台连接加载 Lua 脚本 |
 | `/load reload` | 重新加载前台连接的 Lua 脚本 |
 | `/lua <Lua 代码>` | 直接执行 Lua 代码 |
+
+---
+
+## 数据交换接口（外部程序集成）
+
+客户端内置了 JSON 序列化和配置读写 API，外部程序可通过引擎的 `eval_to_string` 接口实现配置读写，无需直接解析日志或模拟输入。
+
+### 全局 API
+
+| API | 说明 |
+|-----|------|
+| `json_encode(value)` | 将 Lua 值序列化为 JSON 字符串（支持 nil、boolean、number、string、table 嵌套） |
+| `json_decode(json_str)` | 将 JSON 字符串反序列化为 Lua 值 |
+
+### 配置 API
+
+| API | 说明 |
+|-----|------|
+| `cfg.data()` | 导出完整配置数据，包含字段定义 + 当前值，返回可供 `json_encode` 的 Lua 表 |
+| `cfg.update({...})` | 批量更新配置项，自动进行类型校验和范围检查，返回 `{ok=true}` 或 `{ok=false, errors={...}}` |
+| `cfg.save()` | 将当前配置持久化到 `config_<角色名>.lua` 文件 |
+
+### 调用示例
+
+通过 Rust 端的 `eval_to_string` 方法调用：
+
+```
+// 获取配置
+let json = engine.eval_to_string("return json_encode(cfg.data())");
+
+// 修改配置
+let result = engine.eval_to_string(
+    "return json_encode(cfg.update({idle=true, neili_job=80}))"
+);
+```
+
+外部程序（如独立 Web UI、CLI 工具）可通过任意 IPC 机制调用上述接口。
 
 ---
 

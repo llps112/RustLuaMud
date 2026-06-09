@@ -1,13 +1,56 @@
-use std::io;
+use std::fs;
+use std::io::{self, Write};
+use std::path::Path;
 
 use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyModifiers};
 use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
 use crate::connection::{ConnectionManager, ManagerEvent, SessionState};
 use crate::log::Logger;
 use crate::ui::{AnsiParser, Terminal};
+
+/// 终端设置持久化
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TermSettings {
+    /// 是否在 Enter 后保留命令栏输入内容
+    keep_command: bool,
+}
+
+impl TermSettings {
+    fn path() -> &'static str {
+        "profiles/terminal.json"
+    }
+
+    fn load() -> Self {
+        let path = Self::path();
+        if Path::new(path).exists() {
+            fs::read_to_string(path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default()
+        } else {
+            Self::default()
+        }
+    }
+
+    fn save(&self) {
+        let path = Self::path();
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = fs::write(path, json);
+        }
+    }
+}
+
+impl Default for TermSettings {
+    fn default() -> Self {
+        Self {
+            keep_command: true,
+        }
+    }
+}
 
 /// 内置命令解析结果
 #[derive(Debug, PartialEq)]
@@ -30,6 +73,8 @@ enum BuiltinCommand {
     LoadReload,
     /// /lua <代码>
     Lua { code: String },
+    /// /set <选项> <值>
+    Set { option: String, value: String },
     /// 未知命令
     Unknown,
 }
@@ -79,6 +124,16 @@ fn parse_builtin_command(cmd: &str) -> BuiltinCommand {
                 BuiltinCommand::Lua { code }
             }
         }
+        "/set" => {
+            if parts.len() < 3 {
+                BuiltinCommand::Unknown
+            } else {
+                BuiltinCommand::Set {
+                    option: parts[1].to_string(),
+                    value: parts[2].to_string(),
+                }
+            }
+        }
         _ => BuiltinCommand::Unknown,
     }
 }
@@ -96,7 +151,6 @@ struct ConnectRequest {
 /// 定时器触发请求
 struct TimerRequest {
     session_id: usize,
-    timer_idx: usize,
 }
 
 /// 解析 /connect 命令参数，返回 (host, port)
@@ -165,7 +219,11 @@ impl App {
             }
         }
 
-        let terminal = Terminal::new()?;
+        let mut terminal = Terminal::new()?;
+
+        // 加载并应用终端设置
+        let ts = TermSettings::load();
+        terminal.state_mut().keep_command = ts.keep_command;
         let logger = Logger::new(
             &config.general.log_dir,
             config.general.log_rotation_size_mb,
@@ -252,9 +310,9 @@ impl App {
                     self.perform_connect(req.session_id).await?;
                 }
 
-                // 处理定时器触发
+                // 处理定时器触发（轮询到达）
                 Some(req) = self.timer_rx.recv() => {
-                    self.handle_timer(req.session_id, req.timer_idx)?;
+                    self.handle_timer(req.session_id)?;
                 }
             }
         }
@@ -275,6 +333,10 @@ impl App {
                 let msg = format!("[系统] 连接 {} ({}) 重连成功", session_id + 1, name);
                 self.terminal.append_output(&msg)?;
                 self.init_lua_for_session(session_id)?;
+                // 重连后刷新状态栏（Lua 脚本可能调用了 SetStatus）
+                if session_id == self.manager.foreground_id {
+                    self.update_status_bar()?;
+                }
             }
             Err(e) => {
                 let msg = format!("[系统] 重连 {} ({}) 失败: {}", session_id + 1, name, e);
@@ -380,31 +442,24 @@ impl App {
         if id >= self.manager.sessions.len() {
             return;
         }
-        let intervals: Vec<(usize, u64)> =
-            if let Some(ref engine) = self.manager.sessions[id].lua_engine {
-                engine.timer_intervals().into_iter().enumerate().collect()
-            } else {
-                return;
-            };
 
-        for (timer_idx, interval) in intervals {
-            let timer_tx = self.timer_tx.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(interval)).await;
-                    if timer_tx
-                        .send(TimerRequest {
-                            session_id: id,
-                            timer_idx,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
+        // 使用轮询方式：单个 tokio 任务定期检查所有定时器
+        // 这解决了动态创建的定时器（如 wait.time 创建的）无法触发的问题
+        let timer_tx = self.timer_tx.clone();
+        tokio::spawn(async move {
+            // 轮询间隔 50ms，确保定时器精度
+            let poll_interval = tokio::time::Duration::from_millis(50);
+            loop {
+                tokio::time::sleep(poll_interval).await;
+                if timer_tx
+                    .send(TimerRequest { session_id: id })
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
-            });
-        }
+            }
+        });
     }
 
     /// 发送 Lua 引擎产生的命令，拦截 / 开头的命令作为 Lua 代码执行
@@ -447,16 +502,34 @@ impl App {
         Ok(())
     }
 
-    /// 处理定时器触发
-    fn handle_timer(&mut self, session_id: usize, timer_idx: usize) -> io::Result<()> {
+    /// 处理定时器触发（轮询模式：检查所有到期定时器）
+    fn handle_timer(&mut self, session_id: usize) -> io::Result<()> {
         if session_id >= self.manager.sessions.len() {
             return Ok(());
         }
-        if let Some(ref engine) = self.manager.sessions[session_id].lua_engine {
-            engine.fire_timer(timer_idx);
-            let commands = engine.drain_commands();
-            self.send_lua_commands(session_id, commands)?;
+        loop {
+            // 先检查是否有到期的定时器，确保 engine 引用在调用 self 方法前被释放
+            let should_fire = self.manager.sessions[session_id]
+                .lua_engine
+                .as_ref()
+                .map(|engine| engine.fire_next_due_timer())
+                .unwrap_or(false);
+            if !should_fire {
+                break;
+            }
+            let commands = self.manager.sessions[session_id]
+                .lua_engine
+                .as_ref()
+                .map(|engine| engine.drain_commands())
+                .unwrap_or_default();
+            if !commands.is_empty() {
+                self.send_lua_commands(session_id, commands)?;
+            }
             self.drain_lua_logs(session_id)?;
+        }
+        // 定时器回调可能调用了 SetStatus，刷新状态栏
+        if session_id == self.manager.foreground_id {
+            self.update_status_bar()?;
         }
         Ok(())
     }
@@ -761,6 +834,8 @@ impl App {
                             let commands = engine.drain_commands();
                             self.send_lua_commands(fg, commands)?;
                             self.drain_lua_logs(fg)?;
+                            // /lua 命令可能调用了 SetStatus，刷新状态栏
+                            self.update_status_bar()?;
                         }
                         Err(e) => {
                             self.terminal.append_output(&format!("[Lua 错误] {}", e))?;
@@ -769,6 +844,27 @@ impl App {
                 } else {
                     self.terminal
                         .append_output("[错误] 未加载 Lua 引擎，请先加载脚本")?;
+                }
+            }
+
+            BuiltinCommand::Set { option, value } => {
+                match option.as_str() {
+                    "keep_command" => {
+                        let enabled = matches!(value.as_str(), "on" | "1" | "true" | "yes");
+                        self.terminal.state_mut().keep_command = enabled;
+                        let status = if enabled { "已启用" } else { "已关闭" };
+                        TermSettings { keep_command: enabled }.save();
+                        self.terminal.append_output(&format!(
+                            "[系统] 保留命令栏输入: {} (已保存)",
+                            status
+                        ))?;
+                    }
+                    _ => {
+                        self.terminal.append_output(&format!(
+                            "[错误] 未知设置选项: {}。可用选项: keep_command",
+                            option
+                        ))?;
+                    }
                 }
             }
 
@@ -790,6 +886,8 @@ impl App {
                     .append_output("  /load reload                重新加载前台连接的 Lua 脚本")?;
                 self.terminal
                     .append_output("  /lua <Lua 代码>             直接执行 Lua 代码")?;
+                self.terminal
+                    .append_output("  /set keep_command on|off     执行后保留命令栏输入")?;
                 self.terminal
                     .append_output("  Alt+0~9                     切换前台连接 (最多10个)")?;
             }
@@ -853,6 +951,10 @@ impl App {
                         };
                     // 发送触发器产生的命令
                     self.send_lua_commands(id, trigger_commands)?;
+                    // 触发器中可能调用了 SetStatus，刷新状态栏
+                    if id == self.manager.foreground_id {
+                        self.update_status_bar()?;
+                    }
                 }
             }
             ManagerEvent::StateChange(id, state) => {
@@ -923,12 +1025,18 @@ impl App {
         Ok(())
     }
 
-    /// 更新状态栏
+    /// 更新状态栏（包括 session 状态栏和 Lua 状态栏）
     fn update_status_bar(&mut self) -> io::Result<()> {
         let mut stdout = io::stdout();
         let infos = self.manager.session_infos();
+        let fg = self.manager.foreground_id;
         self.terminal
-            .draw_status_bar(&mut stdout, &infos, self.manager.foreground_id)?;
+            .draw_status_bar(&mut stdout, &infos, fg)?;
+        self.terminal
+            .draw_lua_status_bar(&mut stdout, &infos, fg)?;
+        // 将光标定位到输入行（draw_lua_status_bar 不再内部 flush）
+        self.terminal.draw_input_line(&mut stdout)?;
+        stdout.flush()?;
         Ok(())
     }
 
@@ -1147,6 +1255,36 @@ mod tests {
     #[test]
     fn test_parse_builtin_lua_no_code() {
         let cmd = parse_builtin_command("/lua");
+        assert_eq!(cmd, BuiltinCommand::Unknown);
+    }
+
+    #[test]
+    fn test_parse_builtin_set_keep_command_on() {
+        let cmd = parse_builtin_command("/set keep_command on");
+        assert_eq!(
+            cmd,
+            BuiltinCommand::Set {
+                option: "keep_command".to_string(),
+                value: "on".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_builtin_set_keep_command_off() {
+        let cmd = parse_builtin_command("/set keep_command off");
+        assert_eq!(
+            cmd,
+            BuiltinCommand::Set {
+                option: "keep_command".to_string(),
+                value: "off".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_builtin_set_too_few_args() {
+        let cmd = parse_builtin_command("/set");
         assert_eq!(cmd, BuiltinCommand::Unknown);
     }
 

@@ -19,6 +19,7 @@ pub enum SessionState {
 pub struct SessionInfo {
     pub name: String,
     pub state: SessionState,
+    pub status_text: String,
 }
 
 /// 从连接接收到的数据事件
