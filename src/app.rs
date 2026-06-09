@@ -407,6 +407,46 @@ impl App {
         }
     }
 
+    /// 发送 Lua 引擎产生的命令，拦截 / 开头的命令作为 Lua 代码执行
+    fn send_lua_commands(&mut self, session_id: usize, commands: Vec<String>) -> io::Result<()> {
+        let name = if session_id < self.manager.sessions.len() {
+            self.manager.sessions[session_id].name.clone()
+        } else {
+            return Ok(());
+        };
+        for cmd in commands {
+            if cmd.starts_with('/') {
+                // / 开头的命令作为 Lua 代码执行
+                let lua_code = &cmd[1..]; // 去掉前导 /
+                self.logger.log_lua(&name, lua_code);
+                if let Some(ref engine) = self.manager.sessions[session_id].lua_engine {
+                    match engine.eval_code(lua_code) {
+                        Ok(_) => {
+                            let sub_commands = engine.drain_commands();
+                            // 递归处理子命令（避免无限递归，只处理一层）
+                            for sub_cmd in sub_commands {
+                                self.logger.log_command(&name, &sub_cmd);
+                                if let Err(e) = self.manager.send_to(session_id, &sub_cmd) {
+                                    self.terminal.append_output(&format!("[Lua 错误] {}", e))?;
+                                }
+                            }
+                            self.drain_lua_logs(session_id)?;
+                        }
+                        Err(e) => {
+                            self.terminal.append_output(&format!("[Lua 错误] {}", e))?;
+                        }
+                    }
+                }
+            } else {
+                self.logger.log_command(&name, &cmd);
+                if let Err(e) = self.manager.send_to(session_id, &cmd) {
+                    self.terminal.append_output(&format!("[发送错误] {}", e))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// 处理定时器触发
     fn handle_timer(&mut self, session_id: usize, timer_idx: usize) -> io::Result<()> {
         if session_id >= self.manager.sessions.len() {
@@ -415,12 +455,7 @@ impl App {
         if let Some(ref engine) = self.manager.sessions[session_id].lua_engine {
             engine.fire_timer(timer_idx);
             let commands = engine.drain_commands();
-            for cmd in commands {
-                if let Err(e) = self.manager.send_to(session_id, &cmd) {
-                    self.terminal
-                        .append_output(&format!("[Lua 定时器错误] {}", e))?;
-                }
-            }
+            self.send_lua_commands(session_id, commands)?;
             self.drain_lua_logs(session_id)?;
         }
         Ok(())
@@ -438,9 +473,13 @@ impl App {
         };
         let name = self.manager.sessions[session_id].name.clone();
         for msg in logs {
-            // 日志写入文件（剥离 ANSI 码）
+            // 日志写入文件（剥离 ANSI 码），根据前缀分类
             let clean = crate::ui::AnsiParser::strip_ansi(&msg);
-            self.logger.log(&name, &clean);
+            if clean.starts_with("[GPS-MATCH]") || clean.starts_with("[GPS]") || clean.starts_with("[DEBUG") {
+                self.logger.log_debug(&name, &clean);
+            } else {
+                self.logger.log(&name, &clean);
+            }
             // 如果是前台连接，也在终端显示（保留 ANSI 码以显示颜色）
             if session_id == self.manager.foreground_id {
                 self.terminal.append_output(&format!("[Lua] {}", msg))?;
@@ -505,6 +544,9 @@ impl App {
 
                     if !alias_handled {
                         // 无别名匹配，发送到前台连接
+                        if let Some(fg) = self.manager.sessions.get(self.manager.foreground_id) {
+                            self.logger.log_command(&fg.name, &cmd);
+                        }
                         if let Err(e) = self.manager.send_to_foreground(&cmd) {
                             self.terminal.append_output(&format!("[错误] {}", e))?;
                         }
@@ -708,15 +750,13 @@ impl App {
                     self.terminal.append_output("[错误] 无前台连接")?;
                     return Ok(());
                 }
+                let name = self.manager.sessions[fg].name.clone();
+                self.logger.log_lua(&name, &code);
                 if let Some(ref engine) = self.manager.sessions[fg].lua_engine {
                     match engine.eval_code(&code) {
                         Ok(_) => {
                             let commands = engine.drain_commands();
-                            for c in commands {
-                                if let Err(e) = self.manager.send_to(fg, &c) {
-                                    self.terminal.append_output(&format!("[错误] {}", e))?;
-                                }
-                            }
+                            self.send_lua_commands(fg, commands)?;
                             self.drain_lua_logs(fg)?;
                         }
                         Err(e) => {
@@ -763,7 +803,7 @@ impl App {
                     let max_lines = self.config.general.scroll_buffer;
                     let session = &mut self.manager.sessions[id];
                     for part in data.split_inclusive('\n') {
-                        let trimmed = part.trim_end_matches('\r').trim_end_matches('\n');
+                        let trimmed = part.trim_end_matches(['\r', '\n']);
                         if !trimmed.is_empty() {
                             session.output_lines.push(trimmed.to_string());
                         }
@@ -788,7 +828,7 @@ impl App {
                             // 对每行数据分别匹配触发器
                             let mut all_cmds = Vec::new();
                             for part in data.split_inclusive('\n') {
-                                let trimmed = part.trim_end_matches('\r').trim_end_matches('\n');
+                                let trimmed = part.trim_end_matches(['\r', '\n']);
                                 if !trimmed.is_empty() {
                                     engine.process_output(trimmed);
                                     all_cmds.extend(engine.drain_commands());
@@ -809,17 +849,18 @@ impl App {
                             Vec::new()
                         };
                     // 发送触发器产生的命令
-                    for cmd in trigger_commands {
-                        if let Err(e) = self.manager.send_to(id, &cmd) {
-                            self.terminal
-                                .append_output(&format!("[Lua 触发器错误] {}", e))?;
-                        }
-                    }
+                    self.send_lua_commands(id, trigger_commands)?;
                 }
             }
             ManagerEvent::StateChange(id, state) => {
                 if id < self.manager.sessions.len() {
                     self.manager.sessions[id].state = state.clone();
+                }
+                // 同步 Lua 引擎的连接状态
+                if id == self.manager.foreground_id {
+                    if let Some(ref mut engine) = self.manager.sessions[id].lua_engine {
+                        engine.set_connected(matches!(state, SessionState::Connected));
+                    }
                 }
                 if id == self.manager.foreground_id {
                     self.update_status_bar()?;

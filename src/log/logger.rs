@@ -4,6 +4,30 @@ use std::path::PathBuf;
 
 use chrono::Local;
 
+/// 日志分类
+#[derive(Clone, Copy)]
+pub enum LogCategory {
+    /// 服务器输出
+    Output,
+    /// 脚本发送的指令
+    Command,
+    /// /lua 指令
+    Lua,
+    /// 调试信息
+    Debug,
+}
+
+impl LogCategory {
+    fn tag(&self) -> &'static str {
+        match self {
+            LogCategory::Output => "OUT",
+            LogCategory::Command => "CMD",
+            LogCategory::Lua => "LUA",
+            LogCategory::Debug => "DBG",
+        }
+    }
+}
+
 /// 简单日志记录器（Phase 1 基础版，Phase 4 完善轮转）
 pub struct Logger {
     log_dir: PathBuf,
@@ -32,16 +56,36 @@ impl Logger {
         self.log_dir.join(filename)
     }
 
-    /// 写入一行日志
+    /// 写入一行日志（带分类标签）
     pub fn log(&self, session_name: &str, line: &str) {
+        self.log_cat(session_name, LogCategory::Output, line);
+    }
+
+    /// 写入分类日志
+    pub fn log_cat(&self, session_name: &str, category: LogCategory, line: &str) {
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.log_path(session_name))
         {
-            let timestamp = Local::now().format("%H:%M:%S");
-            let _ = writeln!(file, "[{}] {}", timestamp, line.trim_end());
+            let timestamp = Local::now().format("%H:%M:%S%.3f");
+            let _ = writeln!(file, "[{}] [{}] {}", timestamp, category.tag(), line.trim_end());
         }
+    }
+
+    /// 记录脚本发送的指令
+    pub fn log_command(&self, session_name: &str, cmd: &str) {
+        self.log_cat(session_name, LogCategory::Command, cmd);
+    }
+
+    /// 记录 /lua 指令
+    pub fn log_lua(&self, session_name: &str, code: &str) {
+        self.log_cat(session_name, LogCategory::Lua, code);
+    }
+
+    /// 记录调试信息
+    pub fn log_debug(&self, session_name: &str, msg: &str) {
+        self.log_cat(session_name, LogCategory::Debug, msg);
     }
 }
 

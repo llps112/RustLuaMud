@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use mlua::{Function, Lua, Result as LuaResult, Table, UserData, Value};
+use regex::bytes::Regex as BytesRegex;
 use regex::Regex;
 use rusqlite::{types::Value as SqlValue, Connection};
 
@@ -69,9 +70,16 @@ impl UserData for LuaDb {
                                 rusqlite::types::ValueRef::Real(f) => {
                                     rusqlite::types::Value::Real(f)
                                 }
-                                rusqlite::types::ValueRef::Text(s) => rusqlite::types::Value::Text(
-                                    std::str::from_utf8(s).unwrap_or("").to_string(),
-                                ),
+                                rusqlite::types::ValueRef::Text(s) => {
+                                    // 尝试 UTF-8，失败则从 GBK 转码
+                                    let text = if std::str::from_utf8(s).is_ok() {
+                                        std::str::from_utf8(s).unwrap().to_string()
+                                    } else {
+                                        let (cow, _, _) = encoding_rs::GBK.decode(s);
+                                        cow.into_owned()
+                                    };
+                                    rusqlite::types::Value::Text(text)
+                                }
                                 rusqlite::types::ValueRef::Blob(b) => {
                                     rusqlite::types::Value::Blob(b.to_vec())
                                 }
@@ -167,7 +175,14 @@ impl UserData for LuaStmt {
                             rusqlite::types::ValueRef::Integer(n) => mlua::Value::Integer(n),
                             rusqlite::types::ValueRef::Real(f) => mlua::Value::Number(f),
                             rusqlite::types::ValueRef::Text(s) => {
-                                mlua::Value::String(lua.create_string(s)?)
+                                // 尝试 UTF-8，失败则从 GBK 转码
+                                let text = if std::str::from_utf8(s).is_ok() {
+                                    std::str::from_utf8(s).unwrap().to_string()
+                                } else {
+                                    let (cow, _, _) = encoding_rs::GBK.decode(s);
+                                    cow.into_owned()
+                                };
+                                mlua::Value::String(lua.create_string(&text)?)
                             }
                             rusqlite::types::ValueRef::Blob(b) => {
                                 mlua::Value::String(lua.create_string(b)?)
@@ -214,10 +229,20 @@ impl UserData for LuaStmt {
     }
 }
 
+/// 触发器匹配模式：GBK 字节模式或 UTF-8 字符模式
+pub(crate) enum TriggerPattern {
+    /// GBK 字节模式：正则中的中文字符转为 GBK 字节序列，匹配 GBK 编码的数据
+    /// 适用于 GBK 编码的脚本，.{4} 匹配 4 字节（2 个中文字符）
+    Gbk(BytesRegex),
+    /// UTF-8 字符模式：正则按 Unicode 字符匹配，匹配 UTF-8 数据
+    /// 适用于 UTF-8 编码的脚本，.{4} 匹配 4 个 Unicode 字符
+    Utf8(Regex),
+}
+
 /// 触发器定义
 pub struct Trigger {
     pub name: String,
-    pub pattern: Regex,
+    pub(crate) pattern: TriggerPattern,
     pub callback: Function,
     pub enabled: bool,
     pub group: String,
@@ -252,6 +277,14 @@ pub struct TimerDef {
     pub group: String,
     pub one_shot: bool,
     pub send_text: String,
+    pub last_fired: std::time::Instant,
+}
+
+/// 脚本编码类型
+#[derive(Clone, Copy, PartialEq)]
+enum ScriptEncoding {
+    Utf8,
+    Gbk,
 }
 
 /// 脚本运行时共享状态
@@ -268,6 +301,9 @@ struct ScriptState {
     connect_requested: bool,
     disconnect_requested: bool,
     host: String,
+    status_text: String,
+    /// 当前加载脚本的编码，用于决定触发器匹配模式
+    current_encoding: ScriptEncoding,
 }
 
 /// Lua 引擎与脚本运行时
@@ -563,6 +599,8 @@ impl LuaEngine {
             connect_requested: false,
             disconnect_requested: false,
             host: String::new(),
+            status_text: String::new(),
+            current_encoding: ScriptEncoding::Utf8,
         }));
 
         let script_dir = Rc::new(RefCell::new(None::<String>));
@@ -661,6 +699,15 @@ impl LuaEngine {
             Ok(())
         })?;
         globals.set("Note", note_fn)?;
+
+        // SetStatus(text) — MushClient API: 设置状态栏文本
+        let state_rc_note = state_rc.clone();
+        let set_status_fn = lua.create_function_mut(move |_, text: String| {
+            // 存储状态栏文本，UI 层可读取显示
+            state_rc_note.borrow_mut().status_text = text;
+            Ok(())
+        })?;
+        globals.set("SetStatus", set_status_fn)?;
 
         // Tell(text)
         let state_rc7 = state_rc.clone();
@@ -1028,9 +1075,10 @@ impl LuaEngine {
             let _hour: i64 = coerce_to_i64(args[1].clone()).unwrap_or(0);
             let _min: i64 = coerce_to_i64(args[2].clone()).unwrap_or(0);
             // sec 支持浮点数和 nil（MushClient 兼容）
-            let sec_millis = coerce_to_f64(args[3].clone())
-                .map(|s| if s <= 0.0 { 1000.0 } else { s * 1000.0 })
-                .unwrap_or(1000.0);
+            let sec_val = coerce_to_f64(args[3].clone()).unwrap_or(0.0);
+            // 综合计算：总秒数 = hour*3600 + min*60 + sec
+            let total_secs = (_hour as f64) * 3600.0 + (_min as f64) * 60.0 + sec_val;
+            let interval_millis = if total_secs <= 0.0 { 1000.0 } else { total_secs * 1000.0 };
             // 第5个参数 response_text：MushClient 中是字符串，忽略
             let flags: i64 = coerce_to_i64(args[5].clone()).unwrap_or(0);
             // 第7个参数 script_name（可选）
@@ -1040,20 +1088,22 @@ impl LuaEngine {
                 String::new()
             };
 
-            let interval_millis = sec_millis as u64;
+            let interval_millis_u64 = interval_millis as u64;
             let one_shot = (flags & 4) != 0;
 
             // 将脚本作为 send_text 存储，在 fire_timer 时执行
             let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
 
+
             state_rc19.borrow_mut().timers.push(TimerDef {
                 name,
-                interval_millis,
+                interval_millis: interval_millis_u64,
                 callback,
                 enabled: (flags & 1) != 0,
                 group: String::new(),
                 one_shot,
                 send_text: script_name,
+                last_fired: std::time::Instant::now(),
             });
             Ok(Value::Integer(0))
         })?;
@@ -1162,6 +1212,19 @@ impl LuaEngine {
             })?;
         globals.set("EnableTimer", enable_timer_fn)?;
 
+        // ResetTimer(name) — MushClient API: 重置定时器计时
+        let state_rc_rt = state_rc.clone();
+        let reset_timer_fn = lua.create_function_mut(move |_, name: String| {
+            let mut state = state_rc_rt.borrow_mut();
+            if let Some(t) = state.timers.iter_mut().find(|t| t.name == name) {
+                t.last_fired = std::time::Instant::now();
+                Ok(Value::Integer(0))
+            } else {
+                Ok(Value::Integer(1))
+            }
+        })?;
+        globals.set("ResetTimer", reset_timer_fn)?;
+
         // ============================================================
         // 配置 API
         // ============================================================
@@ -1195,7 +1258,13 @@ impl LuaEngine {
             options.set(name, value)?;
             Ok(())
         })?;
-        globals.set("_mud_options", lua.create_table()?)?;
+        let mud_options = lua.create_table()?;
+        mud_options.set("enable_timers", 1i64)?;
+        mud_options.set("enable_triggers", 1i64)?;
+        mud_options.set("enable_aliases", 1i64)?;
+        mud_options.set("enable_scripts", 1i64)?;
+        mud_options.set("enable_command_queue", 1i64)?;
+        globals.set("_mud_options", mud_options)?;
         globals.set("SetOption", set_option_fn)?;
 
         // GetOption(name)
@@ -1488,6 +1557,7 @@ impl LuaEngine {
 
         // 覆盖 dofile — 支持 GBK 自动转码和路径分隔符兼容
         let _script_path_rc = Rc::new(RefCell::new(self.script_path.clone()));
+        let state_rc_dofile = state_rc.clone();
         let dofile_fn = lua.create_function_mut(move |lua, path: String| {
             // 将 \ 替换为 /
             let path = path.replace('\\', "/");
@@ -1495,12 +1565,19 @@ impl LuaEngine {
             let bytes = std::fs::read(&path)
                 .map_err(|e| mlua::Error::external(format!("读取文件失败 '{}': {}", path, e)))?;
 
-            let code = match std::str::from_utf8(&bytes) {
-                Ok(s) => s.to_string(),
+            let (code, is_gbk) = match std::str::from_utf8(&bytes) {
+                Ok(s) => (s.to_string(), false),
                 Err(_) => {
                     let (cow, _, _) = encoding_rs::GBK.decode(&bytes);
-                    cow.into_owned()
+                    (cow.into_owned(), true)
                 }
+            };
+
+            // 设置当前脚本编码，触发器注册时会根据此标志选择匹配模式
+            state_rc_dofile.borrow_mut().current_encoding = if is_gbk {
+                ScriptEncoding::Gbk
+            } else {
+                ScriptEncoding::Utf8
             };
 
             // 预处理：修复 LuaJIT 不兼容的无效转义序列（如 \- \+ \? 等）
@@ -1795,11 +1872,25 @@ impl LuaEngine {
         let trigger_fn =
             lua.create_function_mut(move |_, (pattern, callback): (String, Function)| {
                 let pattern = convert_pcre_to_rust_regex(&pattern);
-                let re = Regex::new(&pattern)
-                    .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", pattern, e)))?;
+                let trigger_pattern = {
+                    let encoding = state_rc33.borrow().current_encoding;
+                    match encoding {
+                        ScriptEncoding::Gbk => {
+                            let gbk_pattern_str = utf8_regex_to_gbk_bytes(&pattern);
+                            let gbk_re = BytesRegex::new(&gbk_pattern_str)
+                                .map_err(|e| mlua::Error::external(format!("无效GBK正则 '{}': {}", gbk_pattern_str, e)))?;
+                            TriggerPattern::Gbk(gbk_re)
+                        }
+                        ScriptEncoding::Utf8 => {
+                            let re = Regex::new(&pattern)
+                                .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", pattern, e)))?;
+                            TriggerPattern::Utf8(re)
+                        }
+                    }
+                };
                 state_rc33.borrow_mut().triggers.push(Trigger {
                     name: String::new(),
-                    pattern: re,
+                    pattern: trigger_pattern,
                     callback,
                     enabled: true,
                     group: String::new(),
@@ -1844,6 +1935,7 @@ impl LuaEngine {
                     group: String::new(),
                     one_shot: false,
                     send_text: String::new(),
+                    last_fired: std::time::Instant::now(),
                 });
                 Ok(())
             })?;
@@ -1881,12 +1973,19 @@ impl LuaEngine {
 
         let bytes = std::fs::read(path).map_err(|e| format!("读取脚本失败 '{}': {}", path, e))?;
 
-        let code = match std::str::from_utf8(&bytes) {
-            Ok(s) => s.to_string(),
+        let (code, is_gbk) = match std::str::from_utf8(&bytes) {
+            Ok(s) => (s.to_string(), false),
             Err(_) => {
                 let (cow, _, _) = encoding_rs::GBK.decode(&bytes);
-                cow.into_owned()
+                (cow.into_owned(), true)
             }
+        };
+
+        // 设置当前脚本编码，触发器注册时会根据此标志选择匹配模式
+        self.state.borrow_mut().current_encoding = if is_gbk {
+            ScriptEncoding::Gbk
+        } else {
+            ScriptEncoding::Utf8
         };
 
         self.lua
@@ -1908,8 +2007,9 @@ impl LuaEngine {
         // 清空待发送队列
         self.state.borrow_mut().pending_commands.clear();
 
-        // 剥离 ANSI 码用于匹配
+        // 剥离 ANSI 码用于匹配，并去除行末 \r
         let clean_line = crate::ui::AnsiParser::strip_ansi(line);
+        let clean_line = clean_line.trim_end_matches('\r').to_string();
 
         // 维护最近行缓冲区
         {
@@ -1917,6 +2017,32 @@ impl LuaEngine {
             state.recent_lines.push(clean_line.clone());
             if state.recent_lines.len() > 20 {
                 state.recent_lines.remove(0);
+            }
+        }
+
+        // 将 clean_line 转为 GBK 字节用于 GBK 模式匹配
+        let gbk_line = encoding_rs::GBK.encode(&clean_line).0.into_owned();
+
+        // 诊断：记录匹配成功的 GPS 触发器
+        {
+            let state = self.state.borrow();
+            let mut msgs = Vec::new();
+            for trigger in state.triggers.iter() {
+                if trigger.name.starts_with("gps_start_dosth") && trigger.enabled {
+                    let matched = match &trigger.pattern {
+                        TriggerPattern::Gbk(re) => re.is_match(&gbk_line),
+                        TriggerPattern::Utf8(re) => re.is_match(&clean_line),
+                    };
+                    if matched {
+                        let preview: String = clean_line.chars().take(40).collect();
+                        msgs.push(format!("[TRIG-MATCH] trig='{}' matched=true line={:?}",
+                            trigger.name, preview));
+                    }
+                }
+            }
+            drop(state);
+            for msg in msgs {
+                self.state.borrow_mut().pending_logs.push(msg);
             }
         }
 
@@ -1929,41 +2055,83 @@ impl LuaEngine {
                     continue;
                 }
 
-                if trigger.multiline && trigger.lines_to_match > 1 {
-                    let n = trigger.lines_to_match;
-                    if state.recent_lines.len() >= n {
-                        let combined: String = state
-                            .recent_lines
-                            .iter()
-                            .rev()
-                            .take(n)
-                            .rev()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        // 多行模式下让 . 匹配换行符
-                        let multiline_pattern = format!("(?s){}", trigger.pattern.as_str());
-                        let multiline_re = Regex::new(&multiline_pattern)
-                            .unwrap_or_else(|_| trigger.pattern.clone());
-                        if let Some(caps) = multiline_re.captures(&combined) {
-                            let caps_list: Vec<String> = caps
-                                .iter()
-                                .skip(1)
-                                .flatten()
-                                .map(|m| m.as_str().to_string())
-                                .collect();
-                            result.push((i, caps_list));
+                match &trigger.pattern {
+                    TriggerPattern::Gbk(gbk_re) => {
+                        if trigger.multiline && trigger.lines_to_match > 1 {
+                            let n = trigger.lines_to_match;
+                            if state.recent_lines.len() >= n {
+                                let combined: String = state
+                                    .recent_lines
+                                    .iter()
+                                    .rev()
+                                    .take(n)
+                                    .rev()
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                let gbk_combined = encoding_rs::GBK.encode(&combined).0.into_owned();
+                                if let Some(caps) = gbk_re.captures(&gbk_combined) {
+                                    let caps_list: Vec<String> = caps
+                                        .iter()
+                                        .skip(1)
+                                        .flatten()
+                                        .map(|m| {
+                                            let (cow, _, _) = encoding_rs::GBK.decode(m.as_bytes());
+                                            cow.into_owned()
+                                        })
+                                        .collect();
+                                    result.push((i, caps_list));
+                                }
+                            }
+                        } else {
+                            if let Some(caps) = gbk_re.captures(&gbk_line) {
+                                let caps_list: Vec<String> = caps
+                                    .iter()
+                                    .skip(1)
+                                    .flatten()
+                                    .map(|m| {
+                                        let (cow, _, _) = encoding_rs::GBK.decode(m.as_bytes());
+                                        cow.into_owned()
+                                    })
+                                    .collect();
+                                result.push((i, caps_list));
+                            }
                         }
                     }
-                } else {
-                    if let Some(caps) = trigger.pattern.captures(&clean_line) {
-                        let caps_list: Vec<String> = caps
-                            .iter()
-                            .skip(1)
-                            .flatten()
-                            .map(|m| m.as_str().to_string())
-                            .collect();
-                        result.push((i, caps_list));
+                    TriggerPattern::Utf8(utf8_re) => {
+                        if trigger.multiline && trigger.lines_to_match > 1 {
+                            let n = trigger.lines_to_match;
+                            if state.recent_lines.len() >= n {
+                                let combined: String = state
+                                    .recent_lines
+                                    .iter()
+                                    .rev()
+                                    .take(n)
+                                    .rev()
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                if let Some(caps) = utf8_re.captures(&combined) {
+                                    let caps_list: Vec<String> = caps
+                                        .iter()
+                                        .skip(1)
+                                        .flatten()
+                                        .map(|m| m.as_str().to_string())
+                                        .collect();
+                                    result.push((i, caps_list));
+                                }
+                            }
+                        } else {
+                            if let Some(caps) = utf8_re.captures(&clean_line) {
+                                let caps_list: Vec<String> = caps
+                                    .iter()
+                                    .skip(1)
+                                    .flatten()
+                                    .map(|m| m.as_str().to_string())
+                                    .collect();
+                                result.push((i, caps_list));
+                            }
+                        }
                     }
                 }
             }
@@ -1972,18 +2140,31 @@ impl LuaEngine {
 
         // 逐个触发
         for (idx, caps_list) in matches {
-            let (callback, send_text) = {
+            let (callback, send_text, trigger_name) = {
                 let state = self.state.borrow();
                 (
                     state.triggers[idx].callback.clone(),
                     state.triggers[idx].send_text.clone(),
+                    state.triggers[idx].name.clone(),
                 )
             };
-            if let Ok(args_table) = self.lua.create_table() {
+            // MUSHclient 触发器回调签名: function(name, line, wildcards)
+            // wildcards 是一个从1开始索引的表
+            if let Ok(wildcards_table) = self.lua.create_table() {
                 for (i, m) in caps_list.iter().enumerate() {
-                    let _ = args_table.set(i + 1, m.as_str());
+                    let _ = wildcards_table.set(i + 1, m.as_str());
                 }
-                let _ = callback.call::<()>(args_table);
+                let _ = callback.call::<()>((trigger_name.as_str(), clean_line.as_str(), wildcards_table));
+            }
+            // 诊断：GPS 相关触发器触发后记录 xkxGPS 状态
+            if trigger_name.starts_with("gps_start") {
+                if let Ok(xkxgps) = self.lua.globals().get::<mlua::Table>("xkxGPS") {
+                    let rn: String = xkxgps.get("roomname").unwrap_or_default();
+                    let desc: String = xkxgps.get("desc").unwrap_or_default();
+                    let ent: String = xkxgps.get("entrance").unwrap_or_default();
+                    let msg = format!("[GPS] trigger='{}' roomname='{}' desc='{}' entrance='{}'", trigger_name, rn, desc, ent);
+                    self.state.borrow_mut().pending_logs.push(msg);
+                }
             }
             if !send_text.is_empty() {
                 self.state.borrow_mut().pending_commands.push(send_text);
@@ -2040,13 +2221,14 @@ impl LuaEngine {
     pub fn fire_timer(&self, index: usize) {
         self.state.borrow_mut().pending_commands.clear();
 
-        let (callback, send_text, one_shot) = {
+        let (callback, send_text, one_shot, timer_name) = {
             let state = self.state.borrow();
             if index < state.timers.len() && state.timers[index].enabled {
                 (
                     state.timers[index].callback.clone(),
                     state.timers[index].send_text.clone(),
                     state.timers[index].one_shot,
+                    state.timers[index].name.clone(),
                 )
             } else {
                 return;
@@ -2056,8 +2238,10 @@ impl LuaEngine {
         let _ = callback.call::<()>(());
 
         if !send_text.is_empty() {
-            // send_text 可能是 Lua 代码（MUSHclient 的 script 参数）
-            let _ = self.lua.load(&send_text).exec();
+            // send_text 是 MUSHclient 的 script 参数，是函数名（如 "wait.timer_resume"）
+            // 需要解析函数名并调用，传入定时器名称作为参数
+            let code = format!("{}('{}')", send_text, timer_name.replace('\'', "\\'"));
+            let _ = self.lua.load(&code).exec();
         }
 
         if one_shot {
@@ -2089,7 +2273,6 @@ impl LuaEngine {
         let _ = globals.set(name, value);
     }
 
-    #[allow(dead_code)]
     /// 设置连接状态
     pub fn set_connected(&mut self, connected: bool) {
         self.state.borrow_mut().connected = connected;
@@ -2188,6 +2371,58 @@ fn convert_pcre_to_rust_regex(pattern: &str) -> String {
     result
 }
 
+/// 将 UTF-8 正则表达式字符串转为 GBK 字节正则表达式
+/// 核心思路：
+/// 1. 将 UTF-8 编码的中文字符转为 GBK 字节序列（用 \xHH 表示），
+///    这样 regex::bytes 引擎在字节模式下匹配，.{4} 匹配4字节=2个GBK中文字符
+/// 2. 添加 (?-u) 标志禁用 Unicode 模式，使 \S \s \w \d 等按 ASCII 定义匹配，
+///    否则 \S 只匹配有效 UTF-8 序列，无法匹配 GBK 高位字节
+fn utf8_regex_to_gbk_bytes(pattern: &str) -> String {
+    let mut result = String::with_capacity(pattern.len() * 2);
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+
+    // 如果模式以 (?i) 开头，保留它并在后面加 (?-u)
+    if bytes.starts_with(b"(?i)") {
+        result.push_str("(?i)(?-u)");
+        i = 4;
+    } else {
+        result.push_str("(?-u)");
+    }
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && i + 1 < bytes.len() {
+            // 转义序列，原样保留
+            result.push('\\');
+            i += 1;
+            result.push(bytes[i] as char);
+            i += 1;
+        } else if b >= 0x80 {
+            // 非ASCII字节，可能是UTF-8多字节字符的起始字节
+            // 收集完整的UTF-8字符
+            let char_len = if b >= 0xF0 { 4 } else if b >= 0xE0 { 3 } else { 2 };
+            if i + char_len <= bytes.len() {
+                let utf8_str = std::str::from_utf8(&bytes[i..i + char_len]).unwrap_or("?");
+                // 转为 GBK 字节序列
+                let (gbk_bytes, _, _) = encoding_rs::GBK.encode(utf8_str);
+                for &gb in gbk_bytes.iter() {
+                    result.push_str(&format!("\\x{:02X}", gb));
+                }
+                i += char_len;
+            } else {
+                result.push(b as char);
+                i += 1;
+            }
+        } else {
+            result.push(b as char);
+            i += 1;
+        }
+    }
+
+    result
+}
+
 /// 添加触发器的通用实现
 #[allow(clippy::too_many_arguments)]
 fn add_trigger_impl(
@@ -2219,8 +2454,25 @@ fn add_trigger_impl(
         re_str
     };
 
-    let re = Regex::new(&re_str)
-        .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", re_str, e)))?;
+    // 根据当前脚本编码选择匹配模式
+    let trigger_pattern = {
+        let encoding = state_rc.borrow().current_encoding;
+        match encoding {
+            ScriptEncoding::Gbk => {
+                // GBK 模式：将正则转为 GBK 字节正则，.{4} 匹配4字节
+                let gbk_pattern_str = utf8_regex_to_gbk_bytes(&re_str);
+                let gbk_re = BytesRegex::new(&gbk_pattern_str)
+                    .map_err(|e| mlua::Error::external(format!("无效GBK正则 '{}': {}", gbk_pattern_str, e)))?;
+                TriggerPattern::Gbk(gbk_re)
+            }
+            ScriptEncoding::Utf8 => {
+                // UTF-8 模式：按 Unicode 字符匹配，.{4} 匹配4个字符
+                let re = Regex::new(&re_str)
+                    .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", re_str, e)))?;
+                TriggerPattern::Utf8(re)
+            }
+        }
+    };
 
     let callback: Function = if script.is_empty() {
         lua.create_function(|_, _: ()| Ok(()))?
@@ -2238,7 +2490,7 @@ fn add_trigger_impl(
 
     state_rc.borrow_mut().triggers.push(Trigger {
         name: name.to_string(),
-        pattern: re,
+        pattern: trigger_pattern,
         callback,
         enabled: (flags & 1) != 0,
         group: String::new(),
@@ -5436,6 +5688,65 @@ mod tests {
             // Trigger sends "go" as command, but alias is for process_input not process_output
             assert!(cmds.contains(&"go".to_string()));
         });
+    }
+
+    #[test]
+    fn test_gbk_dosth5_matching() {
+        // 测试 dosth5 正则匹配
+        let pattern = r"^(> > > |> > |> |)你目前还没有任何为 (\S+) 的变量设定。";
+        let gbk_pattern = utf8_regex_to_gbk_bytes(pattern);
+        eprintln!("GBK pattern: {}", gbk_pattern);
+
+        let re = BytesRegex::new(&gbk_pattern).unwrap();
+
+        // 测试1: gps=start
+        let line1 = "> 你目前还没有任何为 gps=start 的变量设定。";
+        let (gbk_line1, _, _) = encoding_rs::GBK.encode(line1);
+        let matched1 = re.is_match(&gbk_line1);
+        eprintln!("Line1 matched: {}", matched1);
+        assert!(matched1, "dosth5 should match 'gps=start' line");
+
+        // 测试2: checkyell=yes
+        let line2 = "> 你目前还没有任何为 checkyell=yes 的变量设定。";
+        let (gbk_line2, _, _) = encoding_rs::GBK.encode(line2);
+        let matched2 = re.is_match(&gbk_line2);
+        eprintln!("Line2 matched: {}", matched2);
+        assert!(matched2, "dosth5 should match 'checkyell=yes' line");
+
+        // 测试3: 捕获组
+        if let Some(caps) = re.captures(&gbk_line2) {
+            for (i, cap) in caps.iter().enumerate() {
+                if let Some(m) = cap {
+                    let (cow, _, _) = encoding_rs::GBK.decode(m.as_bytes());
+                    eprintln!("  cap[{}]: {}", i, cow);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_gbk_dosth2_matching() {
+        // 测试 dosth2 正则匹配: "这里明显的出口是"
+        let pattern = r"^\s*这里.{4}的出口是 (.*)。$";
+        let gbk_pattern = utf8_regex_to_gbk_bytes(pattern);
+        eprintln!("GBK pattern (dosth2): {}", gbk_pattern);
+
+        let re = BytesRegex::new(&gbk_pattern).unwrap();
+
+        let line = "    这里明显的出口是 north 和 south。";
+        let (gbk_line, _, _) = encoding_rs::GBK.encode(line);
+        let matched = re.is_match(&gbk_line);
+        eprintln!("dosth2 matched: {}", matched);
+        assert!(matched, "dosth2 should match exit line");
+
+        if let Some(caps) = re.captures(&gbk_line) {
+            for (i, cap) in caps.iter().enumerate() {
+                if let Some(m) = cap {
+                    let (cow, _, _) = encoding_rs::GBK.decode(m.as_bytes());
+                    eprintln!("  cap[{}]: {}", i, cow);
+                }
+            }
+        }
     }
 
     #[test]

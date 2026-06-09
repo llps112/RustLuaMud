@@ -1,10 +1,13 @@
 /target
 logs/
 *.log
+/*.txt
 profiles/wudaodm.toml
 .git-crypt-key
 .trae/
 scripts/class/
+scripts/class.zip
+scripts/class-utf8/
 scripts/michen_xkx.lua
 scripts/xkxMAP.db
 /xkxMAP.db
