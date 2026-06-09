@@ -69,7 +69,13 @@ impl Logger {
             .open(self.log_path(session_name))
         {
             let timestamp = Local::now().format("%H:%M:%S%.3f");
-            let _ = writeln!(file, "[{}] [{}] {}", timestamp, category.tag(), line.trim_end());
+            let _ = writeln!(
+                file,
+                "[{}] [{}] {}",
+                timestamp,
+                category.tag(),
+                line.trim_end()
+            );
         }
     }
 

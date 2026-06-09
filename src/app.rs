@@ -475,7 +475,10 @@ impl App {
         for msg in logs {
             // 日志写入文件（剥离 ANSI 码），根据前缀分类
             let clean = crate::ui::AnsiParser::strip_ansi(&msg);
-            if clean.starts_with("[GPS-MATCH]") || clean.starts_with("[GPS]") || clean.starts_with("[DEBUG") {
+            if clean.starts_with("[GPS-MATCH]")
+                || clean.starts_with("[GPS]")
+                || clean.starts_with("[DEBUG")
+            {
                 self.logger.log_debug(&name, &clean);
             } else {
                 self.logger.log(&name, &clean);

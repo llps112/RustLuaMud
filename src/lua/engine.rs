@@ -1078,7 +1078,11 @@ impl LuaEngine {
             let sec_val = coerce_to_f64(args[3].clone()).unwrap_or(0.0);
             // 综合计算：总秒数 = hour*3600 + min*60 + sec
             let total_secs = (_hour as f64) * 3600.0 + (_min as f64) * 60.0 + sec_val;
-            let interval_millis = if total_secs <= 0.0 { 1000.0 } else { total_secs * 1000.0 };
+            let interval_millis = if total_secs <= 0.0 {
+                1000.0
+            } else {
+                total_secs * 1000.0
+            };
             // 第5个参数 response_text：MushClient 中是字符串，忽略
             let flags: i64 = coerce_to_i64(args[5].clone()).unwrap_or(0);
             // 第7个参数 script_name（可选）
@@ -1093,7 +1097,6 @@ impl LuaEngine {
 
             // 将脚本作为 send_text 存储，在 fire_timer 时执行
             let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
-
 
             state_rc19.borrow_mut().timers.push(TimerDef {
                 name,
@@ -1877,13 +1880,18 @@ impl LuaEngine {
                     match encoding {
                         ScriptEncoding::Gbk => {
                             let gbk_pattern_str = utf8_regex_to_gbk_bytes(&pattern);
-                            let gbk_re = BytesRegex::new(&gbk_pattern_str)
-                                .map_err(|e| mlua::Error::external(format!("无效GBK正则 '{}': {}", gbk_pattern_str, e)))?;
+                            let gbk_re = BytesRegex::new(&gbk_pattern_str).map_err(|e| {
+                                mlua::Error::external(format!(
+                                    "无效GBK正则 '{}': {}",
+                                    gbk_pattern_str, e
+                                ))
+                            })?;
                             TriggerPattern::Gbk(gbk_re)
                         }
                         ScriptEncoding::Utf8 => {
-                            let re = Regex::new(&pattern)
-                                .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", pattern, e)))?;
+                            let re = Regex::new(&pattern).map_err(|e| {
+                                mlua::Error::external(format!("无效正则 '{}': {}", pattern, e))
+                            })?;
                             TriggerPattern::Utf8(re)
                         }
                     }
@@ -2035,8 +2043,10 @@ impl LuaEngine {
                     };
                     if matched {
                         let preview: String = clean_line.chars().take(40).collect();
-                        msgs.push(format!("[TRIG-MATCH] trig='{}' matched=true line={:?}",
-                            trigger.name, preview));
+                        msgs.push(format!(
+                            "[TRIG-MATCH] trig='{}' matched=true line={:?}",
+                            trigger.name, preview
+                        ));
                     }
                 }
             }
@@ -2069,7 +2079,8 @@ impl LuaEngine {
                                     .cloned()
                                     .collect::<Vec<_>>()
                                     .join("\n");
-                                let gbk_combined = encoding_rs::GBK.encode(&combined).0.into_owned();
+                                let gbk_combined =
+                                    encoding_rs::GBK.encode(&combined).0.into_owned();
                                 if let Some(caps) = gbk_re.captures(&gbk_combined) {
                                     let caps_list: Vec<String> = caps
                                         .iter()
@@ -2154,7 +2165,11 @@ impl LuaEngine {
                 for (i, m) in caps_list.iter().enumerate() {
                     let _ = wildcards_table.set(i + 1, m.as_str());
                 }
-                let _ = callback.call::<()>((trigger_name.as_str(), clean_line.as_str(), wildcards_table));
+                let _ = callback.call::<()>((
+                    trigger_name.as_str(),
+                    clean_line.as_str(),
+                    wildcards_table,
+                ));
             }
             // 诊断：GPS 相关触发器触发后记录 xkxGPS 状态
             if trigger_name.starts_with("gps_start") {
@@ -2162,7 +2177,10 @@ impl LuaEngine {
                     let rn: String = xkxgps.get("roomname").unwrap_or_default();
                     let desc: String = xkxgps.get("desc").unwrap_or_default();
                     let ent: String = xkxgps.get("entrance").unwrap_or_default();
-                    let msg = format!("[GPS] trigger='{}' roomname='{}' desc='{}' entrance='{}'", trigger_name, rn, desc, ent);
+                    let msg = format!(
+                        "[GPS] trigger='{}' roomname='{}' desc='{}' entrance='{}'",
+                        trigger_name, rn, desc, ent
+                    );
                     self.state.borrow_mut().pending_logs.push(msg);
                 }
             }
@@ -2401,7 +2419,13 @@ fn utf8_regex_to_gbk_bytes(pattern: &str) -> String {
         } else if b >= 0x80 {
             // 非ASCII字节，可能是UTF-8多字节字符的起始字节
             // 收集完整的UTF-8字符
-            let char_len = if b >= 0xF0 { 4 } else if b >= 0xE0 { 3 } else { 2 };
+            let char_len = if b >= 0xF0 {
+                4
+            } else if b >= 0xE0 {
+                3
+            } else {
+                2
+            };
             if i + char_len <= bytes.len() {
                 let utf8_str = std::str::from_utf8(&bytes[i..i + char_len]).unwrap_or("?");
                 // 转为 GBK 字节序列
@@ -2461,8 +2485,9 @@ fn add_trigger_impl(
             ScriptEncoding::Gbk => {
                 // GBK 模式：将正则转为 GBK 字节正则，.{4} 匹配4字节
                 let gbk_pattern_str = utf8_regex_to_gbk_bytes(&re_str);
-                let gbk_re = BytesRegex::new(&gbk_pattern_str)
-                    .map_err(|e| mlua::Error::external(format!("无效GBK正则 '{}': {}", gbk_pattern_str, e)))?;
+                let gbk_re = BytesRegex::new(&gbk_pattern_str).map_err(|e| {
+                    mlua::Error::external(format!("无效GBK正则 '{}': {}", gbk_pattern_str, e))
+                })?;
                 TriggerPattern::Gbk(gbk_re)
             }
             ScriptEncoding::Utf8 => {
