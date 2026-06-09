@@ -410,7 +410,11 @@ fn apply_sgr(params_str: &str, state: &mut AnsiState) {
                                 // 高位标记为扩展 RGB 模式，低位存储亮度近似
                                 let gray = (r as u16 + g as u16 + b as u16) / 3;
                                 let idx = if gray < 128 { 0 } else { 1 };
-                                state.foreground = Some(if idx == 0 { 16 + (gray / 8) as u8 } else { 232 + (gray / 11) as u8 });
+                                state.foreground = Some(if idx == 0 {
+                                    16 + (gray / 8) as u8
+                                } else {
+                                    232 + (gray / 11) as u8
+                                });
                             }
                         }
                         _ => {}

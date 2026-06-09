@@ -1153,9 +1153,9 @@ impl LuaEngine {
             // MUSHclient AddAlias 默认行为：
             // 当 response 非空且没有提供 script 参数时，send_to 默认为 12（执行 Lua 代码）
             let send_to = if !response.is_empty() && args.len() <= 4 {
-                12  // send to script — Lua 代码执行
+                12 // send to script — Lua 代码执行
             } else {
-                0   // send to world
+                0 // send to world
             };
 
             state_rc15.borrow_mut().aliases.push(Alias {
@@ -6122,8 +6122,7 @@ mod tests {
     #[test]
     fn test_lua_value_to_json_array() {
         with_engine(|engine| {
-            let lua_val: mlua::Value =
-                eval(engine, "return {10, 20, 30}").unwrap();
+            let lua_val: mlua::Value = eval(engine, "return {10, 20, 30}").unwrap();
             let json_val = lua_value_to_json(&lua_val);
             assert_eq!(json_val, serde_json::json!([10, 20, 30]));
         });
@@ -6132,8 +6131,7 @@ mod tests {
     #[test]
     fn test_lua_value_to_json_object() {
         with_engine(|engine| {
-            let lua_val: mlua::Value =
-                eval(engine, "return {name='test', value=42}").unwrap();
+            let lua_val: mlua::Value = eval(engine, "return {name='test', value=42}").unwrap();
             let json_val = lua_value_to_json(&lua_val);
             assert_eq!(json_val["name"], serde_json::json!("test"));
             assert_eq!(json_val["value"], serde_json::json!(42));
@@ -6143,8 +6141,7 @@ mod tests {
     #[test]
     fn test_lua_value_to_json_nested() {
         with_engine(|engine| {
-            let lua_val: mlua::Value =
-                eval(engine, "return {a={b={c=1}}}").unwrap();
+            let lua_val: mlua::Value = eval(engine, "return {a={b={c=1}}}").unwrap();
             let json_val = lua_value_to_json(&lua_val);
             assert_eq!(json_val["a"]["b"]["c"], serde_json::json!(1));
         });
@@ -6153,8 +6150,7 @@ mod tests {
     #[test]
     fn test_lua_value_to_json_empty_table() {
         with_engine(|engine| {
-            let lua_val: mlua::Value =
-                eval(engine, "return {}").unwrap();
+            let lua_val: mlua::Value = eval(engine, "return {}").unwrap();
             let json_val = lua_value_to_json(&lua_val);
             // 空表既可以视为空数组也可以视为空对象，这里取决于实现
             // 我们的实现中空表没有连续整数键 → 判定为对象
@@ -6166,8 +6162,7 @@ mod tests {
     fn test_lua_value_to_json_mixed_array() {
         with_engine(|engine| {
             // 1, 2, name="x" — 非连续整数键 → 判定为对象
-            let lua_val: mlua::Value =
-                eval(engine, "return {1, 2, name='x'}").unwrap();
+            let lua_val: mlua::Value = eval(engine, "return {1, 2, name='x'}").unwrap();
             let json_val = lua_value_to_json(&lua_val);
             assert!(json_val.is_object());
             assert_eq!(json_val["name"], serde_json::json!("x"));
@@ -6217,7 +6212,8 @@ mod tests {
     #[test]
     fn test_json_to_lua_value_string() {
         let lua = Lua::new();
-        let lua_val = json_to_lua_value(&lua, &serde_json::Value::String("hi".to_string())).unwrap();
+        let lua_val =
+            json_to_lua_value(&lua, &serde_json::Value::String("hi".to_string())).unwrap();
         assert!(matches!(&lua_val, mlua::Value::String(s) if s.to_str().unwrap() == "hi"));
     }
 
@@ -6333,7 +6329,8 @@ mod tests {
     #[test]
     fn test_json_decode_null() {
         with_engine(|engine| {
-            let result: String = eval(engine, "local v = json_decode('null'); return type(v)").unwrap();
+            let result: String =
+                eval(engine, "local v = json_decode('null'); return type(v)").unwrap();
             assert_eq!(result, "nil");
         });
     }
@@ -6367,9 +6364,11 @@ mod tests {
     #[test]
     fn test_json_decode_array() {
         with_engine(|engine| {
-            let result: String = eval(engine,
-                "local t = json_decode('[1,2,3]'); return t[1] + t[2] + t[3]"
-            ).unwrap();
+            let result: String = eval(
+                engine,
+                "local t = json_decode('[1,2,3]'); return t[1] + t[2] + t[3]",
+            )
+            .unwrap();
             assert_eq!(result, "6");
         });
     }
@@ -6377,7 +6376,11 @@ mod tests {
     #[test]
     fn test_json_decode_object() {
         with_engine(|engine| {
-            let result: i64 = eval(engine, "local t = json_decode('{\"a\":1,\"b\":2}'); return t.a + t.b").unwrap();
+            let result: i64 = eval(
+                engine,
+                "local t = json_decode('{\"a\":1,\"b\":2}'); return t.a + t.b",
+            )
+            .unwrap();
             assert_eq!(result, 3);
         });
     }
@@ -6385,12 +6388,14 @@ mod tests {
     #[test]
     fn test_json_roundtrip() {
         with_engine(|engine| {
-            let result: String = eval(engine,
+            let result: String = eval(
+                engine,
                 "local original = {a=1, b='hello', c={nested=true}}; \
                  local json = json_encode(original); \
                  local decoded = json_decode(json); \
-                 return json_encode(decoded)"
-            ).unwrap();
+                 return json_encode(decoded)",
+            )
+            .unwrap();
             assert!(result.contains("\"a\":1"));
             assert!(result.contains("\"b\":\"hello\""));
             assert!(result.contains("\"nested\":true"));
@@ -6400,9 +6405,11 @@ mod tests {
     #[test]
     fn test_json_decode_invalid() {
         with_engine(|engine| {
-            let result: bool = eval(engine,
-                "local ok, err = pcall(json_decode, '{invalid}'); return not ok"
-            ).unwrap();
+            let result: bool = eval(
+                engine,
+                "local ok, err = pcall(json_decode, '{invalid}'); return not ok",
+            )
+            .unwrap();
             assert!(result);
         });
     }
@@ -6430,7 +6437,9 @@ mod tests {
     #[test]
     fn test_eval_to_string_table_json() {
         with_engine(|engine| {
-            let result = engine.eval_to_string("return json_encode({1,2,3})").unwrap();
+            let result = engine
+                .eval_to_string("return json_encode({1,2,3})")
+                .unwrap();
             assert_eq!(result, "[1,2,3]");
         });
     }
@@ -6459,7 +6468,9 @@ mod tests {
     #[test]
     fn test_cfg_data_empty_schema() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 cfg = cfg or {}
                 cfg.schema = {}
                 function cfg.data()
@@ -6469,7 +6480,9 @@ mod tests {
                     end
                     return result
                 end
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let result: String = eval(engine, "return json_encode(cfg.data())").unwrap();
             // 空 Lua 表（无连续整数键）→ JSON 对象 {}
             assert_eq!(result, "{}");
@@ -6479,7 +6492,9 @@ mod tests {
     #[test]
     fn test_cfg_data_boolean_fields() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 cfg = cfg or {}
                 test_switch = 1
                 cfg.schema = {
@@ -6496,7 +6511,9 @@ mod tests {
                     end
                     return result
                 end
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let result: String = eval(engine, "return json_encode(cfg.data())").unwrap();
             assert!(result.contains("\"test_switch\""));
             assert!(result.contains("true"));
@@ -6587,9 +6604,11 @@ mod tests {
             "#).unwrap();
 
             // 测试有效更新
-            let result: String = eval(engine,
-                "local r = cfg.update({test_val=50}); return json_encode(r)"
-            ).unwrap();
+            let result: String = eval(
+                engine,
+                "local r = cfg.update({test_val=50}); return json_encode(r)",
+            )
+            .unwrap();
             assert!(result.contains("\"ok\":true"));
 
             // 验证值已更新
@@ -6623,9 +6642,11 @@ mod tests {
                 end
             "#).unwrap();
 
-            let result: String = eval(engine,
-                "local r = cfg.update({nonexistent=1}); return json_encode(r)"
-            ).unwrap();
+            let result: String = eval(
+                engine,
+                "local r = cfg.update({nonexistent=1}); return json_encode(r)",
+            )
+            .unwrap();
             assert!(result.contains("\"ok\":false"));
             assert!(result.contains("未知配置项"));
         });
@@ -6668,9 +6689,11 @@ mod tests {
             "#).unwrap();
 
             // 超出范围
-            let result: String = eval(engine,
-                "local r = cfg.update({test_n=999}); return json_encode(r)"
-            ).unwrap();
+            let result: String = eval(
+                engine,
+                "local r = cfg.update({test_n=999}); return json_encode(r)",
+            )
+            .unwrap();
             assert!(result.contains("\"ok\":false"));
             assert!(result.contains("最大值"));
         });
@@ -6688,9 +6711,11 @@ mod tests {
             "#).unwrap();
 
             // 直接传入非 table 应该报错
-            let result: String = eval(engine,
-                "local r = cfg.update('invalid'); return json_encode(r)"
-            ).unwrap();
+            let result: String = eval(
+                engine,
+                "local r = cfg.update('invalid'); return json_encode(r)",
+            )
+            .unwrap();
             assert!(result.contains("\"ok\":false"));
         });
     }
@@ -6700,7 +6725,9 @@ mod tests {
         with_engine(|engine| {
             // 设置脚本路径（cfg.save() 依赖 GetInfo(35) 获取目录）
             engine.set_script_path("/tmp/test_script.lua");
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 cfg = cfg or {}
                 test_v = 42
                 cfg.schema = {
@@ -6708,10 +6735,14 @@ mod tests {
                       getter=function() return test_v end,
                       setter=function(v) test_v=v end },
                 }
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
 
             // 模拟 cfg.save() 的核心逻辑：遍历 schema 写文件
-            let result: bool = eval(engine, r#"
+            let result: bool = eval(
+                engine,
+                r#"
                 local dir = "/tmp/"
                 local config_path = dir .. "test_cfg_save.lua"
                 local lines = {"-- test", ""}
@@ -6730,12 +6761,13 @@ mod tests {
                 f:write(content)
                 f:close()
                 return true
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert!(result);
 
             // 验证文件内容
-            let content = std::fs::read_to_string("/tmp/test_cfg_save.lua")
-                .expect("文件应被创建");
+            let content = std::fs::read_to_string("/tmp/test_cfg_save.lua").expect("文件应被创建");
             assert!(content.contains("test_v=42"));
             assert!(content.contains("-- test"));
 
@@ -6748,10 +6780,14 @@ mod tests {
     fn test_cfg_save_io_error() {
         with_engine(|engine| {
             // 测试无法写入文件的情况
-            let result: bool = eval(engine, r#"
+            let result: bool = eval(
+                engine,
+                r#"
                 local f, err = io.open("/nonexistent_dir/file.lua", "w")
                 return (f == nil)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert!(result);
         });
     }
@@ -6763,7 +6799,9 @@ mod tests {
     #[test]
     fn test_cfg_validate_boolean_valid() {
         with_engine(|engine| {
-            let result: bool = eval(engine, r#"
+            let result: bool = eval(
+                engine,
+                r#"
                 cfg = cfg or {}
                 function cfg._validate(field, value)
                     if field.type == "boolean" and type(value) ~= "boolean" then
@@ -6775,7 +6813,9 @@ mod tests {
                 ok, err = cfg._validate({type="boolean"}, true);  if not ok then return false end
                 ok, err = cfg._validate({type="boolean"}, false); if not ok then return false end
                 return true
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert!(result);
         });
     }
@@ -6783,7 +6823,9 @@ mod tests {
     #[test]
     fn test_cfg_validate_boolean_invalid() {
         with_engine(|engine| {
-            let result: bool = eval(engine, r#"
+            let result: bool = eval(
+                engine,
+                r#"
                 cfg = cfg or {}
                 function cfg._validate(field, value)
                     if field.type == "boolean" and type(value) ~= "boolean" then
@@ -6793,7 +6835,9 @@ mod tests {
                 end
                 local ok, err = cfg._validate({type="boolean"}, "not_bool")
                 return not ok
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert!(result);
         });
     }
@@ -6825,7 +6869,9 @@ mod tests {
     #[test]
     fn test_cfg_validate_number_below_min() {
         with_engine(|engine| {
-            let result: bool = eval(engine, r#"
+            let result: bool = eval(
+                engine,
+                r#"
                 cfg = cfg or {}
                 function cfg._validate(field, value)
                     if field.type == "number" then
@@ -6837,7 +6883,9 @@ mod tests {
                 end
                 local ok, err = cfg._validate({type="number", min=10}, 5)
                 return (not ok) and (err == "最小值")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert!(result);
         });
     }
@@ -6845,7 +6893,9 @@ mod tests {
     #[test]
     fn test_cfg_validate_number_above_max() {
         with_engine(|engine| {
-            let result: bool = eval(engine, r#"
+            let result: bool = eval(
+                engine,
+                r#"
                 cfg = cfg or {}
                 function cfg._validate(field, value)
                     if field.type == "number" then
@@ -6857,7 +6907,9 @@ mod tests {
                 end
                 local ok, err = cfg._validate({type="number", max=10}, 20)
                 return (not ok) and (err == "最大值")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert!(result);
         });
     }
@@ -6865,7 +6917,9 @@ mod tests {
     #[test]
     fn test_cfg_validate_number_not_a_number() {
         with_engine(|engine| {
-            let result: bool = eval(engine, r#"
+            let result: bool = eval(
+                engine,
+                r#"
                 cfg = cfg or {}
                 function cfg._validate(field, value)
                     if field.type == "number" then
@@ -6876,7 +6930,9 @@ mod tests {
                 end
                 local ok, err = cfg._validate({type="number"}, "not_a_number")
                 return (not ok) and (err == "需要数字")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert!(result);
         });
     }
@@ -6884,7 +6940,9 @@ mod tests {
     #[test]
     fn test_cfg_validate_string_valid() {
         with_engine(|engine| {
-            let result: bool = eval(engine, r#"
+            let result: bool = eval(
+                engine,
+                r#"
                 cfg = cfg or {}
                 function cfg._validate(field, value)
                     if field.type == "string" and type(value) ~= "string" then
@@ -6893,7 +6951,9 @@ mod tests {
                     return true, nil
                 end
                 return cfg._validate({type="string"}, "hello")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert!(result);
         });
     }
@@ -6901,7 +6961,9 @@ mod tests {
     #[test]
     fn test_cfg_validate_string_invalid() {
         with_engine(|engine| {
-            let result: bool = eval(engine, r#"
+            let result: bool = eval(
+                engine,
+                r#"
                 cfg = cfg or {}
                 function cfg._validate(field, value)
                     if field.type == "string" and type(value) ~= "string" then
@@ -6911,7 +6973,9 @@ mod tests {
                 end
                 local ok, err = cfg._validate({type="string"}, 123)
                 return (not ok) and (err == "需要字符串")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert!(result);
         });
     }
@@ -6943,7 +7007,9 @@ mod tests {
     #[test]
     fn test_cfg_validate_option_invalid() {
         with_engine(|engine| {
-            let result: bool = eval(engine, r#"
+            let result: bool = eval(
+                engine,
+                r#"
                 cfg = cfg or {}
                 function cfg._validate(field, value)
                     if field.type == "option" then
@@ -6956,7 +7022,9 @@ mod tests {
                 end
                 local ok, err = cfg._validate({type="option", options={"x","y"}}, "z")
                 return (not ok) and (err == "无效选项")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             assert!(result);
         });
     }
@@ -6968,7 +7036,9 @@ mod tests {
     #[test]
     fn test_cfg_field_boolean_getter_setter() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 cfg = cfg or {}
                 test_flag = 0
                 local field = {
@@ -6986,14 +7056,18 @@ mod tests {
                 field.setter(false)
                 assert(field.getter() == false)
                 assert(test_flag == 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
         });
     }
 
     #[test]
     fn test_cfg_field_number_getter_setter() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 cfg = cfg or {}
                 test_num = 50
                 local field = {
@@ -7006,14 +7080,18 @@ mod tests {
                 -- 传入字符串也能转换
                 field.setter("75")
                 assert(field.getter() == 75)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
         });
     }
 
     #[test]
     fn test_cfg_field_string_getter_setter() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 cfg = cfg or {}
                 skills = "unarmed"
                 local field = {
@@ -7023,14 +7101,18 @@ mod tests {
                 assert(field.getter() == "unarmed")
                 field.setter("sword")
                 assert(field.getter() == "sword")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
         });
     }
 
     #[test]
     fn test_cfg_field_option_getter_setter() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 cfg = cfg or {}
                 _opt = "xue"
                 local field = {
@@ -7040,7 +7122,9 @@ mod tests {
                 assert(field.getter() == "xue")
                 field.setter("lingwu")
                 assert(field.getter() == "lingwu")
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
         });
     }
 }

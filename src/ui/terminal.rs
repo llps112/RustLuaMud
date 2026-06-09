@@ -72,7 +72,11 @@ fn build_status_bar(sessions: &[SessionInfo], foreground_id: usize, total_width:
 }
 
 /// 构建 Lua SetStatus 状态栏字符串（前台连接的自定义状态文本）
-fn build_lua_status_text(sessions: &[SessionInfo], foreground_id: usize, total_width: usize) -> String {
+fn build_lua_status_text(
+    sessions: &[SessionInfo],
+    foreground_id: usize,
+    total_width: usize,
+) -> String {
     if let Some(fg) = sessions.get(foreground_id) {
         if !fg.status_text.is_empty() {
             let truncated: String = fg.status_text.chars().take(total_width).collect();
@@ -364,7 +368,10 @@ impl Terminal {
         self.draw_output_area(stdout)?;
 
         // Lua 状态栏（输出区下方、输入行上方）
-        let lua_bar_y = self.state.height.saturating_sub(self.state.input_height + self.state.lua_status_height);
+        let lua_bar_y = self
+            .state
+            .height
+            .saturating_sub(self.state.input_height + self.state.lua_status_height);
         if let Some(ref text) = self.state.lua_status_cache {
             queue!(stdout, cursor::MoveTo(0, lua_bar_y))?;
             queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
@@ -430,7 +437,10 @@ impl Terminal {
         foreground_id: usize,
     ) -> io::Result<()> {
         self.state.update_lua_status_bar(sessions, foreground_id);
-        let lua_bar_y = self.state.height.saturating_sub(self.state.input_height + self.state.lua_status_height);
+        let lua_bar_y = self
+            .state
+            .height
+            .saturating_sub(self.state.input_height + self.state.lua_status_height);
         if let Some(ref text) = self.state.lua_status_cache {
             queue!(stdout, cursor::MoveTo(0, lua_bar_y))?;
             queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;

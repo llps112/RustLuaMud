@@ -46,9 +46,7 @@ impl TermSettings {
 
 impl Default for TermSettings {
     fn default() -> Self {
-        Self {
-            keep_command: true,
-        }
+        Self { keep_command: true }
     }
 }
 
@@ -847,26 +845,25 @@ impl App {
                 }
             }
 
-            BuiltinCommand::Set { option, value } => {
-                match option.as_str() {
-                    "keep_command" => {
-                        let enabled = matches!(value.as_str(), "on" | "1" | "true" | "yes");
-                        self.terminal.state_mut().keep_command = enabled;
-                        let status = if enabled { "已启用" } else { "已关闭" };
-                        TermSettings { keep_command: enabled }.save();
-                        self.terminal.append_output(&format!(
-                            "[系统] 保留命令栏输入: {} (已保存)",
-                            status
-                        ))?;
+            BuiltinCommand::Set { option, value } => match option.as_str() {
+                "keep_command" => {
+                    let enabled = matches!(value.as_str(), "on" | "1" | "true" | "yes");
+                    self.terminal.state_mut().keep_command = enabled;
+                    let status = if enabled { "已启用" } else { "已关闭" };
+                    TermSettings {
+                        keep_command: enabled,
                     }
-                    _ => {
-                        self.terminal.append_output(&format!(
-                            "[错误] 未知设置选项: {}。可用选项: keep_command",
-                            option
-                        ))?;
-                    }
+                    .save();
+                    self.terminal
+                        .append_output(&format!("[系统] 保留命令栏输入: {} (已保存)", status))?;
                 }
-            }
+                _ => {
+                    self.terminal.append_output(&format!(
+                        "[错误] 未知设置选项: {}。可用选项: keep_command",
+                        option
+                    ))?;
+                }
+            },
 
             BuiltinCommand::Unknown => {
                 self.terminal.append_output("内置命令:")?;
@@ -1030,10 +1027,8 @@ impl App {
         let mut stdout = io::stdout();
         let infos = self.manager.session_infos();
         let fg = self.manager.foreground_id;
-        self.terminal
-            .draw_status_bar(&mut stdout, &infos, fg)?;
-        self.terminal
-            .draw_lua_status_bar(&mut stdout, &infos, fg)?;
+        self.terminal.draw_status_bar(&mut stdout, &infos, fg)?;
+        self.terminal.draw_lua_status_bar(&mut stdout, &infos, fg)?;
         // 将光标定位到输入行（draw_lua_status_bar 不再内部 flush）
         self.terminal.draw_input_line(&mut stdout)?;
         stdout.flush()?;
