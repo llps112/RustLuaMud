@@ -889,7 +889,8 @@ impl LuaEngine {
                                             .collect::<Vec<_>>()
                                             .join("\n");
                                         if let Some(caps) = utf8_re.captures(&combined) {
-                                            let full_match = caps.get(0).unwrap().as_str().to_string();
+                                            let full_match =
+                                                caps.get(0).unwrap().as_str().to_string();
                                             let caps_list: Vec<String> = caps
                                                 .iter()
                                                 .skip(1)
@@ -7644,5 +7645,4 @@ mod tests {
             assert!(matches!(result, mlua::Value::Nil));
         });
     }
-
 }

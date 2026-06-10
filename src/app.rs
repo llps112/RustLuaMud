@@ -841,8 +841,10 @@ impl App {
                             match engine.load_script(&path) {
                                 Ok(()) => {
                                     self.manager.sessions[fg].lua_engine = Some(engine);
-                                    self.terminal
-                                        .append_output(&format!("[Lua] 脚本已重新加载: {}", path))?;
+                                    self.terminal.append_output(&format!(
+                                        "[Lua] 脚本已重新加载: {}",
+                                        path
+                                    ))?;
                                     self.start_timers_for_session(fg);
                                 }
                                 Err(e) => {
@@ -857,7 +859,7 @@ impl App {
                                     }
                                 }
                             }
-                        },
+                        }
                         Err(e) => {
                             self.terminal
                                 .append_output(&format!("[Lua] 引擎初始化失败: {}", e))?;
