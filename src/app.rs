@@ -444,6 +444,11 @@ impl App {
                             for line in format_lua_error(&err_msg) {
                                 self.terminal.append_output(&line)?;
                             }
+                            // 脚本加载错误也写入日志
+                            let name = self.manager.sessions[id].name.clone();
+                            for line in format_lua_error(&err_msg) {
+                                self.logger.log_debug(&name, &line);
+                            }
                         }
                     }
                 }
@@ -818,19 +823,38 @@ impl App {
                     .lua_engine
                     .as_ref()
                     .and_then(|e| e.script_path().cloned());
+                // 保存原 engine 的变量（如 char_name 等）
+                let saved_vars = self.manager.sessions[fg]
+                    .lua_engine
+                    .as_ref()
+                    .map(|e| e.get_variables());
                 if let Some(path) = script_path {
                     match crate::lua::LuaEngine::new() {
-                        Ok(mut engine) => match engine.load_script(&path) {
-                            Ok(()) => {
-                                self.manager.sessions[fg].lua_engine = Some(engine);
-                                self.terminal
-                                    .append_output(&format!("[Lua] 脚本已重新加载: {}", path))?;
-                                self.start_timers_for_session(fg);
+                        Ok(mut engine) => {
+                            // 恢复之前保存的变量
+                            if let Some(ref vars) = saved_vars {
+                                for (k, v) in vars {
+                                    engine.set_variable(k, v);
+                                    engine.set_global(k, v);
+                                }
                             }
-                            Err(e) => {
-                                let err_msg = e.to_string();
-                                for line in format_lua_error(&err_msg) {
-                                    self.terminal.append_output(&format!("[Lua] {}", line))?;
+                            match engine.load_script(&path) {
+                                Ok(()) => {
+                                    self.manager.sessions[fg].lua_engine = Some(engine);
+                                    self.terminal
+                                        .append_output(&format!("[Lua] 脚本已重新加载: {}", path))?;
+                                    self.start_timers_for_session(fg);
+                                }
+                                Err(e) => {
+                                    let err_msg = e.to_string();
+                                    for line in format_lua_error(&err_msg) {
+                                        self.terminal.append_output(&format!("[Lua] {}", line))?;
+                                    }
+                                    // 脚本加载错误也写入日志
+                                    let name = self.manager.sessions[fg].name.clone();
+                                    for line in format_lua_error(&err_msg) {
+                                        self.logger.log_debug(&name, &line);
+                                    }
                                 }
                             }
                         },

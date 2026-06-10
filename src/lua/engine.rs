@@ -11,11 +11,17 @@ use rusqlite::{types::Value as SqlValue, Connection};
 /// SQLite 连接包装（Lua 用户数据）
 struct LuaDb {
     conn: Arc<Mutex<Connection>>,
+    text_is_gbk: bool,
 }
 
 impl UserData for LuaDb {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("close", |_, _this, ()| Ok(()));
+
+        methods.add_method_mut("set_gbk", |_, this, flag: bool| {
+            this.text_is_gbk = flag;
+            Ok(())
+        });
 
         methods.add_method("exec", |_, this, sql: String| {
             let conn = this.conn.lock().unwrap();
@@ -71,8 +77,13 @@ impl UserData for LuaDb {
                                     rusqlite::types::Value::Real(f)
                                 }
                                 rusqlite::types::ValueRef::Text(s) => {
-                                    // 尝试 UTF-8，失败则从 GBK 转码
-                                    let text = if std::str::from_utf8(s).is_ok() {
+                                    // 根据数据库文本编码解码
+                                    // 某些 GBK 字节序列恰好也是合法 UTF-8（但对应不同字符），
+                                    // 所以不能用"先尝试 UTF-8"的启发式，必须明确指定编码
+                                    let text = if this.text_is_gbk {
+                                        let (cow, _, _) = encoding_rs::GBK.decode(s);
+                                        cow.into_owned()
+                                    } else if std::str::from_utf8(s).is_ok() {
                                         std::str::from_utf8(s).unwrap().to_string()
                                     } else {
                                         let (cow, _, _) = encoding_rs::GBK.decode(s);
@@ -803,7 +814,7 @@ impl LuaEngine {
                 let gbk_line = encoding_rs::GBK.encode(&clean_line).0.into_owned();
 
                 // 收集匹配结果（与 process_output 相同的逻辑，但不清空 pending_commands）
-                let matches: Vec<(usize, Vec<String>)> = {
+                let matches: Vec<(usize, String, Vec<String>)> = {
                     let state = state_rc_sim.borrow();
                     let mut result = Vec::new();
                     for (i, trigger) in state.triggers.iter().enumerate() {
@@ -827,6 +838,12 @@ impl LuaEngine {
                                         let gbk_combined =
                                             encoding_rs::GBK.encode(&combined).0.into_owned();
                                         if let Some(caps) = gbk_re.captures(&gbk_combined) {
+                                            let full_match = {
+                                                let m = caps.get(0).unwrap();
+                                                let (cow, _, _) =
+                                                    encoding_rs::GBK.decode(m.as_bytes());
+                                                cow.into_owned()
+                                            };
                                             let caps_list: Vec<String> = caps
                                                 .iter()
                                                 .skip(1)
@@ -837,10 +854,15 @@ impl LuaEngine {
                                                     cow.into_owned()
                                                 })
                                                 .collect();
-                                            result.push((i, caps_list));
+                                            result.push((i, full_match, caps_list));
                                         }
                                     }
                                 } else if let Some(caps) = gbk_re.captures(&gbk_line) {
+                                    let full_match = {
+                                        let m = caps.get(0).unwrap();
+                                        let (cow, _, _) = encoding_rs::GBK.decode(m.as_bytes());
+                                        cow.into_owned()
+                                    };
                                     let caps_list: Vec<String> = caps
                                         .iter()
                                         .skip(1)
@@ -850,7 +872,7 @@ impl LuaEngine {
                                             cow.into_owned()
                                         })
                                         .collect();
-                                    result.push((i, caps_list));
+                                    result.push((i, full_match, caps_list));
                                 }
                             }
                             TriggerPattern::Utf8(utf8_re) => {
@@ -867,23 +889,25 @@ impl LuaEngine {
                                             .collect::<Vec<_>>()
                                             .join("\n");
                                         if let Some(caps) = utf8_re.captures(&combined) {
+                                            let full_match = caps.get(0).unwrap().as_str().to_string();
                                             let caps_list: Vec<String> = caps
                                                 .iter()
                                                 .skip(1)
                                                 .flatten()
                                                 .map(|m| m.as_str().to_string())
                                                 .collect();
-                                            result.push((i, caps_list));
+                                            result.push((i, full_match, caps_list));
                                         }
                                     }
                                 } else if let Some(caps) = utf8_re.captures(&clean_line) {
+                                    let full_match = caps.get(0).unwrap().as_str().to_string();
                                     let caps_list: Vec<String> = caps
                                         .iter()
                                         .skip(1)
                                         .flatten()
                                         .map(|m| m.as_str().to_string())
                                         .collect();
-                                    result.push((i, caps_list));
+                                    result.push((i, full_match, caps_list));
                                 }
                             }
                         }
@@ -895,7 +919,7 @@ impl LuaEngine {
                 let mut any_omit = false;
 
                 // 逐个触发回调
-                for (idx, caps_list) in matches {
+                for (idx, full_match, caps_list) in matches {
                     let (callback, send_text, trigger_name, omit) = {
                         let state = state_rc_sim.borrow();
                         (
@@ -910,6 +934,8 @@ impl LuaEngine {
                     }
                     // MUSHclient 触发器回调签名: function(name, line, wildcards)
                     if let Ok(wildcards_table) = lua.create_table() {
+                        // w[0] = 完整匹配文本（MUSHclient 兼容）
+                        let _ = wildcards_table.set(0, full_match.as_str());
                         for (i, m) in caps_list.iter().enumerate() {
                             let _ = wildcards_table.set(i + 1, m.as_str());
                         }
@@ -1765,6 +1791,7 @@ impl LuaEngine {
             let conn = Connection::open(&path).map_err(|e| mlua::Error::external(e.to_string()))?;
             let db = LuaDb {
                 conn: Arc::new(Mutex::new(conn)),
+                text_is_gbk: false,
             };
             lua.create_userdata(db)
         })?;
@@ -2393,7 +2420,7 @@ impl LuaEngine {
         let gbk_line = encoding_rs::GBK.encode(&clean_line).0.into_owned();
 
         // 收集需要触发的
-        let matches: Vec<(usize, Vec<String>)> = {
+        let matches: Vec<(usize, String, Vec<String>)> = {
             let state = self.state.borrow();
             let mut result = Vec::new();
             for (i, trigger) in state.triggers.iter().enumerate() {
@@ -2418,6 +2445,11 @@ impl LuaEngine {
                                 let gbk_combined =
                                     encoding_rs::GBK.encode(&combined).0.into_owned();
                                 if let Some(caps) = gbk_re.captures(&gbk_combined) {
+                                    let full_match = {
+                                        let m = caps.get(0).unwrap();
+                                        let (cow, _, _) = encoding_rs::GBK.decode(m.as_bytes());
+                                        cow.into_owned()
+                                    };
                                     let caps_list: Vec<String> = caps
                                         .iter()
                                         .skip(1)
@@ -2427,11 +2459,16 @@ impl LuaEngine {
                                             cow.into_owned()
                                         })
                                         .collect();
-                                    result.push((i, caps_list));
+                                    result.push((i, full_match, caps_list));
                                 }
                             }
                         } else {
                             if let Some(caps) = gbk_re.captures(&gbk_line) {
+                                let full_match = {
+                                    let m = caps.get(0).unwrap();
+                                    let (cow, _, _) = encoding_rs::GBK.decode(m.as_bytes());
+                                    cow.into_owned()
+                                };
                                 let caps_list: Vec<String> = caps
                                     .iter()
                                     .skip(1)
@@ -2441,7 +2478,7 @@ impl LuaEngine {
                                         cow.into_owned()
                                     })
                                     .collect();
-                                result.push((i, caps_list));
+                                result.push((i, full_match, caps_list));
                             }
                         }
                     }
@@ -2459,24 +2496,26 @@ impl LuaEngine {
                                     .collect::<Vec<_>>()
                                     .join("\n");
                                 if let Some(caps) = utf8_re.captures(&combined) {
+                                    let full_match = caps.get(0).unwrap().as_str().to_string();
                                     let caps_list: Vec<String> = caps
                                         .iter()
                                         .skip(1)
                                         .flatten()
                                         .map(|m| m.as_str().to_string())
                                         .collect();
-                                    result.push((i, caps_list));
+                                    result.push((i, full_match, caps_list));
                                 }
                             }
                         } else {
                             if let Some(caps) = utf8_re.captures(&clean_line) {
+                                let full_match = caps.get(0).unwrap().as_str().to_string();
                                 let caps_list: Vec<String> = caps
                                     .iter()
                                     .skip(1)
                                     .flatten()
                                     .map(|m| m.as_str().to_string())
                                     .collect();
-                                result.push((i, caps_list));
+                                result.push((i, full_match, caps_list));
                             }
                         }
                     }
@@ -2486,7 +2525,7 @@ impl LuaEngine {
         };
 
         // 逐个触发
-        for (idx, caps_list) in matches {
+        for (idx, full_match, caps_list) in matches {
             let (callback, send_text, trigger_name) = {
                 let state = self.state.borrow();
                 (
@@ -2496,8 +2535,9 @@ impl LuaEngine {
                 )
             };
             // MUSHclient 触发器回调签名: function(name, line, wildcards)
-            // wildcards 是一个从1开始索引的表
             if let Ok(wildcards_table) = self.lua.create_table() {
+                // w[0] = 完整匹配文本（MUSHclient 兼容）
+                let _ = wildcards_table.set(0, full_match.as_str());
                 for (i, m) in caps_list.iter().enumerate() {
                     let _ = wildcards_table.set(i + 1, m.as_str());
                 }
@@ -2654,6 +2694,11 @@ impl LuaEngine {
     pub fn set_global(&self, name: &str, value: &str) {
         let globals = self.lua.globals();
         let _ = globals.set(name, value);
+    }
+
+    /// 获取所有变量（用于 reload 时恢复）
+    pub fn get_variables(&self) -> std::collections::HashMap<String, String> {
+        self.state.borrow().variables.clone()
     }
 
     /// 设置连接状态
@@ -3414,6 +3459,60 @@ mod tests {
             engine.process_output("You see a goblin here");
             let result: Option<String> = eval(engine, "return wc_result").unwrap();
             assert_eq!(result, Some("a goblin".to_string()));
+        });
+    }
+
+    // 测试 w[0] 为完整匹配文本（MUSHclient 兼容）
+    #[test]
+    fn test_trigger_w0_full_match() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                w0_result = nil
+                w1_result = nil
+                AddTrigger('w0_trig', [[^(.+) hits (.+)$]], '', 33, 0, 0, '', 'function(name, line, wildcards) w0_result = wildcards[0]; w1_result = wildcards[1] end', 0, 0)
+            "#).unwrap();
+            engine.process_output("goblin hits warrior");
+            let w0: Option<String> = eval(engine, "return w0_result").unwrap();
+            let w1: Option<String> = eval(engine, "return w1_result").unwrap();
+            assert_eq!(w0, Some("goblin hits warrior".to_string()));
+            assert_eq!(w1, Some("goblin".to_string()));
+        });
+    }
+
+    // 测试多行触发器的 w[0] 包含完整合并文本
+    #[test]
+    fn test_trigger_w0_multiline() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                ml_w0 = nil
+                ml_w1 = nil
+                AddTrigger('ml_w0_trig', [[^line1\n(.+)$]], '', 33, 0, 0, '', 'function(name, line, wildcards) ml_w0 = wildcards[0]; ml_w1 = wildcards[1] end', 0, 0)
+                SetTriggerOption('ml_w0_trig', 'multi_line', true)
+                SetTriggerOption('ml_w0_trig', 'lines_to_match', 2)
+            "#).unwrap();
+            engine.process_output("line1");
+            engine.process_output("line2 content");
+            let w0: Option<String> = eval(engine, "return ml_w0").unwrap();
+            let w1: Option<String> = eval(engine, "return ml_w1").unwrap();
+            assert_eq!(w0, Some("line1\nline2 content".to_string()));
+            assert_eq!(w1, Some("line2 content".to_string()));
+        });
+    }
+
+    // 测试 w[0] 在 findstring 类函数中的使用（脚本常见用法）
+    #[test]
+    fn test_trigger_w0_with_chinese() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                zh_w0 = nil
+                zh_w1 = nil
+                AddTrigger('zh_trig', [[^你向(.+)打听有关「(.+)」的消息。$]], '', 33, 0, 0, '', 'function(name, line, wildcards) zh_w0 = wildcards[0]; zh_w1 = wildcards[1] end', 0, 0)
+            "#).unwrap();
+            engine.process_output("你向范骅打听有关「治安」的消息。");
+            let w0: Option<String> = eval(engine, "return zh_w0").unwrap();
+            let w1: Option<String> = eval(engine, "return zh_w1").unwrap();
+            assert_eq!(w0, Some("你向范骅打听有关「治安」的消息。".to_string()));
+            assert_eq!(w1, Some("范骅".to_string()));
         });
     }
 
@@ -7545,4 +7644,5 @@ mod tests {
             assert!(matches!(result, mlua::Value::Nil));
         });
     }
+
 }
