@@ -1476,6 +1476,11 @@ impl LuaEngine {
             // 将脚本作为 send_text 存储，在 fire_timer 时执行
             let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
 
+            // Replace flag (1024): delete existing timer with same name first
+            if (flags & 1024) != 0 {
+                state_rc19.borrow_mut().timers.retain(|t| t.name != name);
+            }
+
             state_rc19.borrow_mut().timers.push(TimerDef {
                 name,
                 interval_millis: interval_millis_u64,
@@ -2633,10 +2638,20 @@ impl LuaEngine {
         let _ = callback.call::<()>(());
 
         if !send_text.is_empty() {
-            // send_text 是 MUSHclient 的 script 参数，是函数名（如 "wait.timer_resume"）
-            // 需要解析函数名并调用，传入定时器名称作为参数
-            let code = format!("{}('{}')", send_text, timer_name.replace('\'', "\\'"));
-            let _ = self.lua.load(&code).exec();
+            // send_text 是 MUSHclient 的 script 参数
+            // 判断是函数名还是 Lua 代码：
+            // 函数名格式：identifier 或 identifier.identifier（如 "fire_timer_cb" 或 "wait.timer_resume"）
+            // Lua 代码：包含空格、赋值、运算符等（如 "counter = counter + 1"）
+            let is_function_name = send_text.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                && !send_text.is_empty()
+                && send_text.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_');
+
+            if is_function_name {
+                let code = format!("{}('{}')", send_text, timer_name.replace('\'', "\\'"));
+                let _ = self.lua.load(&code).exec();
+            } else {
+                let _ = self.lua.load(&send_text).exec();
+            }
         }
 
         if one_shot {
@@ -2702,9 +2717,30 @@ impl LuaEngine {
         self.state.borrow().variables.clone()
     }
 
-    /// 设置连接状态
+    /// 设置连接状态，连接成功时自动调用 alias.atconnect()
     pub fn set_connected(&mut self, connected: bool) {
+        eprintln!("[DEBUG] set_connected(connected={})", connected);
+        let was_connected = self.state.borrow().connected;
         self.state.borrow_mut().connected = connected;
+        // 连接刚建立时，自动调用 alias.atconnect()（MUSHclient 兼容）
+        if connected && !was_connected {
+            eprintln!("[DEBUG] set_connected: about to call alias.atconnect()");
+            if let Err(e) = self.eval_code(
+                r#"
+                if alias_atconnect_wrapper then
+                    ColourNote("red", "black", "=== alias_atconnect_wrapper found ===")
+                    alias_atconnect_wrapper()
+                elseif alias and alias.atconnect then
+                    ColourNote("red", "black", "=== calling alias.atconnect ===")
+                    alias.atconnect()
+                else
+                    ColourNote("red", "black", "=== alias.atconnect not defined ===")
+                end
+                "#,
+            ) {
+                eprintln!("[DEBUG] set_connected eval_code error: {}", e);
+            }
+        }
     }
     #[allow(dead_code)]
     /// 取出连接请求标志（一次性消费）
@@ -4750,6 +4786,37 @@ mod tests {
     }
 
     #[test]
+    fn test_set_connected_calls_atconnect() {
+        let mut engine = LuaEngine::new().unwrap();
+        // 定义 alias.atconnect 函数，设置一个标志变量
+        exec(
+            &engine,
+            r#"
+            alias = {}
+            atconnect_called = false
+            function alias.atconnect()
+                atconnect_called = true
+            end
+            "#,
+        )
+        .unwrap();
+
+        // 连接时应调用 alias.atconnect
+        engine.set_connected(true);
+        assert!(eval::<bool>(&engine, "return atconnect_called").unwrap());
+
+        // 重复调用 set_connected(true) 不应再次触发
+        exec(&engine, "atconnect_called = false").unwrap();
+        engine.set_connected(true);
+        assert!(!eval::<bool>(&engine, "return atconnect_called").unwrap());
+
+        // 断开后重新连接应再次触发
+        engine.set_connected(false);
+        engine.set_connected(true);
+        assert!(eval::<bool>(&engine, "return atconnect_called").unwrap());
+    }
+
+    #[test]
     fn test_take_connect_requested_consumed() {
         let engine = LuaEngine::new().unwrap();
         exec(&engine, "Connect()").unwrap();
@@ -5998,6 +6065,31 @@ mod tests {
             let r2: Option<bool> = eval(engine, "return tg2_result").unwrap();
             assert_eq!(r1, None);
             assert_eq!(r2, None);
+        });
+    }
+
+    #[test]
+    fn test_timer_replace_flag() {
+        with_engine(|engine| {
+            exec(engine, "counter = 0").unwrap();
+
+            // First AddTimer with Replace flag
+            exec(engine, "AddTimer('t1', 0, 0, 1, '', 1 + 1024, 'counter = counter + 1')").unwrap();
+            exec(engine, "SetTimerOption('t1', 'group', 'g1')").unwrap();
+
+            // Second AddTimer with Replace flag (should replace, not append)
+            exec(engine, "AddTimer('t1', 0, 0, 1, '', 1 + 1024, 'counter = counter + 10')").unwrap();
+            exec(engine, "SetTimerOption('t1', 'group', 'g1')").unwrap();
+
+            // Only one timer should exist
+            let count: i64 = eval(engine, "return #GetTimerList()").unwrap();
+            assert_eq!(count, 1);
+
+            // Fire the timer directly by index
+            engine.fire_timer(0);
+            let counter: i64 = eval(engine, "return counter").unwrap();
+            // Should be 10 (from the replacement timer), not 11 (1+10 from both)
+            assert_eq!(counter, 10);
         });
     }
 
