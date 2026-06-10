@@ -1,28 +1,28 @@
 # RustLuaMud
 
-基于 Rust + LuaJIT 的终端 MUD 客户端，面向无 GUI 环境下 7x24 小时挂机，兼容 MushClient 脚本。
+基于 Rust + LuaJIT 的终端 MUD 客户端，面向无 GUI 环境下 7x24 小时挂机，兼容 MUSHclient 脚本 API。
 
-A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless operation, with MushClient script compatibility.
+A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless operation, with MUSHclient script API compatibility.
 
 ---
 
 ## 特性
 
-- **MushClient 脚本兼容** — 完整实现 MushClient API（AddTrigger/AddAlias/AddTimer/SetStatus/Simulate 等），从 MushClient 拷贝的脚本可无缝运行
+- **MUSHclient 脚本兼容** — 完整实现 MUSHclient API（AddTrigger / AddAlias / AddTimer / SetStatus / Simulate 等），从 MUSHclient 拷贝的脚本可无缝运行
 - **多连接管理** — 单实例同时管理最多 10 个角色连接，支持前台/后台切换
-- **前台/后台渲染** — 仅前台连接渲染终端输出，后台连接静默记录日志
+- **仅前台渲染** — 仅前台连接渲染终端输出，后台连接静默记录日志
 - **ANSI 颜色** — 完整解析 ANSI SGR 转义序列，终端彩色显示
-- **LuaJIT 脚本引擎** — 触发器、别名、定时器、变量管理，支持 `wait.lua` 协程库
-- **GBK 编码兼容** — 自动检测并转码 GBK 编码的脚本文件和服务器输出；触发器正则支持 GBK 字节模式和 UTF-8 模式
-- **SQLite3 集成** — Lua 脚本可直接操作 SQLite3 数据库（地图查询等），支持 GBK 文本解码
+- **LuaJIT 脚本引擎** — 触发器、别名、定时器、变量管理、协程支持
+- **GBK 编码兼容** — 自动检测并转码 GBK 编码的脚本文件和服务器输出；触发器同时支持 GBK 字节模式和 UTF-8 正则匹配
+- **SQLite3 集成** — Lua 脚本可直接操作 SQLite3 数据库，支持 GBK 文本解码
 - **触发器 w[0] 兼容** — 触发器回调的 `wildcards` 表包含 `w[0]`（完整匹配文本），与 MUSHclient 行为完全一致
 - **自动重连** — 断线自动重连，可配置延迟
-- **日志系统** — 按连接分文件记录，带时间戳，支持按大小轮转
+- **日志系统** — 按连接分文件记录，带时间戳
 - **Profile 管理** — 从 `profiles/` 目录加载角色配置（TOML），自动注入登录凭证
 - **终端设置持久化** — `keep_command` 等终端选项自动保存到 JSON 文件
-- **状态栏** — 实时显示角色名、任务状态、版本号等信息（SetStatus API）
+- **状态栏** — 实时显示角色名、连接状态、版本号等信息（SetStatus API）
 - **Simulate API** — 模拟服务器输出触发 Lua 触发器，支持多行匹配
-- **内置命令** — `/connect`、`/disconnect`、`/load`、`/lua`、`/list` 等
+- **内置命令** — `/connect`、`/disconnect`、`/load`、`/lua`、`/list`、`/set` 等
 - **极低资源占用** — J1800 + 2GB 内存可流畅运行 10 连接
 
 ---
@@ -46,12 +46,12 @@ cargo build --release
 # 文件名即为角色标识，建议用角色名命名
 
 name = "角色名"
-host = "ln.xkxmud.com"
-port = 5555
+host = "mud.example.com"
+port = 6666
 encoding = "gbk"
 
 # Lua 脚本路径（相对于程序运行目录）
-script = "scripts/example.lua"
+script = "scripts/myscript.lua"
 
 # 连接行为
 auto_connect = true
@@ -59,7 +59,7 @@ auto_reconnect = true
 reconnect_delay_secs = 5
 
 # 登录凭证（启动时自动注入 Lua 变量 char_name / char_password）
-# 留空则不注入，需手动输入或通过 Lua 脚本 setname/setpwd 设置
+# 留空则不注入，需手动输入或通过 Lua 脚本设置
 username = "your_character_name"
 password = "your_password"
 ```
@@ -74,6 +74,10 @@ password = "your_password"
 ./target/release/rust-lua-mud
 ```
 
+### 文档
+
+详细文档请见 [help/](help/README.md) 目录，涵盖 Lua API 接口、CLUI 操作指南等。
+
 ---
 
 ## 快捷键
@@ -83,6 +87,7 @@ password = "your_password"
 | `Alt+1~9` | 切换到对应编号的连接 |
 | `Alt+0` | 切换到第 10 个连接 |
 | `Ctrl+C` / `Ctrl+D` | 退出程序 |
+| `↑` / `↓` | 浏览命令历史 |
 
 ---
 
@@ -102,13 +107,13 @@ password = "your_password"
 
 ---
 
-## MushClient 兼容 API
+## MUSHclient 兼容 API
 
 ### 触发器
 
 | API | 说明 |
 |-----|------|
-| `AddTrigger(name, match, response, flags, colour, wildcards, sound, script, send_to, sequence)` | 注册触发器 |
+| `AddTrigger(name, match, response, flags, ...)` | 注册触发器 |
 | `AddTriggerEx(...)` | 扩展版触发器注册 |
 | `DeleteTrigger(name)` | 删除触发器 |
 | `EnableTrigger(name, enable)` | 启用/禁用触发器 |
@@ -117,21 +122,21 @@ password = "your_password"
 | `GetTriggerInfo(name, code)` | 获取触发器信息 |
 | `SetTriggerOption(name, option, value)` | 设置触发器选项 |
 
-**触发器回调签名**: `function(name, line, wildcards)`
+**回调签名**: `function(name, line, wildcards)`
 - `wildcards[0]` = 完整匹配文本（MUSHclient 兼容）
 - `wildcards[1]` = 第一个捕获组，依此类推
-- 支持多行触发器（`multi_line` + `lines_to_match`）
 - 支持 `omit_from_output` 选项（匹配行不显示到终端）
 
 ### 别名
 
 | API | 说明 |
 |-----|------|
-| `AddAlias(name, match, response, flags, script, sequence)` | 注册别名（支持 `*` 和 `?` 通配符） |
+| `AddAlias(name, match, response, flags, [script])` | 注册别名 |
 | `DeleteAlias(name)` | 删除别名 |
+| `GetAliasList()` | 获取别名名称列表 |
 | `SetAliasOption(name, option, value)` | 设置别名选项 |
 
-**别名回调签名**: `function(name, line, wildcards)`
+**回调签名**: `function(name, line, wildcards)`
 - `wildcards[0]` = 原始输入
 - `wildcards[1]` = 第一个捕获组
 
@@ -139,24 +144,29 @@ password = "your_password"
 
 | API | 说明 |
 |-----|------|
-| `AddTimer(name, h, m, s, command, flags, script, sequence)` | 注册定时器 |
+| `AddTimer(name, h, m, s, command, flags, [script])` | 注册定时器 |
 | `DeleteTimer(name)` | 删除定时器 |
 | `EnableTimer(name, enable)` | 启用/禁用定时器 |
 | `EnableTimerGroup(group, enable)` | 按组启用/禁用定时器 |
 | `GetTimerList()` | 获取定时器名称列表 |
 | `GetTimerInfo(name, code)` | 获取定时器信息 |
 | `SetTimerOption(name, option, value)` | 设置定时器选项 |
+| `ResetTimer(name)` | 重置定时器计时 |
 
 ### 命令与输出
 
 | API | 说明 |
 |-----|------|
 | `send(cmd)` / `Execute(cmd)` | 发送命令到服务器 |
+| `DiscardQueue()` | 清空命令队列 |
 | `Note(msg)` | 输出文本 |
-| `Tell(msg)` | 内联输出 |
+| `Tell(msg)` | 内联输出（不换行） |
+| `print(...)` | 标准 Lua print，重定向到输出窗口 |
 | `ColourNote(fg, bg, msg)` | 彩色输出 |
 | `log(msg)` | 记录日志 |
 | `Simulate(text)` | 模拟服务器输出，触发 Lua 触发器 |
+| `SetStatus(text)` | 设置终端底部状态栏文本 |
+| `DeleteTemporaryTimers()` | 删除所有一次性定时器 |
 
 ### 变量
 
@@ -165,100 +175,114 @@ password = "your_password"
 | `GetVariable(name)` | 获取变量 |
 | `SetVariable(name, value)` | 设置变量 |
 | `DeleteVariable(name)` | 删除变量 |
-| `GetVariableList()` | 获取所有变量（key-value 表） |
+| `GetVariableList()` | 获取所有变量列表 |
 
-### 状态栏
+### 网络
 
 | API | 说明 |
 |-----|------|
-| `SetStatus(text)` | 设置终端底部状态栏文本 |
+| `IsConnected()` | 是否已连接 |
+| `Connect()` | 请求连接 |
+| `Disconnect()` | 请求断开 |
+| `OnConnect()` | 连接回调（由 Lua 覆盖实现自定义初始化） |
 
 ### 配置与信息
 
 | API | 说明 |
 |-----|------|
-| `GetInfo(code)` | 获取客户端信息（code=35 返回脚本目录） |
+| `GetInfo(code)` | 获取客户端信息（code=1 主机, 2 端口, 3 连接状态, 35 脚本目录等） |
 | `SetOption(key, value)` | 设置选项 |
 | `GetOption(key)` | 获取选项 |
 | `SetAlphaOption(key, value)` | 设置字符串选项 |
 | `GetAlphaOption(key)` | 获取字符串选项 |
-| `IsConnected()` | 是否已连接 |
-| `Connect()` | 请求连接 |
-| `Disconnect()` | 请求断开 |
-| `GetUniqueNumber()` | 获取唯一编号 |
-| `Trim(str)` | 去除首尾空白 |
+
+### 日志
+
+| API | 说明 |
+|-----|------|
+| `OpenLog(filename, append)` | 打开日志文件 |
+| `IsLogOpen()` | 检查日志是否已打开 |
+| `CloseLog()` | 关闭日志文件 |
 
 ### 数据库
 
 | API | 说明 |
 |-----|------|
 | `sqlite3.open(path)` | 打开数据库 |
-| `db:exec(sql)` | 执行 SQL |
-| `db:prepare(sql)` | 预编译 SQL |
-| `stmt:step()` | 执行一步 |
-| `stmt:run(...)` | 运行带参数语句 |
-| `db:close()` | 关闭数据库 |
-| `DatabaseClose(db)` | 兼容 MushClient 的关闭接口 |
-| `conn:set_gbk(true)` | 设置数据库文本字段为 GBK 解码 |
+| `conn:execute(sql)` | 执行 SQL |
+| `conn:close()` | 关闭数据库 |
+| `conn:set_gbk(enable)` | 设置数据库文本字段为 GBK 解码 |
+| `DatabaseClose()` | 兼容 MUSHclient 的关闭接口 |
+
+### 工具函数
+
+| API | 说明 |
+|-----|------|
+| `GetUniqueNumber()` | 获取唯一递增编号 |
+| `Trim(str)` | 去除字符串首尾空白 |
+| `MakeRegularExpression(text)` | 将普通文本转义为安全正则 |
+| `GetPluginID()` | 获取插件 ID（兼容） |
+| `GetPluginInfo(id, code)` | 获取插件信息 |
 
 ### 常量表
 
 | 常量表 | 说明 |
 |--------|------|
-| `trigger_flag` | 触发器标志位（enabled=1, omit=2, regex=32 等） |
+| `trigger_flag` | 触发器标志位 |
 | `alias_flag` | 别名标志位 |
 | `timer_flag` | 定时器标志位 |
 | `custom_colour` | 自定义颜色 |
 | `error_code` / `error_desc` | 错误码与描述 |
 
-### 简写 API
+**trigger_flag**:
+| 常量 | 值 | 说明 |
+|------|-----|------|
+| `Enabled` | 1 | 启用 |
+| `OmitFromLog` | 2 | 不记日志 |
+| `OmitFromOutput` | 4 | 不显示输出 |
+| `KeepEvaluating` | 8 | 继续求值 |
+| `IgnoreCase` | 16 | 忽略大小写 |
+| `RegularExpression` | 32 | 正则匹配 |
+| `ExpandVariables` | 64 | 展开变量 |
+| `Replace` | 1024 | 同名替换 |
+| `LowercaseWildcard` | 2048 | 通配符小写 |
+| `Temporary` | 4096 | 临时 |
+| `OneShot` | 8192 | 一次性 |
+
+**alias_flag**:
+| 常量 | 值 | 说明 |
+|------|-----|------|
+| `Enabled` | 1 | 启用 |
+| `IgnoreCase` | 16 | 忽略大小写 |
+| `RegularExpression` | 32 | 正则匹配 |
+| `ExpandVariables` | 64 | 展开变量 |
+| `Replace` | 1024 | 同名替换 |
+| `Temporary` | 4096 | 临时 |
+
+**timer_flag**:
+| 常量 | 值 | 说明 |
+|------|-----|------|
+| `Enabled` | 1 | 启用 |
+| `AtTime` | 4 | 指定时刻触发 |
+| `Replace` | 1024 | 同名替换（继承旧定时器禁用状态） |
+| `Temporary` | 4096 | 临时 |
+| `OneShot` | 8192 | 一次性 |
+| `ActiveWhenClosed` | 16384 | 窗口关闭时仍运行 |
+
+### 内部与扩展
 
 | API | 说明 |
 |-----|------|
-| `trigger(pattern, callback)` | 快速注册触发器 |
-| `alias(pattern, callback)` | 快速注册别名 |
-| `timer(interval, callback)` | 快速注册定时器（秒） |
+| `dofile(filename)` | 加载并执行 Lua 脚本文件（自动处理 GBK 转码） |
+| `rex` | 正则表达式模块 |
+| `bit` | 位运算模块（band / bor / bxor / bnot / lshift / rshift） |
+| `trigger(name, data)` | 快速注册触发器 |
+| `alias(name, data)` | 快速注册别名 |
+| `timer(name, data)` | 快速注册定时器 |
 | `get(key)` | 获取变量 |
 | `set(key, value)` | 设置变量 |
-
-### 脚本编码
-
-脚本文件支持 UTF-8 和 GBK 编码，客户端自动检测并转码。`dofile()` 和 `load_script()` 自动处理 GBK 转码和 Windows 路径分隔符兼容。
-
-**注意**：`scripts/class/` 目录下的 `.lua` 文件使用 GBK 编码（从 MushClient 直接拷贝的原始脚本），修改时应先编辑 `scripts/class-utf8/` 中的 UTF-8 副本，再用 `iconv` 转码覆盖 GBK 版本。
-
----
-
-## 数据交换接口（外部程序集成）
-
-客户端内置了 JSON 序列化和配置读写 API，外部程序可通过引擎的 `eval_to_string` 接口实现配置读写，无需直接解析日志或模拟输入。
-
-### 全局 API
-
-| API | 说明 |
-|-----|------|
-| `json_encode(value)` | 将 Lua 值序列化为 JSON 字符串（支持 nil、boolean、number、string、table 嵌套） |
-| `json_decode(json_str)` | 将 JSON 字符串反序列化为 Lua 值 |
-
-### 配置 API
-
-| API | 说明 |
-|-----|------|
-| `cfg.data()` | 导出完整配置数据，包含字段定义 + 当前值 |
-| `cfg.update({...})` | 批量更新配置项，自动类型校验和范围检查 |
-| `cfg.save()` | 将当前配置持久化到文件 |
-
-### 调用示例
-
-```rust
-// 获取配置
-let json = engine.eval_to_string("return json_encode(cfg.data())");
-
-// 修改配置
-let result = engine.eval_to_string(
-    "return json_encode(cfg.update({idle=true, neili_job=80}))"
-);
-```
+| `json_encode(value)` | 将 Lua 值序列化为 JSON |
+| `json_decode(json_str)` | 将 JSON 解析为 Lua 值 |
 
 ---
 
@@ -269,11 +293,11 @@ let result = engine.eval_to_string(
 │   └── example.toml       # 示例配置（自动跳过）
 ├── scripts/               # Lua 脚本
 │   ├── example.lua        # 示例脚本
-│   ├── michen_xkx.lua     # 侠客行挂机主脚本入口
-│   ├── class/             # MushClient 原始脚本（GBK 编码）
-│   ├── class-utf8/        # MushClient 脚本 UTF-8 副本（仅供查阅）
 │   └── lua/               # Lua 依赖库（wait.lua 等）
 ├── logs/                  # 日志文件（按连接分文件）
+├── help/                  # 客户端文档
+│   ├── api/               # Lua API 接口文档
+│   └── commands/          # 命令和 CLUI 操作指南
 ├── src/
 │   ├── main.rs            # 入口
 │   ├── app.rs             # 应用主逻辑（终端 UI、命令处理、连接管理）
@@ -288,14 +312,36 @@ let result = engine.eval_to_string(
 │   ├── log/               # 日志系统
 │   │   └── logger.rs      # 按连接分文件、大小轮转
 │   └── lua/               # Lua 脚本引擎
-│       └── engine.rs      # LuaJIT 引擎、MushClient API 实现
+│       └── engine.rs      # LuaJIT 引擎、MUSHclient API 实现
 ├── .github/               # GitHub Actions CI/CD
 │   └── workflows/
 │       ├── ci.yml         # 自动测试 + clippy + fmt
 │       ├── release.yml    # 打 tag 自动发布
 │       └── audit.yml      # 每周安全审计
-├── xkxMAP.db              # GPS 地图数据库（SQLite3）
 └── Cargo.toml
+```
+
+---
+
+## 数据交换接口（外部程序集成）
+
+客户端内置了 JSON 序列化和配置读写 API，外部程序可通过引擎的 `eval_to_string` 接口实现数据交互，无需直接解析日志或模拟输入。
+
+### JSON 序列化
+
+| API | 说明 |
+|-----|------|
+| `json_encode(value)` | 将 Lua 值序列化为 JSON 字符串（支持 nil、boolean、number、string、table 嵌套） |
+| `json_decode(json_str)` | 将 JSON 字符串反序列化为 Lua 值 |
+
+### 调用示例（Rust）
+
+```rust
+// 获取数据
+let json = engine.eval_to_string("return json_encode(my_table)");
+
+// 解析 JSON 到 Lua
+let result = engine.eval_to_string("return json_decode('{\"key\":\"value\"}')");
 ```
 
 ---
@@ -321,7 +367,7 @@ let result = engine.eval_to_string(
 |------|------|
 | 操作系统 | Linux（已测试）/ macOS / Windows（理论上支持） |
 | CPU | x86_64 或 aarch64（LuaJIT 需要 JIT 支持的平台） |
-| 内存 | 最低 2GB（10 连接流畅运行） |
+| 内存 | 最低 512MB（基础使用），2GB 推荐（10 连接） |
 | 终端 | 支持 UTF-8 和 ANSI 转义序列的终端（如 xterm、GNOME Terminal、iTerm2、Windows Terminal） |
 | Rust | 1.70+（edition 2021） |
 
@@ -340,9 +386,17 @@ let result = engine.eval_to_string(
 
 ## 版本历史
 
+### v0.1.1 (2026-06-10)
+
+- 新增 `help/` 文档目录，涵盖 Lua API、CLUI 操作指南等 18 个文档
+- 修复 `AddTimer` Replace 标志不继承旧定时器禁用状态的问题
+- 重构 `OnConnect` 回调抽象接口，替代直接调用 `alias.atconnect`
+- 修复连接初始化时命令队列未及时发送的问题
+- 清理调试输出和游戏脚本耦合内容
+
 ### v0.1.0 (2026-06-10)
 
-- 完整实现 MushClient 兼容 API（触发器、别名、定时器、变量、数据库等）
+- 完整实现 MUSHclient 兼容 API（触发器、别名、定时器、变量、数据库等）
 - 触发器 `wildcards` 表支持 `w[0]` 完整匹配文本（MUSHclient 兼容）
 - 多行触发器支持（`multi_line` + `lines_to_match`）
 - GBK 字节模式正则匹配 + UTF-8 正则匹配双模式
