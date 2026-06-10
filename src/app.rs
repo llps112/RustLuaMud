@@ -380,7 +380,10 @@ impl App {
     fn init_lua_for_session(&mut self, id: usize) -> io::Result<()> {
         eprintln!("[DEBUG] init_lua_for_session({}) ENTER", id);
         if id >= self.manager.sessions.len() {
-            eprintln!("[DEBUG] init_lua_for_session({}) RETURN: id out of range", id);
+            eprintln!(
+                "[DEBUG] init_lua_for_session({}) RETURN: id out of range",
+                id
+            );
             return Ok(());
         }
 
@@ -412,7 +415,10 @@ impl App {
 
                 // 加载脚本
                 if let Some(ref path) = script_path {
-                    eprintln!("[DEBUG] init_lua_for_session({}) loading script: {}", id, path);
+                    eprintln!(
+                        "[DEBUG] init_lua_for_session({}) loading script: {}",
+                        id, path
+                    );
                     match engine.load_script(path) {
                         Ok(()) => {
                             // 排空脚本加载期间 Execute 等压入的命令（如 "/set_dl()"、"score" 等）
@@ -458,7 +464,10 @@ impl App {
                 }
 
                 self.manager.sessions[id].lua_engine = Some(engine);
-                eprintln!("[DEBUG] init_lua_for_session({}) engine set, syncing connection state...", id);
+                eprintln!(
+                    "[DEBUG] init_lua_for_session({}) engine set, syncing connection state...",
+                    id
+                );
                 // 同步连接状态：session.connect() 在创建事件通道前已设置 state，
                 // 初始 Connected 状态不会通过 StateChange 事件到达 engine，
                 // 此处手动同步，确保 engine 知道当前已连接并触发 alias.atconnect()

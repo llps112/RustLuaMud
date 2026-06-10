@@ -2642,9 +2642,14 @@ impl LuaEngine {
             // 判断是函数名还是 Lua 代码：
             // 函数名格式：identifier 或 identifier.identifier（如 "fire_timer_cb" 或 "wait.timer_resume"）
             // Lua 代码：包含空格、赋值、运算符等（如 "counter = counter + 1"）
-            let is_function_name = send_text.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+            let is_function_name = send_text
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
                 && !send_text.is_empty()
-                && send_text.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_');
+                && send_text
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_alphabetic() || c == '_');
 
             if is_function_name {
                 let code = format!("{}('{}')", send_text, timer_name.replace('\'', "\\'"));
@@ -6074,11 +6079,19 @@ mod tests {
             exec(engine, "counter = 0").unwrap();
 
             // First AddTimer with Replace flag
-            exec(engine, "AddTimer('t1', 0, 0, 1, '', 1 + 1024, 'counter = counter + 1')").unwrap();
+            exec(
+                engine,
+                "AddTimer('t1', 0, 0, 1, '', 1 + 1024, 'counter = counter + 1')",
+            )
+            .unwrap();
             exec(engine, "SetTimerOption('t1', 'group', 'g1')").unwrap();
 
             // Second AddTimer with Replace flag (should replace, not append)
-            exec(engine, "AddTimer('t1', 0, 0, 1, '', 1 + 1024, 'counter = counter + 10')").unwrap();
+            exec(
+                engine,
+                "AddTimer('t1', 0, 0, 1, '', 1 + 1024, 'counter = counter + 10')",
+            )
+            .unwrap();
             exec(engine, "SetTimerOption('t1', 'group', 'g1')").unwrap();
 
             // Only one timer should exist
