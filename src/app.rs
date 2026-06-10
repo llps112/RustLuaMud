@@ -390,7 +390,6 @@ impl App {
 
         match crate::lua::LuaEngine::new() {
             Ok(mut engine) => {
-
                 // 注入主机地址（供 GetInfo(1) 返回）
                 engine.set_host(&host);
 
