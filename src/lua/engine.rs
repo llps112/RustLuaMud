@@ -846,8 +846,7 @@ impl LuaEngine {
                                         .skip(1)
                                         .flatten()
                                         .map(|m| {
-                                            let (cow, _, _) =
-                                                encoding_rs::GBK.decode(m.as_bytes());
+                                            let (cow, _, _) = encoding_rs::GBK.decode(m.as_bytes());
                                             cow.into_owned()
                                         })
                                         .collect();
@@ -927,7 +926,10 @@ impl LuaEngine {
 
                 // 添加到日志（显示在输出窗口），除非被 omit
                 if !any_omit {
-                    state_rc_sim.borrow_mut().pending_logs.push(line.to_string());
+                    state_rc_sim
+                        .borrow_mut()
+                        .pending_logs
+                        .push(line.to_string());
                 }
             }
             Ok(())
@@ -7429,7 +7431,11 @@ mod tests {
             .unwrap();
             exec(engine, r#"Simulate("test_line\n")"#).unwrap();
             let cmds = engine.drain_commands();
-            assert!(cmds.contains(&"score".to_string()), "Simulate should not clear pending_commands, got: {:?}", cmds);
+            assert!(
+                cmds.contains(&"score".to_string()),
+                "Simulate should not clear pending_commands, got: {:?}",
+                cmds
+            );
         });
     }
 
@@ -7445,7 +7451,11 @@ mod tests {
             .unwrap();
             exec(engine, r#"Simulate("visible line\n")"#).unwrap();
             let logs = engine.drain_logs();
-            assert!(logs.iter().any(|l| l.contains("visible line")), "Simulate should add text to pending_logs, got: {:?}", logs);
+            assert!(
+                logs.iter().any(|l| l.contains("visible line")),
+                "Simulate should add text to pending_logs, got: {:?}",
+                logs
+            );
         });
     }
 
@@ -7462,7 +7472,11 @@ mod tests {
             .unwrap();
             exec(engine, r#"Simulate("hide_me\n")"#).unwrap();
             let logs = engine.drain_logs();
-            assert!(!logs.iter().any(|l| l.contains("hide_me")), "omit_from_output should suppress log, got: {:?}", logs);
+            assert!(
+                !logs.iter().any(|l| l.contains("hide_me")),
+                "omit_from_output should suppress log, got: {:?}",
+                logs
+            );
         });
     }
 
@@ -7497,7 +7511,11 @@ mod tests {
             .unwrap();
             exec(engine, r#"Simulate("go_now\n")"#).unwrap();
             let cmds = engine.drain_commands();
-            assert!(cmds.contains(&"go north".to_string()), "Simulate trigger callback should add to pending_commands via Execute, got: {:?}", cmds);
+            assert!(
+                cmds.contains(&"go north".to_string()),
+                "Simulate trigger callback should add to pending_commands via Execute, got: {:?}",
+                cmds
+            );
         });
     }
 
