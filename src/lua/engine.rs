@@ -1476,16 +1476,33 @@ impl LuaEngine {
             // 将脚本作为 send_text 存储，在 fire_timer 时执行
             let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
 
-            // Replace flag (1024): delete existing timer with same name first
-            if (flags & 1024) != 0 {
+            // Replace flag (1024): 替换同名定时器，保留旧定时器的启用状态
+            // 防止 closeclass 禁用定时器后被 AddTimer(Replace) 重新启用
+            let old_enabled = if (flags & 1024) != 0 {
+                let old_enabled = state_rc19
+                    .borrow()
+                    .timers
+                    .iter()
+                    .find(|t| t.name == name)
+                    .map(|t| t.enabled);
                 state_rc19.borrow_mut().timers.retain(|t| t.name != name);
-            }
+                old_enabled
+            } else {
+                None
+            };
+
+            let timer_enabled = match old_enabled {
+                // 替换旧定时器时：旧定时器若被禁用，新定时器继承禁用状态
+                Some(false) => false,
+                // 旧定时器启用或无旧定时器，按 flags 决定
+                _ => (flags & 1) != 0,
+            };
 
             state_rc19.borrow_mut().timers.push(TimerDef {
                 name,
                 interval_millis: interval_millis_u64,
                 callback,
-                enabled: (flags & 1) != 0,
+                enabled: timer_enabled,
                 group: String::new(),
                 one_shot,
                 send_text: script_name,
@@ -1704,6 +1721,11 @@ impl LuaEngine {
             Ok(())
         })?;
         globals.set("Disconnect", disconnect_fn)?;
+
+        // OnConnect() — 连接回调抽象接口，由 Lua 脚本覆盖实现具体逻辑
+        // 默认空函数（安全无操作），脚本可覆盖以执行连接后的初始化
+        let on_connect_fn = lua.create_function_mut(move |_, ()| Ok(()))?;
+        globals.set("OnConnect", on_connect_fn)?;
 
         // ============================================================
         // 工具函数
@@ -2722,28 +2744,15 @@ impl LuaEngine {
         self.state.borrow().variables.clone()
     }
 
-    /// 设置连接状态，连接成功时自动调用 alias.atconnect()
+    /// 设置连接状态，连接成功时自动调用 OnConnect()（由 Lua 脚本覆盖实现）
     pub fn set_connected(&mut self, connected: bool) {
-        eprintln!("[DEBUG] set_connected(connected={})", connected);
         let was_connected = self.state.borrow().connected;
         self.state.borrow_mut().connected = connected;
-        // 连接刚建立时，自动调用 alias.atconnect()（MUSHclient 兼容）
+        // 连接刚建立时，调用 OnConnect() 抽象接口
+        // Lua 脚本可通过覆盖 OnConnect() 实现连接后的初始化逻辑
         if connected && !was_connected {
-            eprintln!("[DEBUG] set_connected: about to call alias.atconnect()");
-            if let Err(e) = self.eval_code(
-                r#"
-                if alias_atconnect_wrapper then
-                    ColourNote("red", "black", "=== alias_atconnect_wrapper found ===")
-                    alias_atconnect_wrapper()
-                elseif alias and alias.atconnect then
-                    ColourNote("red", "black", "=== calling alias.atconnect ===")
-                    alias.atconnect()
-                else
-                    ColourNote("red", "black", "=== alias.atconnect not defined ===")
-                end
-                "#,
-            ) {
-                eprintln!("[DEBUG] set_connected eval_code error: {}", e);
+            if let Err(e) = self.eval_code("OnConnect()") {
+                eprintln!("[Lua] OnConnect() 执行失败: {}", e);
             }
         }
     }
@@ -4791,34 +4800,33 @@ mod tests {
     }
 
     #[test]
-    fn test_set_connected_calls_atconnect() {
+    fn test_set_connected_calls_on_connect() {
         let mut engine = LuaEngine::new().unwrap();
-        // 定义 alias.atconnect 函数，设置一个标志变量
+        // 覆盖 OnConnect 函数，设置一个标志变量
         exec(
             &engine,
             r#"
-            alias = {}
-            atconnect_called = false
-            function alias.atconnect()
-                atconnect_called = true
+            on_connect_called = false
+            OnConnect = function()
+                on_connect_called = true
             end
             "#,
         )
         .unwrap();
 
-        // 连接时应调用 alias.atconnect
+        // 连接时应调用 OnConnect
         engine.set_connected(true);
-        assert!(eval::<bool>(&engine, "return atconnect_called").unwrap());
+        assert!(eval::<bool>(&engine, "return on_connect_called").unwrap());
 
         // 重复调用 set_connected(true) 不应再次触发
-        exec(&engine, "atconnect_called = false").unwrap();
+        exec(&engine, "on_connect_called = false").unwrap();
         engine.set_connected(true);
-        assert!(!eval::<bool>(&engine, "return atconnect_called").unwrap());
+        assert!(!eval::<bool>(&engine, "return on_connect_called").unwrap());
 
         // 断开后重新连接应再次触发
         engine.set_connected(false);
         engine.set_connected(true);
-        assert!(eval::<bool>(&engine, "return atconnect_called").unwrap());
+        assert!(eval::<bool>(&engine, "return on_connect_called").unwrap());
     }
 
     #[test]
@@ -6103,6 +6111,45 @@ mod tests {
             let counter: i64 = eval(engine, "return counter").unwrap();
             // Should be 10 (from the replacement timer), not 11 (1+10 from both)
             assert_eq!(counter, 10);
+        });
+    }
+
+    #[test]
+    fn test_timer_replace_preserves_disabled_state() {
+        with_engine(|engine| {
+            exec(engine, "counter = 0").unwrap();
+
+            // Create a timer with group
+            exec(
+                engine,
+                "AddTimer('t2', 0, 0, 1, '', 1 + 1024, 'counter = counter + 1')",
+            )
+            .unwrap();
+            exec(engine, "SetTimerOption('t2', 'group', 'kill')").unwrap();
+
+            // Disable the group (simulating closeclass("kill"))
+            exec(engine, "EnableTimerGroup('kill', false)").unwrap();
+
+            // Replace the timer with AddTimer(Replace) — should inherit disabled state
+            exec(
+                engine,
+                "AddTimer('t2', 0, 0, 1, '', 1 + 1024, 'counter = counter + 10')",
+            )
+            .unwrap();
+            exec(engine, "SetTimerOption('t2', 'group', 'kill')").unwrap();
+
+            // Only one timer should exist
+            let count: i64 = eval(engine, "return #GetTimerList()").unwrap();
+            assert_eq!(count, 1);
+
+            // Timer should remain disabled (inherited from old timer)
+            let enabled: bool = eval(engine, "return GetTimerInfo('t2', 6)").unwrap();
+            assert!(!enabled, "Replaced timer should inherit disabled state");
+
+            // Fire the timer — should NOT fire since it's disabled
+            engine.fire_timer(0);
+            let counter: i64 = eval(engine, "return counter").unwrap();
+            assert_eq!(counter, 0, "Disabled timer should not fire after replace");
         });
     }
 

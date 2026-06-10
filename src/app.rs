@@ -378,12 +378,7 @@ impl App {
 
     /// 为指定连接初始化 Lua 引擎并加载脚本
     fn init_lua_for_session(&mut self, id: usize) -> io::Result<()> {
-        eprintln!("[DEBUG] init_lua_for_session({}) ENTER", id);
         if id >= self.manager.sessions.len() {
-            eprintln!(
-                "[DEBUG] init_lua_for_session({}) RETURN: id out of range",
-                id
-            );
             return Ok(());
         }
 
@@ -395,7 +390,7 @@ impl App {
 
         match crate::lua::LuaEngine::new() {
             Ok(mut engine) => {
-                eprintln!("[DEBUG] init_lua_for_session({}) LuaEngine created", id);
+
                 // 注入主机地址（供 GetInfo(1) 返回）
                 engine.set_host(&host);
 
@@ -415,10 +410,6 @@ impl App {
 
                 // 加载脚本
                 if let Some(ref path) = script_path {
-                    eprintln!(
-                        "[DEBUG] init_lua_for_session({}) loading script: {}",
-                        id, path
-                    );
                     match engine.load_script(path) {
                         Ok(()) => {
                             // 排空脚本加载期间 Execute 等压入的命令（如 "/set_dl()"、"score" 等）
@@ -464,10 +455,6 @@ impl App {
                 }
 
                 self.manager.sessions[id].lua_engine = Some(engine);
-                eprintln!(
-                    "[DEBUG] init_lua_for_session({}) engine set, syncing connection state...",
-                    id
-                );
                 // 同步连接状态：session.connect() 在创建事件通道前已设置 state，
                 // 初始 Connected 状态不会通过 StateChange 事件到达 engine，
                 // 此处手动同步，确保 engine 知道当前已连接并触发 alias.atconnect()
@@ -477,7 +464,6 @@ impl App {
                         crate::connection::SessionState::Connected
                     );
                     if is_connected {
-                        eprintln!("[DEBUG] init_lua_for_session({}) session is Connected, calling set_connected(true)", id);
                         let (queued_cmds, queued_logs) = {
                             match self.manager.sessions[id].lua_engine.as_mut() {
                                 Some(eng) => {
@@ -496,7 +482,7 @@ impl App {
                             self.terminal.append_output(msg)?;
                         }
                     } else {
-                        eprintln!("[DEBUG] init_lua_for_session({}) session state is NOT Connected (state={:?})", id, self.manager.sessions[id].state);
+                        // session 尚未连接，无需同步
                     }
                 }
                 // 启动定时器
