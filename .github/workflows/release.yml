@@ -23,8 +23,8 @@ jobs:
       - name: Package binary
         run: |
           mkdir -p release
-          cp target/release/rust-lua-mud release/
-          tar czf release/rust-lua-mud-linux-x86_64.tar.gz -C release rust-lua-mud
+          cp target/release/RustLuaMud release/
+          tar czf release/RustLuaMud-linux-x86_64.tar.gz -C release RustLuaMud
 
       - name: Generate changelog
         id: changelog
@@ -50,4 +50,4 @@ jobs:
             ## Changes
             ${{ steps.changelog.outputs.changelog }}
           files: |
-            release/rust-lua-mud-linux-x86_64.tar.gz
+            release/RustLuaMud-linux-x86_64.tar.gz

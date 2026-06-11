@@ -8,9 +8,31 @@ use crossterm::{
 use std::io::{self, Write};
 
 use crate::connection::{SessionInfo, SessionState};
-use crate::ui::ensure_ansi_reset;
+use crate::ui::{ensure_ansi_reset, AnsiParser};
 
-/// 透传原始字符串，让终端原生处理制表符（\t）
+/// 提取字符串中最后一组 CSI SGR 序列（形如 \x1b[...m），返回完整序列
+fn extract_last_sgr(s: &str) -> Option<String> {
+    let mut last = None;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            let mut seq = String::from("\x1b[");
+            chars.next(); // consume '['
+            while let Some(&next) = chars.peek() {
+                seq.push(next);
+                if next == 'm' {
+                    chars.next(); // consume 'm'
+                    break;
+                }
+                chars.next();
+            }
+            if seq.ends_with('m') {
+                last = Some(seq);
+            }
+        }
+    }
+    last
+}
 /// 终端驱动会按当前光标列位置执行 TAB 跳格，与 MushClient 行为一致
 fn expand_tabs(s: &str) -> String {
     s.to_string()
@@ -116,6 +138,8 @@ pub struct TerminalState {
     pub keep_command: bool,
     /// Enter 后下次按键先清空输入（模拟"全选替换"行为）
     pub clear_on_next_key: bool,
+    /// 最近一次看到的 ANSI SGR 颜色序列，用于跨行颜色继承
+    pub last_ansi_sgr: String,
 }
 
 impl TerminalState {
@@ -136,6 +160,7 @@ impl TerminalState {
             lua_status_cache: None,
             keep_command: true,
             clear_on_next_key: false,
+            last_ansi_sgr: String::new(),
         }
     }
 
@@ -146,12 +171,46 @@ impl TerminalState {
     }
 
     /// 追加输出行到缓冲区（纯逻辑，不涉及 IO）
-    /// 自动确保每行行尾 ANSI 状态为 reset，防止颜色泄漏到后续行
+    /// 追踪最近一次看到的 ANSI SGR 颜色序列，对有文本但无自身 ANSI 的行
+    /// 自动补上颜色前缀，实现行间颜色继承（如服务器在 ">" 行设置红色，
+    /// 下一行"面色凝重"无 ANSI，自动继承红色）
     pub fn push_output(&mut self, line: &str) {
         for part in line.split_inclusive('\n') {
             let trimmed = part.trim_end_matches('\n').trim_end_matches('\r');
             if !trimmed.is_empty() {
-                self.output_lines.push(ensure_ansi_reset(trimmed));
+                let stripped = AnsiParser::strip_ansi(trimmed);
+                // 提取本行的 SGR 序列和 reset 标记
+                let last_sgr = extract_last_sgr(trimmed);
+                let has_reset = trimmed.contains("\x1b[0m");
+
+                if stripped.is_empty() {
+                    // 纯 ANSI 行（不可见）：只更新状态，不加入输出
+                    if has_reset {
+                        self.last_ansi_sgr.clear();
+                    } else if let Some(sgr) = last_sgr {
+                        self.last_ansi_sgr = sgr;
+                    }
+                } else if last_sgr.is_some() {
+                    // 有可见文本且自身带 ANSI：保存颜色，加入输出（附 reset）
+                    if !has_reset {
+                        if let Some(sgr) = &last_sgr {
+                            self.last_ansi_sgr = sgr.clone();
+                        }
+                    } else {
+                        self.last_ansi_sgr.clear();
+                    }
+                    self.output_lines.push(ensure_ansi_reset(trimmed));
+                } else if !self.last_ansi_sgr.is_empty() {
+                    // 可见文本，无自身 ANSI，但有继承的颜色：补上颜色
+                    let mut final_line = String::new();
+                    final_line.push_str(&self.last_ansi_sgr);
+                    final_line.push_str(trimmed);
+                    final_line.push_str("\x1b[0m");
+                    self.output_lines.push(final_line);
+                } else {
+                    // 纯文本，无颜色继承：直接加入
+                    self.output_lines.push(trimmed.to_string());
+                }
             }
         }
         // 限制缓冲区大小
@@ -256,7 +315,7 @@ impl TerminalState {
                 None
             }
 
-            (KeyModifiers::NONE, KeyCode::Char(c)) => {
+            (KeyModifiers::SHIFT, KeyCode::Char(c)) | (KeyModifiers::NONE, KeyCode::Char(c)) => {
                 // 全选替换：若 clear_on_next_key 为真，先清空输入
                 if self.clear_on_next_key {
                     self.input_buffer.clear();
@@ -502,6 +561,7 @@ impl Terminal {
     /// 替换整个输出缓冲区（切换前台连接时使用）
     pub fn replace_output(&mut self, lines: &[String]) -> io::Result<()> {
         self.state.output_lines = lines.to_vec();
+        self.state.last_ansi_sgr.clear(); // 切换连接时清除累积的颜色前缀
         let mut stdout = io::stdout();
         self.refresh_all(&mut stdout)?;
         Ok(())
@@ -1093,5 +1153,156 @@ mod tests {
         // Up 取消标志
         let _ = state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert!(!state.clear_on_next_key);
+    }
+
+    // === extract_last_sgr 测试 ===
+
+    #[test]
+    fn test_extract_last_sgr_none() {
+        assert_eq!(extract_last_sgr("plain text"), None);
+        assert_eq!(extract_last_sgr(""), None);
+    }
+
+    #[test]
+    fn test_extract_last_sgr_single() {
+        assert_eq!(
+            extract_last_sgr("\x1b[31mred text"),
+            Some("\x1b[31m".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_last_sgr_at_end() {
+        assert_eq!(
+            extract_last_sgr("> \x1b[1;31m"),
+            Some("\x1b[1;31m".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_last_sgr_multiple() {
+        assert_eq!(
+            extract_last_sgr("\x1b[33mhello\x1b[32mworld\x1b[31m"),
+            Some("\x1b[31m".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_last_sgr_with_reset() {
+        assert_eq!(
+            extract_last_sgr("\x1b[31mred\x1b[0m"),
+            Some("\x1b[0m".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_last_sgr_only_ansi() {
+        assert_eq!(
+            extract_last_sgr("\x1b[1;31m"),
+            Some("\x1b[1;31m".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_last_sgr_bright_color() {
+        assert_eq!(
+            extract_last_sgr("\x1b[91m"),
+            Some("\x1b[91m".to_string())
+        );
+    }
+
+    // === 颜色继承测试 ===
+
+    #[test]
+    fn test_push_output_plain_text_no_inherit() {
+        let mut state = TerminalState::new(80, 24);
+        // 无颜色前缀时，纯文本不变
+        state.push_output("plain text");
+        assert_eq!(state.output_lines[0], "plain text");
+        assert!(state.last_ansi_sgr.is_empty());
+    }
+
+    #[test]
+    fn test_push_output_colored_line_saves_sgr() {
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("\x1b[1;31m> ");
+        // 行尾应自动追加 reset
+        assert_eq!(state.output_lines[0], "\x1b[1;31m> \x1b[0m");
+        // 颜色应保存到 last_ansi_sgr
+        assert_eq!(state.last_ansi_sgr, "\x1b[1;31m");
+    }
+
+    #[test]
+    fn test_push_output_colored_line_with_reset_clears_sgr() {
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("\x1b[1;31m> \x1b[0m");
+        // 自带 reset 的行应清除 last_ansi_sgr
+        assert!(state.last_ansi_sgr.is_empty());
+    }
+
+    #[test]
+    fn test_push_output_inherit_color_to_next_line() {
+        let mut state = TerminalState::new(80, 24);
+        // 模拟：同一批次收到 "> "（带红）和"面色凝重"（无 ANSI）
+        state.push_output("\x1b[1;31m> \n面色凝重");
+        assert_eq!(state.output_lines.len(), 2);
+        // 第1行：红色 >
+        assert_eq!(state.output_lines[0], "\x1b[1;31m> \x1b[0m");
+        // 第2行：继承红色 → 自动补上 \x1b[1;31m
+        assert_eq!(state.output_lines[1], "\x1b[1;31m面色凝重\x1b[0m");
+    }
+
+    #[test]
+    fn test_push_output_inherit_does_not_override_own_ansi() {
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("\x1b[1;31m> ");
+        assert_eq!(state.last_ansi_sgr, "\x1b[1;31m");
+        // 下一行有自身 ANSI，不应被覆盖
+        state.push_output("\x1b[32mgreen text");
+        assert_eq!(state.output_lines[1], "\x1b[32mgreen text\x1b[0m");
+        assert_eq!(state.last_ansi_sgr, "\x1b[32m"); // 更新为绿色
+    }
+
+    #[test]
+    fn test_push_output_pure_ansi_line_saves_sgr() {
+        let mut state = TerminalState::new(80, 24);
+        // 纯 ANSI 行（不可见字符）
+        state.push_output("\x1b[1;31m");
+        // 不可见行不加入输出
+        assert!(state.output_lines.is_empty());
+        // 但状态已保存
+        assert_eq!(state.last_ansi_sgr, "\x1b[1;31m");
+    }
+
+    #[test]
+    fn test_push_output_pure_ansi_reset_clears_sgr() {
+        let mut state = TerminalState::new(80, 24);
+        // 先设颜色，再发 reset
+        state.push_output("\x1b[1;31m");
+        assert_eq!(state.last_ansi_sgr, "\x1b[1;31m");
+        state.push_output("\x1b[0m");
+        assert!(state.last_ansi_sgr.is_empty());
+        // 后面的纯文本不应被着色
+        state.push_output("normal text");
+        assert_eq!(state.output_lines[0], "normal text");
+    }
+
+    #[test]
+    fn test_push_output_ansi_line_between_text() {
+        let mut state = TerminalState::new(80, 24);
+        // 模拟服务器发送：ANSI色 + 文本 + ANSI重置
+        state.push_output("\x1b[1;31m看起来红衣武士想杀死你！\x1b[0m");
+        assert_eq!(state.output_lines.len(), 1);
+        assert!(state.last_ansi_sgr.is_empty()); // reset 已清除
+    }
+
+    #[test]
+    fn test_push_output_separate_calls_inherit() {
+        let mut state = TerminalState::new(80, 24);
+        // 分两次调用（不同 TCP 包）
+        state.push_output("\x1b[1;31m> ");
+        state.push_output("面色凝重");
+        assert_eq!(state.output_lines[0], "\x1b[1;31m> \x1b[0m");
+        assert_eq!(state.output_lines[1], "\x1b[1;31m面色凝重\x1b[0m");
     }
 }

@@ -35,7 +35,7 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 cargo build --release
 ```
 
-编译产物位于 `target/release/rust-lua-mud`。
+编译产物位于 `target/release/RustLuaMud`。
 
 ### 配置
 
@@ -71,7 +71,7 @@ password = "your_password"
 ### 运行
 
 ```bash
-./target/release/rust-lua-mud
+./target/release/RustLuaMud
 ```
 
 ### 文档

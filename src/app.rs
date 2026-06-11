@@ -330,7 +330,20 @@ impl App {
             Ok(()) => {
                 let msg = format!("[系统] 连接 {} ({}) 重连成功", session_id + 1, name);
                 self.terminal.append_output(&msg)?;
-                self.init_lua_for_session(session_id)?;
+                // 如果 Lua 引擎已存在（重连前已加载脚本），不重建引擎，
+                // 保留 Lua 变量状态（stat.* 等统计数据）。仅通知引擎已连接以触发 OnConnect。
+                // 若引擎不存在（首次连接或未加载脚本），则执行标准初始化流程。
+                if session_id < self.manager.sessions.len()
+                    && self.manager.sessions[session_id].lua_engine.is_some()
+                {
+                    if let Some(ref mut engine) =
+                        self.manager.sessions[session_id].lua_engine
+                    {
+                        engine.set_connected(true);
+                    }
+                } else {
+                    self.init_lua_for_session(session_id)?;
+                }
                 // 重连后刷新状态栏（Lua 脚本可能调用了 SetStatus）
                 if session_id == self.manager.foreground_id {
                     self.update_status_bar()?;
@@ -1041,11 +1054,9 @@ impl App {
                 if id < self.manager.sessions.len() {
                     self.manager.sessions[id].state = state.clone();
                 }
-                // 同步 Lua 引擎的连接状态
-                if id == self.manager.foreground_id {
-                    if let Some(ref mut engine) = self.manager.sessions[id].lua_engine {
-                        engine.set_connected(matches!(state, SessionState::Connected));
-                    }
+                // 同步 Lua 引擎的连接状态（同步到对应 session，不限于前台）
+                if let Some(ref mut engine) = self.manager.sessions[id].lua_engine {
+                    engine.set_connected(matches!(state, SessionState::Connected));
                 }
                 if id == self.manager.foreground_id {
                     self.update_status_bar()?;
