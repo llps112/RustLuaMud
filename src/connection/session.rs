@@ -211,9 +211,8 @@ impl Session {
                                                 String::from_utf8_lossy(&cleaned).into_owned()
                                             }
                                         };
-                                        let _ = event_tx_read
-                                            .send(SessionEvent::Data(line_str))
-                                            .await;
+                                        let _ =
+                                            event_tx_read.send(SessionEvent::Data(line_str)).await;
                                     }
                                 }
                                 byte_buf.clear();

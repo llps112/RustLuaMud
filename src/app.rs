@@ -347,8 +347,7 @@ impl App {
                     };
                     for cmd in &queued_cmds {
                         if let Err(e) = self.manager.send_to(session_id, cmd) {
-                            self.terminal
-                                .append_output(&format!("[发送错误] {}", e))?;
+                            self.terminal.append_output(&format!("[发送错误] {}", e))?;
                         }
                     }
                     for msg in &queued_logs {
@@ -677,7 +676,8 @@ impl App {
         if let Some(cmd) = self.terminal.handle_key(key) {
             // 用户按了 Enter，提交命令
             if !cmd.is_empty() {
-                self.terminal.append_output(&format!("> \x1b[33m{}\x1b[0m", cmd))?;
+                self.terminal
+                    .append_output(&format!("> \x1b[33m{}\x1b[0m", cmd))?;
                 // 处理内置命令（以 / 开头）
                 if cmd.starts_with('/') {
                     self.handle_builtin_command(&cmd)?;
