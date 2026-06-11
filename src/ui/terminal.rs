@@ -1205,10 +1205,7 @@ mod tests {
 
     #[test]
     fn test_extract_last_sgr_bright_color() {
-        assert_eq!(
-            extract_last_sgr("\x1b[91m"),
-            Some("\x1b[91m".to_string())
-        );
+        assert_eq!(extract_last_sgr("\x1b[91m"), Some("\x1b[91m".to_string()));
     }
 
     // === 颜色继承测试 ===

@@ -336,9 +336,7 @@ impl App {
                 if session_id < self.manager.sessions.len()
                     && self.manager.sessions[session_id].lua_engine.is_some()
                 {
-                    if let Some(ref mut engine) =
-                        self.manager.sessions[session_id].lua_engine
-                    {
+                    if let Some(ref mut engine) = self.manager.sessions[session_id].lua_engine {
                         engine.set_connected(true);
                     }
                 } else {
