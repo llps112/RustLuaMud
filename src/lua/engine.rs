@@ -1793,6 +1793,7 @@ impl LuaEngine {
             }
             35 => {
                 // MushClient: GetInfo(35) = Script file name (full path)
+                // 保持反斜杠路径格式以兼容 MushClient 移植脚本
                 let path = script_path_rc.borrow().clone();
                 match path {
                     Some(p) => {

@@ -357,22 +357,54 @@ impl TerminalState {
 
     /// 获取输入行显示内容（考虑滚动）
     pub fn input_display(&self) -> (String, usize) {
+        use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
         let prompt_len: usize = 2; // "> "
         let avail_width = self.width as usize - prompt_len;
-        let char_count = self.input_buffer.chars().count();
-        let display_start = if self.input_cursor > avail_width {
-            self.input_cursor - avail_width + 1
+        let chars: Vec<char> = self.input_buffer.chars().collect();
+        let total_chars = chars.len();
+
+        // 计算每个字符的显示宽度
+        let char_widths: Vec<usize> = chars.iter().map(|c| c.width().unwrap_or(0)).collect();
+
+        // 确定显示起始字符索引：根据光标的列位置滚动
+        let cursor_col_before = char_widths[..self.input_cursor].iter().sum::<usize>();
+        let display_start = if cursor_col_before >= avail_width {
+            // 从光标位置向前找足够宽度作为显示起点
+            let mut col = 0;
+            let mut start = self.input_cursor;
+            for i in (0..self.input_cursor).rev() {
+                if col + char_widths[i] > avail_width - 1 {
+                    break;
+                }
+                col += char_widths[i];
+                start = i;
+            }
+            start
         } else {
             0
         };
-        let display_end = std::cmp::min(display_start + avail_width, char_count);
-        let display_str: String = self
-            .input_buffer
-            .chars()
-            .skip(display_start)
-            .take(display_end - display_start)
-            .collect();
-        let cursor_x = prompt_len + self.input_cursor - display_start;
+
+        // 计算显示结束字符索引
+        let mut display_col = 0;
+        let mut display_end = total_chars;
+        for i in display_start..total_chars {
+            if display_col + char_widths[i] > avail_width {
+                display_end = i;
+                break;
+            }
+            display_col += char_widths[i];
+        }
+
+        let display_str: String = chars[display_start..display_end].iter().collect();
+
+        // 光标在显示区域内的列位置
+        let cursor_col_in_display: usize = if self.input_cursor <= display_start {
+            0
+        } else {
+            char_widths[display_start..self.input_cursor].iter().sum()
+        };
+        let cursor_x = prompt_len + cursor_col_in_display;
         (display_str, cursor_x)
     }
 }
