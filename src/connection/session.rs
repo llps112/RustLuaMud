@@ -178,9 +178,9 @@ impl Session {
             use std::os::unix::io::AsRawFd;
             let fd = std_stream.as_raw_fd();
             let enable: libc::c_int = 1;
-            let idle: libc::c_int = 15;  // 空闲 15 秒后开始探测
-            let intvl: libc::c_int = 5;  // 探测间隔 5 秒
-            let cnt: libc::c_int = 3;    // 3 次失败后断开（最多 15+3*5=30 秒）
+            let idle: libc::c_int = 15; // 空闲 15 秒后开始探测
+            let intvl: libc::c_int = 5; // 探测间隔 5 秒
+            let cnt: libc::c_int = 3; // 3 次失败后断开（最多 15+3*5=30 秒）
             unsafe {
                 libc::setsockopt(
                     fd,

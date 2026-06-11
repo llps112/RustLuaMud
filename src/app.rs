@@ -600,7 +600,8 @@ impl App {
             .unwrap_or_default();
         for data in raw_packets {
             if let Err(e) = self.manager.send_raw(session_id, data) {
-                self.terminal.append_output(&format!("[发送原始数据错误] {}", e))?;
+                self.terminal
+                    .append_output(&format!("[发送原始数据错误] {}", e))?;
             }
         }
         Ok(())

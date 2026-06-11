@@ -791,13 +791,12 @@ impl LuaEngine {
 
         // SendPkt(data) — MushClient API: 发送原始数据包到 MUD
         let state_rc_pkt = state_rc.clone();
-        let send_pkt_fn = lua.create_function_mut(
-            move |_, data: mlua::String| -> LuaResult<i64> {
+        let send_pkt_fn =
+            lua.create_function_mut(move |_, data: mlua::String| -> LuaResult<i64> {
                 let bytes = data.as_bytes().to_vec();
                 state_rc_pkt.borrow_mut().pending_raw.push(bytes);
                 Ok(0)
-            },
-        )?;
+            })?;
         globals.set("SendPkt", send_pkt_fn)?;
 
         // Simulate(text...) — MushClient API: 模拟 MUD 输出，触发匹配的触发器
@@ -1251,27 +1250,25 @@ impl LuaEngine {
                 if let Some(t) = state.triggers.iter().find(|t| t.name == name) {
                     match code {
                         1 => Ok(Value::String(lua.create_string(&t.name)?)),
-                        2 => Ok(Value::String(lua.create_string(
-                            &match &t.pattern {
-                                TriggerPattern::Utf8(re) => re.as_str().to_string(),
-                                TriggerPattern::Gbk(_) => "<gbk pattern>".to_string(),
-                            }
-                        )?)),
+                        2 => Ok(Value::String(lua.create_string(&match &t.pattern {
+                            TriggerPattern::Utf8(re) => re.as_str().to_string(),
+                            TriggerPattern::Gbk(_) => "<gbk pattern>".to_string(),
+                        })?)),
                         4 => {
                             let mut flags = 0i64;
-                            if t.enabled { flags |= 1; }
+                            if t.enabled {
+                                flags |= 1;
+                            }
                             Ok(Value::Integer(flags))
                         }
                         5 => Ok(Value::Integer(0)),
                         6 => Ok(Value::Integer(t.sequence as i64)),
                         7 => Ok(Value::Boolean(true)), // Keep evaluating (MushClient 默认 true)
                         8 => Ok(Value::Boolean(t.enabled)),
-                        9 => Ok(Value::String(lua.create_string(
-                            &match &t.pattern {
-                                TriggerPattern::Utf8(re) => re.as_str().to_string(),
-                                TriggerPattern::Gbk(_) => "<gbk pattern>".to_string(),
-                            }
-                        )?)),
+                        9 => Ok(Value::String(lua.create_string(&match &t.pattern {
+                            TriggerPattern::Utf8(re) => re.as_str().to_string(),
+                            TriggerPattern::Gbk(_) => "<gbk pattern>".to_string(),
+                        })?)),
                         26 => {
                             let group = t.group.clone();
                             Ok(Value::String(lua.create_string(&group)?))
@@ -1520,10 +1517,7 @@ impl LuaEngine {
                                 let pattern = pattern.to_string();
                                 let re_str = convert_pcre_to_rust_regex(&pattern);
                                 let re = Regex::new(&re_str).map_err(|e| {
-                                    mlua::Error::external(format!(
-                                        "无效正则 '{}': {}",
-                                        re_str, e
-                                    ))
+                                    mlua::Error::external(format!("无效正则 '{}': {}", re_str, e))
                                 })?;
                                 a.pattern = re;
                             }
@@ -1663,7 +1657,7 @@ impl LuaEngine {
         })?;
         globals.set("GetTimerList", get_timer_list_fn)?;
 
-                        // GetTimerInfo(name, code) — MushClient API 兼容
+        // GetTimerInfo(name, code) — MushClient API 兼容
         // code 6 = enabled (Boolean), 7 = one_shot (Boolean), 8 = at_time (Boolean), 19 = group (String)
         let state_rc22 = state_rc.clone();
         let get_timer_info_fn =
@@ -1675,7 +1669,7 @@ impl LuaEngine {
                         6 => Ok(Value::Boolean(t.enabled)), // enabled
                         7 => Ok(Value::Boolean(t.one_shot)), // one shot
                         8 => Ok(Value::Boolean(t.at_time)), // "At" timer flag
-                        14 => Ok(Value::Boolean(false)), // temporary flag (not tracked)
+                        14 => Ok(Value::Boolean(false)),    // temporary flag (not tracked)
                         19 => {
                             let group = t.group.clone();
                             Ok(Value::String(lua.create_string(&group)?))
@@ -2617,10 +2611,9 @@ impl LuaEngine {
         eprintln!("{}", msg);
         // 使用 try_borrow_mut 避免在 RefCell 已被借用时 panic
         if let Ok(mut state) = self.state.try_borrow_mut() {
-            state.pending_logs.push(format!(
-                "[Lua] {}",
-                crate::ui::AnsiParser::strip_ansi(msg)
-            ));
+            state
+                .pending_logs
+                .push(format!("[Lua] {}", crate::ui::AnsiParser::strip_ansi(msg)));
         }
     }
 
@@ -2850,15 +2843,11 @@ impl LuaEngine {
                 for (i, m) in caps_list.iter().enumerate() {
                     code = code.replace(&format!("%{}", i + 1), m);
                 }
-                let lua_result =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let _ = self.lua.load(&code).exec();
-                    }));
+                let lua_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = self.lua.load(&code).exec();
+                }));
                 if lua_result.is_err() {
-                    self.log_error(&format!(
-                        "别名 send_to=12 执行中发生 panic: {}",
-                        code
-                    ));
+                    self.log_error(&format!("别名 send_to=12 执行中发生 panic: {}", code));
                 }
             } else {
                 // 脚本函数方式：以 (name, line, wildcards_table) 签名调用
@@ -2903,10 +2892,7 @@ impl LuaEngine {
         };
         if idle_time >= idle_threshold {
             // IAC NOP = \xff\xf1，telnet 标准心跳
-            self.state
-                .borrow_mut()
-                .pending_raw
-                .push(vec![0xff, 0xf1]);
+            self.state.borrow_mut().pending_raw.push(vec![0xff, 0xf1]);
         }
     }
 
@@ -2933,8 +2919,8 @@ impl LuaEngine {
         }
 
         // 步骤2: 读取定时器信息
-        let (callback, send_text, one_shot, timer_name) = match std::panic::catch_unwind(
-            std::panic::AssertUnwindSafe(|| {
+        let (callback, send_text, one_shot, timer_name) =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let state = self.state.borrow();
                 if index < state.timers.len() && state.timers[index].enabled {
                     Some((
@@ -2946,18 +2932,17 @@ impl LuaEngine {
                 } else {
                     None
                 }
-            }),
-        ) {
-            Ok(Some(v)) => v,
-            Ok(None) => return,
-            Err(_) => {
-                self.log_error(&format!(
-                    "fire_timer[{}] 步骤2(读取定时器信息) panic",
-                    index
-                ));
-                return;
-            }
-        };
+            })) {
+                Ok(Some(v)) => v,
+                Ok(None) => return,
+                Err(_) => {
+                    self.log_error(&format!(
+                        "fire_timer[{}] 步骤2(读取定时器信息) panic",
+                        index
+                    ));
+                    return;
+                }
+            };
 
         // 步骤3: 调用回调
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2988,11 +2973,13 @@ impl LuaEngine {
                         .map_or(false, |c| c.is_alphabetic() || c == '_');
 
                 let result: Result<(), String> = if is_function_name {
-                    let code =
-                        format!("{}('{}')", send_text, timer_name.replace('\'', "\\'"));
+                    let code = format!("{}('{}')", send_text, timer_name.replace('\'', "\\'"));
                     self.lua.load(&code).exec().map_err(|e| format!("{}", e))
                 } else {
-                    self.lua.load(&send_text).exec().map_err(|e| format!("{}", e))
+                    self.lua
+                        .load(&send_text)
+                        .exec()
+                        .map_err(|e| format!("{}", e))
                 };
                 result
             }));
@@ -3115,12 +3102,11 @@ impl LuaEngine {
         // 连接刚建立时，调用 OnConnect() 抽象接口
         // Lua 脚本可通过覆盖 OnConnect() 实现连接后的初始化逻辑
         if connected && !was_connected {
-            let lua_result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if let Err(e) = self.eval_code("OnConnect()") {
-                        self.log_error(&format!("OnConnect() 执行失败: {}", e));
-                    }
-                }));
+            let lua_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Err(e) = self.eval_code("OnConnect()") {
+                    self.log_error(&format!("OnConnect() 执行失败: {}", e));
+                }
+            }));
             if lua_result.is_err() {
                 self.log_error("OnConnect() 执行中发生 panic，已捕获以防止崩溃");
             }
@@ -4361,11 +4347,8 @@ mod tests {
     fn test_set_alias_option_sequence() {
         with_engine(|engine| {
             exec(engine, "AddAlias('seq_alias', 'test', '', 1)").unwrap();
-            let result: i64 = eval(
-                engine,
-                "return SetAliasOption('seq_alias', 'sequence', 50)",
-            )
-            .unwrap();
+            let result: i64 =
+                eval(engine, "return SetAliasOption('seq_alias', 'sequence', 50)").unwrap();
             assert_eq!(result, 0);
         });
     }
@@ -4484,7 +4467,10 @@ mod tests {
             // 设一个过去的时间戳，定时器应立即到期
             exec(engine, "SetTimerOption('ts_timer', 'timer_timestamp', 100)").unwrap();
             let fired = engine.fire_next_due_timer();
-            assert!(fired, "past timestamp should cause timer to fire immediately");
+            assert!(
+                fired,
+                "past timestamp should cause timer to fire immediately"
+            );
         });
     }
 
