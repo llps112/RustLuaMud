@@ -10,27 +10,26 @@
 
 - **参数**: `code` (integer) - 信息代码
 - **返回值**: 根据 code 不同返回不同类型
-- **支持的 code**:
+- **支持的 code**（MushClient 标准）:
 
   | code | 说明 | 返回值类型 | 示例 |
   |------|------|-----------|------|
-  | 1 | 主机地址 | string | "mud.example.com" |
-  | 2 | 端口 | integer | 6666 |
-  | 3 | 是否已连接 | boolean | true/false |
-  | 4 | 连接 ID | integer | 1 |
-  | 5 | 插件 ID | string | "" |
-  | 6 | 脚本引擎版本 | string | "Lua 5.4" |
-  | 7 | 世界名称 | string | 配置名称 |
-  | 35 | 脚本目录 | string | "/path/to/scripts/" |
-  | 204 | 数据包计数 | integer | 网络数据包计数 |
+  | 1 | 服务器地址 (Server name) | string | "mud.example.com" |
+  | 2 | 世界名称 (World name) | string | "我的世界" |
+  | 3 | 角色名 (Character name) | string | "张三" |
+  | 35 | 脚本文件名 (Script file name) | string | "scripts\\myscript.lua" |
+  | 56 | MUSHclient 应用程序路径 | string | 本引擎不支持，返回空串 |
+  | 58 | 日志文件默认目录 | string | "scripts\\" |
+  | 204 | 已接收数据包数 | integer | 网络数据包计数 |
 
 - **示例**:
   ```lua
-  local host = GetInfo(1)           -- 获取主机地址
-  local port = GetInfo(2)           -- 获取端口
-  local connected = GetInfo(3)      -- 获取连接状态
-  local script_dir = GetInfo(35)    -- 获取脚本目录
-  local packets = GetInfo(204)      -- 获取数据包计数
+  local host = GetInfo(1)               -- 获取服务器地址
+  local world_name = GetInfo(2)         -- 获取世界名称
+  local char_name = GetInfo(3)          -- 获取角色名
+  local script_file = GetInfo(35)       -- 获取脚本文件名
+  local log_dir = GetInfo(58)           -- 获取日志目录
+  local packets = GetInfo(204)          -- 获取数据包计数
   ```
 
 ---

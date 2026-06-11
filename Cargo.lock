@@ -725,6 +725,7 @@ dependencies = [
  "crossterm",
  "encoding_rs",
  "futures",
+ "libc",
  "mlua",
  "regex",
  "rusqlite",

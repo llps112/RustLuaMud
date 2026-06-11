@@ -91,18 +91,16 @@
   | info_type | 说明 | 返回值类型 |
   |-----------|------|-----------|
   | 1 | 名称 | string |
-  | 2 | 小时 | number |
-  | 3 | 分钟 | number |
-  | 4 | 秒 | number |
-  | 5 | 标志位 | integer |
   | 6 | 是否启用 | boolean |
-  | 7 | 所属组 | string |
-  | 8 | 间隔（秒） | number |
+  | 7 | 一次性 (one-shot) | boolean |
+  | 8 | 指定时刻触发 (At timer) | boolean |
+  | 14 | 临时定时器 | boolean |
+  | 19 | 所属组 | string |
 
 - **示例**:
   ```lua
   local enabled = GetTimerInfo("t1", 6)  -- 获取启用状态
-  local group = GetTimerInfo("t1", 7)    -- 获取所属组
+  local group = GetTimerInfo("t1", 19)   -- 获取所属组
   ```
 
 ---
@@ -115,11 +113,14 @@
   | option | 说明 | value 类型 |
   |--------|------|-----------|
   | "group" | 设置所属组 | string |
-  | "timer_timestamp" | 设置时间戳 | number |
+  | "timer_timestamp" | 设置时间戳（Unix 时间戳） | number |
+  | "enabled" | 启用/禁用 | boolean/number |
 
 - **示例**:
   ```lua
   SetTimerOption("t1", "group", "my_group")
+  -- timer_timestamp: 设置为当前时间相当于重置计时器
+  SetTimerOption("t1", "timer_timestamp", os.time())
   ```
 
 ---

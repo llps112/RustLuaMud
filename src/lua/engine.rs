@@ -279,6 +279,7 @@ pub struct Alias {
     pub group: String,
     pub send_to: i64,
     pub response: String,
+    pub sequence: i32,
 }
 
 /// 定时器定义
@@ -289,6 +290,7 @@ pub struct TimerDef {
     pub enabled: bool,
     pub group: String,
     pub one_shot: bool,
+    pub at_time: bool,
     pub send_text: String,
     pub last_fired: std::time::Instant,
 }
@@ -307,6 +309,7 @@ struct ScriptState {
     timers: Vec<TimerDef>,
     variables: HashMap<String, String>,
     pending_commands: Vec<String>,
+    pending_raw: Vec<Vec<u8>>,
     pending_logs: Vec<String>,
     recent_lines: Vec<String>,
     unique_counter: u64,
@@ -314,9 +317,15 @@ struct ScriptState {
     connect_requested: bool,
     disconnect_requested: bool,
     host: String,
+    port: u16,
+    world_name: String,
+    char_name: String,
+    packet_count: u64,
     status_text: String,
     /// 当前加载脚本的编码，用于决定触发器匹配模式
     current_encoding: ScriptEncoding,
+    /// 上次收到服务器数据的时间（用于空闲心跳检测）
+    last_server_data: std::time::Instant,
 }
 
 /// Lua 引擎与脚本运行时
@@ -590,7 +599,7 @@ fn colour_to_ansi_bg(name: &str) -> u8 {
 pub struct LuaEngine {
     lua: Lua,
     state: Rc<RefCell<ScriptState>>,
-    script_path: Option<String>,
+    script_path: Rc<RefCell<Option<String>>>,
     script_dir: Rc<RefCell<Option<String>>>,
 }
 
@@ -705,6 +714,7 @@ impl LuaEngine {
             timers: Vec::new(),
             variables: HashMap::new(),
             pending_commands: Vec::new(),
+            pending_raw: Vec::new(),
             pending_logs: Vec::new(),
             recent_lines: Vec::new(),
             unique_counter: 0,
@@ -712,16 +722,22 @@ impl LuaEngine {
             connect_requested: false,
             disconnect_requested: false,
             host: String::new(),
+            port: 0,
+            world_name: String::new(),
+            char_name: String::new(),
+            packet_count: 0,
             status_text: String::new(),
             current_encoding: ScriptEncoding::Utf8,
+            last_server_data: std::time::Instant::now(),
         }));
 
         let script_dir = Rc::new(RefCell::new(None::<String>));
+        let script_path = Rc::new(RefCell::new(None::<String>));
 
         let mut engine = Self {
             lua,
             state,
-            script_path: None,
+            script_path,
             script_dir,
         };
         engine.register_api()?;
@@ -735,7 +751,7 @@ impl LuaEngine {
         } else {
             *self.script_dir.borrow_mut() = Some("./".to_string());
         }
-        self.script_path = Some(path.to_string());
+        *self.script_path.borrow_mut() = Some(path.to_string());
     }
 
     /// 注册 Lua API
@@ -772,6 +788,17 @@ impl LuaEngine {
             Ok(())
         })?;
         globals.set("DiscardQueue", discard_queue_fn)?;
+
+        // SendPkt(data) — MushClient API: 发送原始数据包到 MUD
+        let state_rc_pkt = state_rc.clone();
+        let send_pkt_fn = lua.create_function_mut(
+            move |_, data: mlua::String| -> LuaResult<i64> {
+                let bytes = data.as_bytes().to_vec();
+                state_rc_pkt.borrow_mut().pending_raw.push(bytes);
+                Ok(0)
+            },
+        )?;
+        globals.set("SendPkt", send_pkt_fn)?;
 
         // Simulate(text...) — MushClient API: 模拟 MUD 输出，触发匹配的触发器
         // Lua 特性：多个参数会被拼接
@@ -940,11 +967,27 @@ impl LuaEngine {
                         for (i, m) in caps_list.iter().enumerate() {
                             let _ = wildcards_table.set(i + 1, m.as_str());
                         }
-                        let _ = callback.call::<()>((
-                            trigger_name.as_str(),
-                            clean_line.as_str(),
-                            wildcards_table,
-                        ));
+                        // 使用 catch_unwind 防止 Rust panic 跨越 Lua FFI 边界导致静默崩溃
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let _ = callback.call::<()>((
+                                trigger_name.as_str(),
+                                clean_line.as_str(),
+                                wildcards_table,
+                            ));
+                        }))
+                        .is_err()
+                        {
+                            eprintln!(
+                                "[Lua] Simulate 触发器 '{}' 回调中发生 panic，已捕获以防止崩溃",
+                                trigger_name
+                            );
+                            if let Ok(mut sim_state) = state_rc_sim.try_borrow_mut() {
+                                sim_state.pending_logs.push(format!(
+                                    "[Lua] Simulate 触发器 '{}' 回调中发生 panic",
+                                    trigger_name
+                                ));
+                            }
+                        }
                     }
                     if !send_text.is_empty() {
                         state_rc_sim.borrow_mut().pending_commands.push(send_text);
@@ -1199,14 +1242,36 @@ impl LuaEngine {
         })?;
         globals.set("GetTriggerList", get_trigger_list_fn)?;
 
-        // GetTriggerInfo(name, code)
+        // GetTriggerInfo(name, code) — MushClient API 兼容
+        // code 8 = enabled (Boolean), code 26 = group (String)
         let state_rc12 = state_rc.clone();
         let get_trigger_info_fn =
             lua.create_function_mut(move |lua, (name, code): (String, i64)| {
                 let state = state_rc12.borrow();
                 if let Some(t) = state.triggers.iter().find(|t| t.name == name) {
                     match code {
-                        8 => Ok(Value::Boolean(t.enabled)), // enabled
+                        1 => Ok(Value::String(lua.create_string(&t.name)?)),
+                        2 => Ok(Value::String(lua.create_string(
+                            &match &t.pattern {
+                                TriggerPattern::Utf8(re) => re.as_str().to_string(),
+                                TriggerPattern::Gbk(_) => "<gbk pattern>".to_string(),
+                            }
+                        )?)),
+                        4 => {
+                            let mut flags = 0i64;
+                            if t.enabled { flags |= 1; }
+                            Ok(Value::Integer(flags))
+                        }
+                        5 => Ok(Value::Integer(0)),
+                        6 => Ok(Value::Integer(t.sequence as i64)),
+                        7 => Ok(Value::Boolean(true)), // Keep evaluating (MushClient 默认 true)
+                        8 => Ok(Value::Boolean(t.enabled)),
+                        9 => Ok(Value::String(lua.create_string(
+                            &match &t.pattern {
+                                TriggerPattern::Utf8(re) => re.as_str().to_string(),
+                                TriggerPattern::Gbk(_) => "<gbk pattern>".to_string(),
+                            }
+                        )?)),
                         26 => {
                             let group = t.group.clone();
                             Ok(Value::String(lua.create_string(&group)?))
@@ -1224,11 +1289,47 @@ impl LuaEngine {
         let set_trigger_option_fn =
             lua.create_function_mut(move |_lua, (name, key, value): (String, String, Value)| {
                 let mut state = state_rc13.borrow_mut();
+                let encoding = state.current_encoding;
                 if let Some(t) = state.triggers.iter_mut().find(|t| t.name == name) {
                     match key.as_str() {
                         "group" => {
                             if let Value::String(s) = value {
                                 t.group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+                            }
+                        }
+                        "regexp" => {
+                            if let Value::String(s) = value {
+                                let pattern = s.to_str().map_err(|e| {
+                                    mlua::Error::external(format!("无效正则字符串: {}", e))
+                                })?;
+                                let pattern = pattern.to_string();
+                                let re_str = convert_pcre_to_rust_regex(&pattern);
+                                match encoding {
+                                    ScriptEncoding::Gbk => {
+                                        let gbk_str = utf8_regex_to_gbk_bytes(&re_str);
+                                        let gbk_re = BytesRegex::new(&gbk_str).map_err(|e| {
+                                            mlua::Error::external(format!(
+                                                "无效GBK正则 '{}': {}",
+                                                gbk_str, e
+                                            ))
+                                        })?;
+                                        t.pattern = TriggerPattern::Gbk(gbk_re);
+                                    }
+                                    ScriptEncoding::Utf8 => {
+                                        let re = Regex::new(&re_str).map_err(|e| {
+                                            mlua::Error::external(format!(
+                                                "无效正则 '{}': {}",
+                                                re_str, e
+                                            ))
+                                        })?;
+                                        t.pattern = TriggerPattern::Utf8(re);
+                                    }
+                                }
+                            }
+                        }
+                        "sequence" => {
+                            if let Value::Integer(n) = value {
+                                t.sequence = n as i32;
                             }
                         }
                         "multi_line" | "multiline" => {
@@ -1367,6 +1468,7 @@ impl LuaEngine {
                 group: String::new(),
                 send_to,
                 response,
+                sequence: 0,
             });
             Ok(Value::Integer(0))
         })?;
@@ -1408,6 +1510,27 @@ impl LuaEngine {
                         "group" => {
                             if let Value::String(s) = value {
                                 a.group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+                            }
+                        }
+                        "regexp" => {
+                            if let Value::String(s) = value {
+                                let pattern = s.to_str().map_err(|e| {
+                                    mlua::Error::external(format!("无效正则字符串: {}", e))
+                                })?;
+                                let pattern = pattern.to_string();
+                                let re_str = convert_pcre_to_rust_regex(&pattern);
+                                let re = Regex::new(&re_str).map_err(|e| {
+                                    mlua::Error::external(format!(
+                                        "无效正则 '{}': {}",
+                                        re_str, e
+                                    ))
+                                })?;
+                                a.pattern = re;
+                            }
+                        }
+                        "sequence" => {
+                            if let Value::Integer(n) = value {
+                                a.sequence = n as i32;
                             }
                         }
                         "enabled" => {
@@ -1472,6 +1595,7 @@ impl LuaEngine {
 
             let interval_millis_u64 = interval_millis as u64;
             let one_shot = (flags & 4) != 0;
+            let at_time = (flags & 2) != 0;
 
             // 将脚本作为 send_text 存储，在 fire_timer 时执行
             let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
@@ -1505,6 +1629,7 @@ impl LuaEngine {
                 enabled: timer_enabled,
                 group: String::new(),
                 one_shot,
+                at_time,
                 send_text: script_name,
                 last_fired: std::time::Instant::now(),
             });
@@ -1538,14 +1663,19 @@ impl LuaEngine {
         })?;
         globals.set("GetTimerList", get_timer_list_fn)?;
 
-        // GetTimerInfo(name, code)
+                        // GetTimerInfo(name, code) — MushClient API 兼容
+        // code 6 = enabled (Boolean), 7 = one_shot (Boolean), 8 = at_time (Boolean), 19 = group (String)
         let state_rc22 = state_rc.clone();
         let get_timer_info_fn =
             lua.create_function_mut(move |lua, (name, code): (String, i64)| {
                 let state = state_rc22.borrow();
-                if let Some(t) = state.timers.iter().find(|t| t.name == name) {
+                if let Some(t) = state.timers.iter().find(|tt| tt.name == name) {
                     match code {
+                        1 => Ok(Value::String(lua.create_string(&t.name)?)),
                         6 => Ok(Value::Boolean(t.enabled)), // enabled
+                        7 => Ok(Value::Boolean(t.one_shot)), // one shot
+                        8 => Ok(Value::Boolean(t.at_time)), // "At" timer flag
+                        14 => Ok(Value::Boolean(false)), // temporary flag (not tracked)
                         19 => {
                             let group = t.group.clone();
                             Ok(Value::String(lua.create_string(&group)?))
@@ -1568,6 +1698,21 @@ impl LuaEngine {
                         "group" => {
                             if let Value::String(s) = value {
                                 t.group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+                            }
+                        }
+                        "timer_timestamp" => {
+                            if let Value::Integer(ts) = value {
+                                if ts > 0 {
+                                    let current_time = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs();
+                                    let offset = current_time.saturating_sub(ts as u64);
+                                    t.last_fired = std::time::Instant::now()
+                                        - std::time::Duration::from_secs(offset);
+                                } else {
+                                    t.last_fired = std::time::Instant::now();
+                                }
                             }
                         }
                         "enabled" => {
@@ -1632,33 +1777,57 @@ impl LuaEngine {
         // 配置 API
         // ============================================================
 
-        // GetInfo(code)
+        // GetInfo(code) — MushClient API 兼容
         let script_dir_rc = self.script_dir.clone();
+        let script_path_rc = self.script_path.clone();
         let state_rc_gi = state_rc.clone();
         let get_info_fn = lua.create_function_mut(move |lua, code: i64| match code {
             1 => {
-                // MushClient: GetInfo(1) 返回主机地址
+                // MushClient: GetInfo(1) = Server name (IP address)
                 let host = state_rc_gi.borrow().host.clone();
                 Ok(Value::String(lua.create_string(&host)?))
             }
-            6 => {
-                // MushClient: GetInfo(6) 返回脚本引擎版本号
-                let version: String = lua
-                    .globals()
-                    .get::<mlua::Table>("jit")
-                    .and_then(|t| t.get::<String>("version"))
-                    .unwrap_or_else(|_| "LuaJIT".to_string());
-                Ok(Value::String(lua.create_string(&version)?))
+            2 => {
+                // MushClient: GetInfo(2) = World name
+                let name = state_rc_gi.borrow().world_name.clone();
+                Ok(Value::String(lua.create_string(&name)?))
+            }
+            3 => {
+                // MushClient: GetInfo(3) = Character name
+                let name = state_rc_gi.borrow().char_name.clone();
+                Ok(Value::String(lua.create_string(&name)?))
             }
             35 => {
+                // MushClient: GetInfo(35) = Script file name (full path)
+                let path = script_path_rc.borrow().clone();
+                match path {
+                    Some(p) => {
+                        let win_path = p.replace('/', "\\");
+                        Ok(Value::String(lua.create_string(&win_path)?))
+                    }
+                    None => Ok(Value::String(lua.create_string("")?)),
+                }
+            }
+            56 => {
+                // MushClient: GetInfo(56) = MUSHclient application path name
+                // 本引擎不支持，返回空串
+                Ok(Value::String(lua.create_string("")?))
+            }
+            58 => {
+                // MushClient: GetInfo(58) = Log files default path (directory)
                 let dir = script_dir_rc.borrow().clone();
                 match dir {
                     Some(d) => {
                         let win_path = d.replace('/', "\\");
                         Ok(Value::String(lua.create_string(&win_path)?))
                     }
-                    None => Ok(Value::String(lua.create_string(".\\")?)),
+                    None => Ok(Value::String(lua.create_string("")?)),
                 }
+            }
+            204 => {
+                // MushClient: GetInfo(204) = Packets received
+                let count = state_rc_gi.borrow().packet_count;
+                Ok(Value::Integer(count as i64))
             }
             _ => Ok(Value::String(lua.create_string("")?)),
         })?;
@@ -1864,14 +2033,16 @@ impl LuaEngine {
         alias_flag.set("Temporary", 4096i64)?;
         globals.set("alias_flag", alias_flag)?;
 
-        // timer_flag
+        // timer_flag — 严格按 MushClient 官方定义
         let timer_flag = lua.create_table()?;
         timer_flag.set("Enabled", 1i64)?;
-        timer_flag.set("AtTime", 4i64)?;
+        timer_flag.set("AtTime", 2i64)?;
+        timer_flag.set("OneShot", 4i64)?;
+        timer_flag.set("TimerSpeedWalk", 8i64)?;
+        timer_flag.set("TimerNote", 16i64)?;
+        timer_flag.set("ActiveWhenClosed", 32i64)?;
         timer_flag.set("Replace", 1024i64)?;
-        timer_flag.set("Temporary", 4096i64)?;
-        timer_flag.set("OneShot", 8192i64)?;
-        timer_flag.set("ActiveWhenClosed", 16384i64)?;
+        timer_flag.set("Temporary", 16384i64)?;
         globals.set("timer_flag", timer_flag)?;
 
         // custom_colour
@@ -1961,10 +2132,14 @@ impl LuaEngine {
             lua.create_function(move |lua, ()| Ok(Value::String(lua.create_string("")?)))?;
         globals.set("GetPluginID", get_plugin_id_fn)?;
 
-        // GetPluginInfo(id, code)
+        // GetPluginInfo(id, code) — MushClient API 兼容
+        // 官方 code: 1=Name, 14=Date modified, 19=Version, 20=Directory
         let get_plugin_info_fn =
             lua.create_function(move |lua, (_id, code): (String, i64)| match code {
                 1 => Ok(Value::String(lua.create_string("RustLuaMud")?)),
+                14 => Ok(Value::String(lua.create_string("")?)),
+                19 => Ok(Value::Number(1.0)),
+                20 => Ok(Value::String(lua.create_string("")?)),
                 _ => Ok(Value::Nil),
             })?;
         globals.set("GetPluginInfo", get_plugin_info_fn)?;
@@ -1974,7 +2149,7 @@ impl LuaEngine {
         // ============================================================
 
         // 覆盖 dofile — 支持 GBK 自动转码和路径分隔符兼容
-        let _script_path_rc = Rc::new(RefCell::new(self.script_path.clone()));
+        let _script_path_rc = self.script_path.clone();
         let state_rc_dofile = state_rc.clone();
         let dofile_fn = lua.create_function_mut(move |lua, path: String| {
             // 将 \ 替换为 /
@@ -2343,6 +2518,7 @@ impl LuaEngine {
                     group: String::new(),
                     send_to: 0,
                     response: String::new(),
+                    sequence: 0,
                 });
                 Ok(())
             })?;
@@ -2359,6 +2535,7 @@ impl LuaEngine {
                     enabled: true,
                     group: String::new(),
                     one_shot: false,
+                    at_time: false,
                     send_text: String::new(),
                     last_fired: std::time::Instant::now(),
                 });
@@ -2431,14 +2608,43 @@ impl LuaEngine {
     }
 
     /// 获取当前加载的脚本路径
-    pub fn script_path(&self) -> Option<&String> {
-        self.script_path.as_ref()
+    pub fn script_path(&self) -> Option<String> {
+        self.script_path.borrow().clone()
+    }
+
+    /// 记录错误信息到 stderr 和日志文件
+    fn log_error(&self, msg: &str) {
+        eprintln!("{}", msg);
+        // 使用 try_borrow_mut 避免在 RefCell 已被借用时 panic
+        if let Ok(mut state) = self.state.try_borrow_mut() {
+            state.pending_logs.push(format!(
+                "[Lua] {}",
+                crate::ui::AnsiParser::strip_ansi(msg)
+            ));
+        }
     }
 
     /// 处理服务器输出，匹配触发器
     pub fn process_output(&self, line: &str) {
+        // 使用 catch_unwind 防止函数体内任何 panic 跨越 FFI 边界导致静默崩溃
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.process_output_inner(line);
+        }));
+        if result.is_err() {
+            self.log_error("process_output 中发生 panic，已捕获以防止崩溃");
+        }
+    }
+
+    /// process_output 的内部实现
+    fn process_output_inner(&self, line: &str) {
         // 清空待发送队列
         self.state.borrow_mut().pending_commands.clear();
+
+        // 记录收到数据的时间（用于空闲心跳检测）
+        self.state.borrow_mut().last_server_data = std::time::Instant::now();
+
+        // 递增数据包计数（供 GetInfo(204) 返回）
+        self.state.borrow_mut().packet_count += 1;
 
         // 剥离 ANSI 码用于匹配，并去除行末 \r
         let clean_line = crate::ui::AnsiParser::strip_ansi(line);
@@ -2578,11 +2784,21 @@ impl LuaEngine {
                 for (i, m) in caps_list.iter().enumerate() {
                     let _ = wildcards_table.set(i + 1, m.as_str());
                 }
-                let _ = callback.call::<()>((
-                    trigger_name.as_str(),
-                    clean_line.as_str(),
-                    wildcards_table,
-                ));
+                // 使用 catch_unwind 防止 Rust panic 跨越 Lua FFI 边界导致静默崩溃
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = callback.call::<()>((
+                        trigger_name.as_str(),
+                        clean_line.as_str(),
+                        wildcards_table,
+                    ));
+                }))
+                .is_err()
+                {
+                    self.log_error(&format!(
+                        "[Lua] 触发器 '{}' 回调中发生 panic，已捕获以防止崩溃",
+                        trigger_name
+                    ));
+                }
             }
             if !send_text.is_empty() {
                 self.state.borrow_mut().pending_commands.push(send_text);
@@ -2592,6 +2808,15 @@ impl LuaEngine {
 
     /// 处理用户输入，匹配别名
     pub fn process_input(&self, input: &str) -> bool {
+        // 使用 catch_unwind 防止 panic 跨越 FFI 边界
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.process_input_inner(input)
+        }));
+        result.unwrap_or(false)
+    }
+
+    /// process_input 的内部实现
+    fn process_input_inner(&self, input: &str) -> bool {
         self.state.borrow_mut().pending_commands.clear();
 
         let matches: Vec<(usize, Vec<String>, i64, String)> = {
@@ -2625,14 +2850,23 @@ impl LuaEngine {
                 for (i, m) in caps_list.iter().enumerate() {
                     code = code.replace(&format!("%{}", i + 1), m);
                 }
-                let _ = self.lua.load(&code).exec();
+                let lua_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _ = self.lua.load(&code).exec();
+                    }));
+                if lua_result.is_err() {
+                    self.log_error(&format!(
+                        "别名 send_to=12 执行中发生 panic: {}",
+                        code
+                    ));
+                }
             } else {
                 // 脚本函数方式：以 (name, line, wildcards_table) 签名调用
                 let callback = {
                     let state = self.state.borrow();
                     state.aliases[idx].callback.clone()
                 };
-                let name = {
+                let alias_name = {
                     let state = self.state.borrow();
                     state.aliases[idx].name.clone()
                 };
@@ -2640,7 +2874,18 @@ impl LuaEngine {
                     for (i, m) in caps_list.iter().enumerate() {
                         let _ = wildcards.set(i + 1, m.as_str());
                     }
-                    let _ = callback.call::<()>((name, input.to_string(), wildcards));
+                    // 使用 catch_unwind 防止 Rust panic 跨越 Lua FFI 边界导致静默崩溃
+                    let name_for_err = alias_name.clone();
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _ = callback.call::<()>((alias_name, input.to_string(), wildcards));
+                    }))
+                    .is_err()
+                    {
+                        self.log_error(&format!(
+                            "[Lua] 别名 '{}' 回调中发生 panic，已捕获以防止崩溃",
+                            name_for_err
+                        ));
+                    }
                 }
             }
         }
@@ -2648,50 +2893,140 @@ impl LuaEngine {
         true
     }
 
+    /// 检查服务器是否长时间无响应，是则发送 IAC NOP 心跳包保持连接
+    /// 空闲超过 30 秒则发送一次 IAC NOP
+    pub fn fire_keepalive_if_idle(&self) {
+        let idle_threshold = std::time::Duration::from_secs(30);
+        let idle_time = {
+            let state = self.state.borrow();
+            state.last_server_data.elapsed()
+        };
+        if idle_time >= idle_threshold {
+            // IAC NOP = \xff\xf1，telnet 标准心跳
+            self.state
+                .borrow_mut()
+                .pending_raw
+                .push(vec![0xff, 0xf1]);
+        }
+    }
+
     /// 触发指定定时器
     pub fn fire_timer(&self, index: usize) {
-        self.state.borrow_mut().pending_commands.clear();
+        // 使用 catch_unwind 防止 panic 跨越 FFI 边界导致静默崩溃
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.fire_timer_inner(index);
+        }));
+        if result.is_err() {
+            self.log_error("fire_timer 中发生 panic，已捕获以防止崩溃");
+        }
+    }
 
-        let (callback, send_text, one_shot, timer_name) = {
-            let state = self.state.borrow();
-            if index < state.timers.len() && state.timers[index].enabled {
-                (
-                    state.timers[index].callback.clone(),
-                    state.timers[index].send_text.clone(),
-                    state.timers[index].one_shot,
-                    state.timers[index].name.clone(),
-                )
-            } else {
+    /// fire_timer 的内部实现
+    fn fire_timer_inner(&self, index: usize) {
+        // 步骤1: 清空待发送队列
+        let step1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.state.borrow_mut().pending_commands.clear();
+        }));
+        if step1.is_err() {
+            self.log_error(&format!("fire_timer[{}] 步骤1(clear pending) panic", index));
+            return;
+        }
+
+        // 步骤2: 读取定时器信息
+        let (callback, send_text, one_shot, timer_name) = match std::panic::catch_unwind(
+            std::panic::AssertUnwindSafe(|| {
+                let state = self.state.borrow();
+                if index < state.timers.len() && state.timers[index].enabled {
+                    Some((
+                        state.timers[index].callback.clone(),
+                        state.timers[index].send_text.clone(),
+                        state.timers[index].one_shot,
+                        state.timers[index].name.clone(),
+                    ))
+                } else {
+                    None
+                }
+            }),
+        ) {
+            Ok(Some(v)) => v,
+            Ok(None) => return,
+            Err(_) => {
+                self.log_error(&format!(
+                    "fire_timer[{}] 步骤2(读取定时器信息) panic",
+                    index
+                ));
                 return;
             }
         };
 
-        let _ = callback.call::<()>(());
+        // 步骤3: 调用回调
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = callback.call::<()>(());
+        }))
+        .is_err()
+        {
+            self.log_error(&format!(
+                "[Lua] 定时器 '{}' 回调中发生 panic，已捕获以防止崩溃",
+                timer_name
+            ));
+        }
 
+        // 步骤4: 执行 send_text
         if !send_text.is_empty() {
-            // send_text 是 MUSHclient 的 script 参数
-            // 判断是函数名还是 Lua 代码：
-            // 函数名格式：identifier 或 identifier.identifier（如 "fire_timer_cb" 或 "wait.timer_resume"）
-            // Lua 代码：包含空格、赋值、运算符等（如 "counter = counter + 1"）
-            let is_function_name = send_text
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
-                && !send_text.is_empty()
-                && send_text
+            let send_text_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // send_text 是 MUSHclient 的 script 参数
+                // 判断是函数名还是 Lua 代码：
+                // 函数名格式：identifier 或 identifier.identifier（如 "fire_timer_cb" 或 "wait.timer_resume"）
+                // Lua 代码：包含空格、赋值、运算符等（如 "counter = counter + 1"）
+                let is_function_name = send_text
                     .chars()
-                    .next()
-                    .map_or(false, |c| c.is_alphabetic() || c == '_');
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                    && !send_text.is_empty()
+                    && send_text
+                        .chars()
+                        .next()
+                        .map_or(false, |c| c.is_alphabetic() || c == '_');
 
-            if is_function_name {
-                let code = format!("{}('{}')", send_text, timer_name.replace('\'', "\\'"));
-                let _ = self.lua.load(&code).exec();
-            } else {
-                let _ = self.lua.load(&send_text).exec();
+                let result: Result<(), String> = if is_function_name {
+                    let code =
+                        format!("{}('{}')", send_text, timer_name.replace('\'', "\\'"));
+                    self.lua.load(&code).exec().map_err(|e| format!("{}", e))
+                } else {
+                    self.lua.load(&send_text).exec().map_err(|e| format!("{}", e))
+                };
+                result
+            }));
+            match send_text_result {
+                Ok(Err(lua_err)) => {
+                    self.log_error(&format!(
+                        "定时器 '{}' send_text 执行 Lua 错误: {}",
+                        timer_name, lua_err
+                    ));
+                }
+                Err(_) => {
+                    self.log_error(&format!(
+                        "定时器 '{}' send_text 执行中发生 panic",
+                        timer_name
+                    ));
+                }
+                _ => {}
             }
         }
 
+        // 步骤5: one_shot 删除定时器（按名称搜索，避免回调执行后索引已变化）
         if one_shot {
-            self.state.borrow_mut().timers.remove(index);
+            let step5 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut state = self.state.borrow_mut();
+                if let Some(pos) = state.timers.iter().position(|t| t.name == timer_name) {
+                    state.timers.remove(pos);
+                }
+            }));
+            if step5.is_err() {
+                self.log_error(&format!(
+                    "fire_timer '{}' 步骤5(one_shot remove) panic",
+                    timer_name
+                ));
+            }
         }
     }
 
@@ -2729,6 +3064,11 @@ impl LuaEngine {
         self.state.borrow_mut().pending_commands.drain(..).collect()
     }
 
+    /// 取出待发送的原始数据包（SendPkt 压入的）
+    pub fn drain_raw(&self) -> Vec<Vec<u8>> {
+        self.state.borrow_mut().pending_raw.drain(..).collect()
+    }
+
     /// 设置 Lua 变量（内部 HashMap，通过 GetVariable 访问）
     pub fn set_variable(&mut self, key: &str, value: &str) {
         self.state
@@ -2740,6 +3080,21 @@ impl LuaEngine {
     /// 设置连接主机地址（供 GetInfo(1) 返回）
     pub fn set_host(&self, host: &str) {
         self.state.borrow_mut().host = host.to_string();
+    }
+
+    /// 设置端口（本引擎扩展，非 MushClient 标准 GetInfo）
+    pub fn set_port(&self, port: u16) {
+        self.state.borrow_mut().port = port;
+    }
+
+    /// 设置世界名称（供 GetInfo(2) 返回）
+    pub fn set_world_name(&self, name: &str) {
+        self.state.borrow_mut().world_name = name.to_string();
+    }
+
+    /// 设置角色名（供 GetInfo(3) 返回）
+    pub fn set_char_name(&self, name: &str) {
+        self.state.borrow_mut().char_name = name.to_string();
     }
 
     /// 设置 Lua 全局变量（脚本中可直接按名引用）
@@ -2760,8 +3115,14 @@ impl LuaEngine {
         // 连接刚建立时，调用 OnConnect() 抽象接口
         // Lua 脚本可通过覆盖 OnConnect() 实现连接后的初始化逻辑
         if connected && !was_connected {
-            if let Err(e) = self.eval_code("OnConnect()") {
-                eprintln!("[Lua] OnConnect() 执行失败: {}", e);
+            let lua_result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Err(e) = self.eval_code("OnConnect()") {
+                        self.log_error(&format!("OnConnect() 执行失败: {}", e));
+                    }
+                }));
+            if lua_result.is_err() {
+                self.log_error("OnConnect() 执行中发生 panic，已捕获以防止崩溃");
             }
         }
     }
@@ -3188,7 +3549,7 @@ mod tests {
                 Some("/home/user/scripts/".to_string())
             );
             assert_eq!(
-                engine.script_path,
+                engine.script_path(),
                 Some("/home/user/scripts/main.lua".to_string())
             );
         });
@@ -3659,8 +4020,51 @@ mod tests {
     #[test]
     fn test_get_trigger_info_not_found() {
         with_engine(|engine| {
-            let val: Value = eval(engine, "return GetTriggerInfo('nonexistent', 8)").unwrap();
+            let val: Value = eval(engine, "return GetTriggerInfo('nonexistent', 7)").unwrap();
             assert!(val.is_nil());
+        });
+    }
+
+    #[test]
+    fn test_set_trigger_option_regexp() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                function test_re_cb(name, line, wildcards)
+                    Execute("matched_" .. line)
+                end
+                AddTrigger('re_trig', 'old_pattern', '', trigger_flag.Enabled + trigger_flag.Replace + trigger_flag.RegularExpression, 0, 0, '', 'test_re_cb', 0, 10)
+                "#,
+            )
+            .unwrap();
+            // 先确认匹配旧正则
+            engine.process_output("old_pattern");
+            let cmds1 = engine.drain_commands();
+            assert_eq!(cmds1, vec!["matched_old_pattern"]);
+            // 改用新的正则
+            exec(engine, "SetTriggerOption('re_trig', 'regexp', 'new_(.+)')").unwrap();
+            engine.process_output("new_value");
+            let cmds2 = engine.drain_commands();
+            assert_eq!(cmds2, vec!["matched_new_value"]);
+            // 旧正则不应该再匹配
+            engine.process_output("old_pattern");
+            let cmds3 = engine.drain_commands();
+            assert!(cmds3.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_set_trigger_option_sequence() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                "AddTrigger('seq_trig', 'test', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
+            exec(engine, "SetTriggerOption('seq_trig', 'sequence', 50)").unwrap();
+            let seq: i64 = eval(engine, "return GetTriggerInfo('seq_trig', 6)").unwrap();
+            assert_eq!(seq, 50);
         });
     }
 
@@ -3933,6 +4337,39 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_set_alias_option_regexp() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                "AddAlias('re_alias', 'old_pattern', '', alias_flag.Enabled + alias_flag.Replace + alias_flag.RegularExpression)",
+            )
+            .unwrap();
+            let matched1 = engine.process_input("old_pattern");
+            assert!(matched1);
+            // 改用新的正则
+            exec(engine, "SetAliasOption('re_alias', 'regexp', 'new_(.+)')").unwrap();
+            let matched2 = engine.process_input("new_value");
+            assert!(matched2);
+            // 旧正则不应该再匹配
+            let matched3 = engine.process_input("old_pattern");
+            assert!(!matched3);
+        });
+    }
+
+    #[test]
+    fn test_set_alias_option_sequence() {
+        with_engine(|engine| {
+            exec(engine, "AddAlias('seq_alias', 'test', '', 1)").unwrap();
+            let result: i64 = eval(
+                engine,
+                "return SetAliasOption('seq_alias', 'sequence', 50)",
+            )
+            .unwrap();
+            assert_eq!(result, 0);
+        });
+    }
+
     // ================================================================
     // 定时器 API
     // ================================================================
@@ -4037,6 +4474,17 @@ mod tests {
             exec(engine, "EnableTimerGroup('somegroup', false)").unwrap();
             let enabled: bool = eval(engine, "return GetTimerInfo('nogrp_t', 6)").unwrap();
             assert!(enabled); // 空group的定时器不应被影响
+        });
+    }
+
+    #[test]
+    fn test_set_timer_option_timestamp() {
+        with_engine(|engine| {
+            exec(engine, "AddTimer('ts_timer', 0, 0, 60, '', 1)").unwrap();
+            // 设一个过去的时间戳，定时器应立即到期
+            exec(engine, "SetTimerOption('ts_timer', 'timer_timestamp', 100)").unwrap();
+            let fired = engine.fire_next_due_timer();
+            assert!(fired, "past timestamp should cause timer to fire immediately");
         });
     }
 
@@ -4217,10 +4665,47 @@ mod tests {
     // ================================================================
 
     #[test]
+    fn test_get_info_1() {
+        with_engine(|engine| {
+            // GetInfo(1) = Server name (IP address)
+            let host: String = eval(engine, "return GetInfo(1)").unwrap();
+            assert_eq!(host, "");
+            engine.set_host("ln.xkxmud.com");
+            let host: String = eval(engine, "return GetInfo(1)").unwrap();
+            assert_eq!(host, "ln.xkxmud.com");
+        });
+    }
+
+    #[test]
+    fn test_get_info_2() {
+        with_engine(|engine| {
+            // GetInfo(2) = World name
+            let name: String = eval(engine, "return GetInfo(2)").unwrap();
+            assert_eq!(name, "");
+            engine.set_world_name("北侠");
+            let name: String = eval(engine, "return GetInfo(2)").unwrap();
+            assert_eq!(name, "北侠");
+        });
+    }
+
+    #[test]
+    fn test_get_info_3() {
+        with_engine(|engine| {
+            // GetInfo(3) = Character name
+            let name: String = eval(engine, "return GetInfo(3)").unwrap();
+            assert_eq!(name, "");
+            engine.set_char_name("小姗");
+            let name: String = eval(engine, "return GetInfo(3)").unwrap();
+            assert_eq!(name, "小姗");
+        });
+    }
+
+    #[test]
     fn test_get_info_35() {
         with_engine(|engine| {
             engine.set_script_path("/home/user/scripts/main.lua");
             let path: String = eval(engine, "return GetInfo(35)").unwrap();
+            assert!(path.contains("main.lua"));
             assert!(path.contains('\\'));
             assert!(!path.contains('/'));
         });
@@ -4230,26 +4715,37 @@ mod tests {
     fn test_get_info_35_no_script_path() {
         with_engine(|engine| {
             let path: String = eval(engine, "return GetInfo(35)").unwrap();
-            assert_eq!(path, ".\\");
+            assert_eq!(path, "");
         });
     }
 
     #[test]
-    fn test_get_info_1() {
+    fn test_get_info_58() {
         with_engine(|engine| {
-            // 默认未设置 host 时返回空字符串
-            let ver: String = eval(engine, "return GetInfo(1)").unwrap();
-            assert_eq!(ver, "");
-            // 设置 host 后返回主机地址
-            engine.set_host("ln.xkxmud.com");
-            let host: String = eval(engine, "return GetInfo(1)").unwrap();
-            assert_eq!(host, "ln.xkxmud.com");
+            engine.set_script_path("/home/user/scripts/main.lua");
+            let dir: String = eval(engine, "return GetInfo(58)").unwrap();
+            assert!(dir.contains("scripts"));
+            assert!(dir.contains('\\'));
+            assert!(!dir.contains('/'));
+        });
+    }
+
+    #[test]
+    fn test_get_info_204() {
+        with_engine(|engine| {
+            let count: i64 = eval(engine, "return GetInfo(204)").unwrap();
+            assert_eq!(count, 0);
+            // process_output 会递增计数器
+            engine.process_output("hello");
+            let count: i64 = eval(engine, "return GetInfo(204)").unwrap();
+            assert_eq!(count, 1);
         });
     }
 
     #[test]
     fn test_get_info_unknown() {
         with_engine(|engine| {
+            // 未知 code 返回空串，而非引发错误或返回 nil
             let val: String = eval(engine, "return GetInfo(999)").unwrap();
             assert_eq!(val, "");
         });
@@ -4393,8 +4889,20 @@ mod tests {
         with_engine(|engine| {
             let enabled: i64 = eval(engine, "return timer_flag.Enabled").unwrap();
             assert_eq!(enabled, 1);
+            let at_time: i64 = eval(engine, "return timer_flag.AtTime").unwrap();
+            assert_eq!(at_time, 2);
             let oneshot: i64 = eval(engine, "return timer_flag.OneShot").unwrap();
-            assert_eq!(oneshot, 8192);
+            assert_eq!(oneshot, 4);
+            let speedwalk: i64 = eval(engine, "return timer_flag.TimerSpeedWalk").unwrap();
+            assert_eq!(speedwalk, 8);
+            let note: i64 = eval(engine, "return timer_flag.TimerNote").unwrap();
+            assert_eq!(note, 16);
+            let active: i64 = eval(engine, "return timer_flag.ActiveWhenClosed").unwrap();
+            assert_eq!(active, 32);
+            let replace: i64 = eval(engine, "return timer_flag.Replace").unwrap();
+            assert_eq!(replace, 1024);
+            let temp: i64 = eval(engine, "return timer_flag.Temporary").unwrap();
+            assert_eq!(temp, 16384);
         });
     }
 
@@ -4502,8 +5010,18 @@ mod tests {
     #[test]
     fn test_get_plugin_info() {
         with_engine(|engine| {
+            // code 1 = plugin name
             let name: String = eval(engine, "return GetPluginInfo('', 1)").unwrap();
             assert_eq!(name, "RustLuaMud");
+            // code 14 = Date modified
+            let date: String = eval(engine, "return GetPluginInfo('', 14)").unwrap();
+            assert_eq!(date, "");
+            // code 19 = Version
+            let version: f64 = eval(engine, "return GetPluginInfo('', 19)").unwrap();
+            assert_eq!(version, 1.0);
+            // code 20 = Directory
+            let dir: String = eval(engine, "return GetPluginInfo('', 20)").unwrap();
+            assert_eq!(dir, "");
         });
     }
 
@@ -4958,10 +5476,13 @@ mod tests {
                 "AddTrigger('t1', 'test', '', 33, 0, 0, '', '', 0, 0)",
             )
             .unwrap();
-            // code 8 = enabled
+            // code 7 = Keep evaluating (MushClient API)
+            let ke: bool = eval(engine, "return GetTriggerInfo('t1', 7)").unwrap();
+            assert!(ke);
+            // code 8 = enabled (MushClient API)
             let en: bool = eval(engine, "return GetTriggerInfo('t1', 8)").unwrap();
             assert!(en);
-            // Set group via SetTriggerOption then read via code 26
+            // Set group via SetTriggerOption then read via code 26 (MushClient API)
             exec(engine, "SetTriggerOption('t1', 'group', 'grp1')").unwrap();
             let group: String = eval(engine, "return GetTriggerInfo('t1', 26)").unwrap();
             assert_eq!(group, "grp1");
@@ -4974,13 +5495,55 @@ mod tests {
     #[test]
     fn test_get_timer_info_codes() {
         with_engine(|engine| {
+            // 常规间隔触发定时器 (flags=1: Enabled)
             exec(engine, "AddTimer('t1', 0, 1, 30, '', 1)").unwrap();
             // code 6 = enabled
             let en: bool = eval(engine, "return GetTimerInfo('t1', 6)").unwrap();
             assert!(en);
+            // code 7 = one_shot (false for regular timer)
+            let os: bool = eval(engine, "return GetTimerInfo('t1', 7)").unwrap();
+            assert!(!os);
+            // code 8 = at_time (false for interval timer, true for "at" timer)
+            let at: bool = eval(engine, "return GetTimerInfo('t1', 8)").unwrap();
+            assert!(!at);
+            // code 14 = temporary (not tracked, default false)
+            let tmp: bool = eval(engine, "return GetTimerInfo('t1', 14)").unwrap();
+            assert!(!tmp);
+            // code 19 = group (empty by default)
+            let grp: String = eval(engine, "return GetTimerInfo('t1', 19)").unwrap();
+            assert_eq!(grp, "");
             // unknown code returns nil
             let val: Value = eval(engine, "return GetTimerInfo('t1', 999)").unwrap();
             assert!(val.is_nil());
+        });
+    }
+
+    #[test]
+    fn test_get_timer_info_at_time_and_one_shot() {
+        with_engine(|engine| {
+            // AtTime + OneShot + Enabled = 2+4+1=7
+            exec(engine, "AddTimer('at_timer', 23, 50, 0, '', 7, 'cb')").unwrap();
+            let os: bool = eval(engine, "return GetTimerInfo('at_timer', 7)").unwrap();
+            assert!(os, "one_shot should be true");
+            let at: bool = eval(engine, "return GetTimerInfo('at_timer', 8)").unwrap();
+            assert!(at, "at_time should be true");
+
+            // 纯间隔触发
+            exec(engine, "AddTimer('every_timer', 0, 0, 5, '', 1)").unwrap();
+            let os: bool = eval(engine, "return GetTimerInfo('every_timer', 7)").unwrap();
+            assert!(!os, "should not be one_shot");
+            let at: bool = eval(engine, "return GetTimerInfo('every_timer', 8)").unwrap();
+            assert!(!at, "should not be at_time");
+        });
+    }
+
+    #[test]
+    fn test_get_info_56() {
+        with_engine(|engine| {
+            // GetInfo(56) = MUSHclient application path name
+            // 本引擎不支持，返回空串
+            let path: String = eval(engine, "return GetInfo(56)").unwrap();
+            assert_eq!(path, "");
         });
     }
 
@@ -5491,9 +6054,12 @@ mod tests {
     #[test]
     fn test_get_plugin_info_more_codes() {
         with_engine(|engine| {
-            // code 1 = plugin id
-            let id: String = eval(engine, "return GetPluginInfo(GetPluginID(), 1)").unwrap();
-            assert!(!id.is_empty());
+            // code 19 = plugin version
+            let version: f64 = eval(engine, "return GetPluginInfo(GetPluginID(), 19)").unwrap();
+            assert_eq!(version, 1.0);
+            // code 20 = directory (string, not boolean)
+            let dir: String = eval(engine, "return GetPluginInfo(GetPluginID(), 20)").unwrap();
+            assert_eq!(dir, "");
             // unknown code returns nil
             let val: Value = eval(engine, "return GetPluginInfo(GetPluginID(), 999)").unwrap();
             assert!(val.is_nil());

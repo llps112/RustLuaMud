@@ -73,10 +73,26 @@ AddTimer("once", 0, 0, 5, "",
 
 ## custom_colour
 
-自定义颜色常量（预留给 MUSHclient 兼容）。
+MUSHclient 兼容的颜色常量（预留给脚本使用）。
 
-- `custom_colour.foreground` — 前景色
-- `custom_colour.background` — 背景色
+| 常量 | 值 | 说明 |
+|------|-----|------|
+| `custom_colour.Black` | 0 | 黑色 |
+| `custom_colour.Maroon` | 1 | 栗色 |
+| `custom_colour.Green` | 2 | 绿色 |
+| `custom_colour.Olive` | 3 | 橄榄色 |
+| `custom_colour.Navy` | 4 | 藏青色 |
+| `custom_colour.Purple` | 5 | 紫色 |
+| `custom_colour.Teal` | 6 | 青色 |
+| `custom_colour.Silver` | 7 | 银色 |
+| `custom_colour.Grey` | 8 | 灰色 |
+| `custom_colour.Red` | 9 | 红色 |
+| `custom_colour.Lime` | 10 | 亮绿色 |
+| `custom_colour.Yellow` | 11 | 黄色 |
+| `custom_colour.Blue` | 12 | 蓝色 |
+| `custom_colour.Fuchsia` | 13 | 紫红色 |
+| `custom_colour.Aqua` | 14 | 浅绿色 |
+| `custom_colour.White` | 15 | 白色 |
 
 ---
 
@@ -86,16 +102,20 @@ AddTimer("once", 0, 0, 5, "",
 
 | 常量 | 值 | 说明 |
 |------|-----|------|
-| `error_code.BadArgs` | -1 | 参数错误 |
-| `error_code.TypeMismatch` | -2 | 类型不匹配 |
-| `error_code.NotFound` | -3 | 未找到 |
-
----
+| `error_code.eOK` | 0 | 成功 |
+| `error_code.eUnknownObject` | 1 | 未知对象 |
+| `error_code.eItemAlreadyExists` | 2 | 项目已存在 |
+| `error_code.eBadRegularExpression` | 3 | 无效正则表达式 |
+| `error_code.eWildcardNotFound` | 4 | 通配符未找到 |
+| `error_code.eCommandCancelled` | 5 | 命令已取消 |
+| `error_code.eNoSuchCommand` | 6 | 无此命令 |
+| `error_code.eInvalidObjectLabel` | 7 | 无效对象标签 |
+| `error_code.eAmbiguousObjectName` | 8 | 歧义对象名 |
 
 ## error_desc
 
 错误描述常量（错误码对应的文字描述表）。
 
 ```lua
-print(error_desc[error_code.NotFound])  -- 输出错误描述
+print(error_desc.eUnknownObject)  -- 输出 "Unknown object"
 ```

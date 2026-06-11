@@ -69,12 +69,15 @@
 - **参数**:
   | info_type | 说明 | 返回值 |
   |-----------|------|--------|
-  | 14 | 插件版本 | "1.0" |
-  | 20 | 插件是否已安装 | boolean |
+  | 1 | 插件名称 | "RustLuaMud" |
+  | 14 | 修改日期 | 空串（未实现） |
+  | 19 | 版本号 | 1.0 |
+  | 20 | 插件目录 | 空串（未实现） |
 
 - **示例**:
   ```lua
-  local installed = GetPluginInfo("some_plugin", 20)
+  local name = GetPluginInfo(GetPluginID(), 1)
+  local version = GetPluginInfo(GetPluginID(), 19)
   ```
 
 ---

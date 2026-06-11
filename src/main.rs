@@ -9,6 +9,9 @@ use app::App;
 use config::AppConfig;
 
 fn main() {
+    // 设置环境变量以便任何逃逸的 panic 能打印堆栈信息
+    std::env::set_var("RUST_BACKTRACE", "1");
+
     let config = AppConfig::load_default();
 
     let rt = tokio::runtime::Runtime::new().expect("无法创建 tokio runtime");

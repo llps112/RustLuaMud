@@ -417,12 +417,15 @@ impl App {
             Ok(mut engine) => {
                 // 注入主机地址（供 GetInfo(1) 返回）
                 engine.set_host(&host);
+                // 注入世界名称（供 GetInfo(2) 返回）
+                engine.set_world_name(&self.manager.sessions[id].name);
 
                 // 注入登录凭证到 Lua 变量和全局变量
                 if let Some(ref name) = username {
                     if !name.is_empty() {
                         engine.set_variable("char_name", name);
                         engine.set_global("char_name", name);
+                        engine.set_char_name(name); // 供 GetInfo(3) 返回
                     }
                 }
                 if let Some(ref pwd) = password {
@@ -585,6 +588,24 @@ impl App {
         Ok(())
     }
 
+    /// 发送 Lua 引擎产生的原始数据包（SendPkt 压入的）
+    fn send_lua_raw(&mut self, session_id: usize) -> io::Result<()> {
+        if session_id >= self.manager.sessions.len() {
+            return Ok(());
+        }
+        let raw_packets = self.manager.sessions[session_id]
+            .lua_engine
+            .as_ref()
+            .map(|engine| engine.drain_raw())
+            .unwrap_or_default();
+        for data in raw_packets {
+            if let Err(e) = self.manager.send_raw(session_id, data) {
+                self.terminal.append_output(&format!("[发送原始数据错误] {}", e))?;
+            }
+        }
+        Ok(())
+    }
+
     /// 处理定时器触发（轮询模式：检查所有到期定时器）
     fn handle_timer(&mut self, session_id: usize) -> io::Result<()> {
         if session_id >= self.manager.sessions.len() {
@@ -610,8 +631,15 @@ impl App {
             if !commands.is_empty() {
                 self.send_lua_commands(session_id, commands)?;
             }
+            // 处理 SendPkt 压入的原始数据包
+            self.send_lua_raw(session_id)?;
             self.drain_lua_logs(session_id)?;
         }
+        // 空闲心跳检测：服务器静默超过 30 秒时发送 IAC NOP
+        if let Some(ref engine) = self.manager.sessions[session_id].lua_engine {
+            engine.fire_keepalive_if_idle();
+        }
+        self.send_lua_raw(session_id)?;
         // 仅在定时器真正触发时才刷新状态栏（避免每 50ms 写终端，破坏鼠标选中）
         if any_fired && session_id == self.manager.foreground_id {
             self.update_status_bar()?;
@@ -878,7 +906,7 @@ impl App {
                 let script_path = self.manager.sessions[fg]
                     .lua_engine
                     .as_ref()
-                    .and_then(|e| e.script_path().cloned());
+                    .and_then(|e| e.script_path());
                 // 保存原 engine 的变量（如 char_name 等）
                 let saved_vars = self.manager.sessions[fg]
                     .lua_engine
@@ -940,6 +968,7 @@ impl App {
                         Ok(_) => {
                             let commands = engine.drain_commands();
                             self.send_lua_commands(fg, commands)?;
+                            self.send_lua_raw(fg)?;
                             self.drain_lua_logs(fg)?;
                             // /lua 命令可能调用了 SetStatus，刷新状态栏
                             self.update_status_bar()?;
@@ -1057,6 +1086,8 @@ impl App {
                         };
                     // 发送触发器产生的命令
                     self.send_lua_commands(id, trigger_commands)?;
+                    // 发送 SendPkt 压入的原始数据包
+                    self.send_lua_raw(id)?;
                     // 触发器中可能调用了 SetStatus，刷新状态栏
                     if id == self.manager.foreground_id {
                         self.update_status_bar()?;

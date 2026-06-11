@@ -64,6 +64,8 @@ pub struct Session {
 
     // 发送命令的通道
     send_tx: Option<mpsc::Sender<String>>,
+    /// 发送原始数据包的通道
+    send_raw_tx: Option<mpsc::Sender<Vec<u8>>>,
 }
 
 /// 将 GBK 字节解码为 UTF-8 字符串
@@ -148,6 +150,7 @@ impl Session {
             password: config.password.clone(),
             auto_connect: config.auto_connect,
             send_tx: None,
+            send_raw_tx: None,
         }
     }
 
@@ -156,15 +159,75 @@ impl Session {
         let addr = format!("{}:{}", self.host, self.port);
         self.state = SessionState::Connecting;
 
-        let stream = TcpStream::connect(&addr)
+        // 解析服务器地址
+        let addr = format!("{}:{}", self.host, self.port);
+
+        let tokio_stream = TcpStream::connect(&addr)
             .await
             .map_err(|e| format!("连接 {} 失败: {}", addr, e))?;
+
+        // 转换到 std 流来配置 keepalive
+        let std_stream = tokio_stream
+            .into_std()
+            .map_err(|e| format!("转换 TCP 流失败: {}", e))?;
+
+        // 启用 TCP keepalive，防止断包导致连接静默断开
+        // 用 libc 统一配置（包括 SO_KEEPALIVE 和 Linux 特有参数）
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = std_stream.as_raw_fd();
+            let enable: libc::c_int = 1;
+            let idle: libc::c_int = 15;  // 空闲 15 秒后开始探测
+            let intvl: libc::c_int = 5;  // 探测间隔 5 秒
+            let cnt: libc::c_int = 3;    // 3 次失败后断开（最多 15+3*5=30 秒）
+            unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_KEEPALIVE,
+                    &enable as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_TCP,
+                    libc::TCP_KEEPIDLE,
+                    &idle as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_TCP,
+                    libc::TCP_KEEPINTVL,
+                    &intvl as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_TCP,
+                    libc::TCP_KEEPCNT,
+                    &cnt as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+            }
+        }
+
+        // tokio 要求非阻塞模式
+        std_stream
+            .set_nonblocking(true)
+            .map_err(|e| format!("设置非阻塞失败: {}", e))?;
+
+        let stream = tokio::net::TcpStream::from_std(std_stream)
+            .map_err(|e| format!("转为 tokio 流失败: {}", e))?;
 
         self.state = SessionState::Connected;
 
         let (event_tx, event_rx) = mpsc::channel(256);
         let (send_tx, mut send_rx) = mpsc::channel::<String>(256);
         self.send_tx = Some(send_tx);
+        let (send_raw_tx, mut send_raw_rx) = mpsc::channel::<Vec<u8>>(256);
+        self.send_raw_tx = Some(send_raw_tx);
 
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -257,20 +320,44 @@ impl Session {
         let event_tx_write = event_tx.clone();
         let write_encoding = self.encoding.clone();
         tokio::spawn(async move {
-            while let Some(cmd) = send_rx.recv().await {
-                // 根据编码将命令转为字节
-                let bytes = match write_encoding {
-                    Encoding::Gbk => encode_gbk(&cmd),
-                    Encoding::Utf8 => cmd.into_bytes(),
-                };
-                // MUD 协议要求命令以 \r\n 结尾
-                let mut packet = bytes;
-                packet.extend_from_slice(b"\r\n");
-                if let Err(e) = write_half.write_all(&packet).await {
-                    let _ = event_tx_write
-                        .send(SessionEvent::Error(format!("发送失败: {}", e)))
-                        .await;
-                    break;
+            use tokio::select;
+            loop {
+                select! {
+                    maybe_cmd = send_rx.recv() => {
+                        match maybe_cmd {
+                            Some(cmd) => {
+                                // 根据编码将命令转为字节
+                                let bytes = match write_encoding {
+                                    Encoding::Gbk => encode_gbk(&cmd),
+                                    Encoding::Utf8 => cmd.into_bytes(),
+                                };
+                                // MUD 协议要求命令以 \r\n 结尾
+                                let mut packet = bytes;
+                                packet.extend_from_slice(b"\r\n");
+                                if let Err(e) = write_half.write_all(&packet).await {
+                                    let _ = event_tx_write
+                                        .send(SessionEvent::Error(format!("发送失败: {}", e)))
+                                        .await;
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                    maybe_raw = send_raw_rx.recv() => {
+                        match maybe_raw {
+                            Some(bytes) => {
+                                // 原始数据包直接写入，不编码、不加 \r\n
+                                if let Err(e) = write_half.write_all(&bytes).await {
+                                    let _ = event_tx_write
+                                        .send(SessionEvent::Error(format!("发送原始数据失败: {}", e)))
+                                        .await;
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
                 }
             }
         });
@@ -288,6 +375,16 @@ impl Session {
         if let Some(tx) = &self.send_tx {
             tx.try_send(cmd.to_string())
                 .map_err(|e| format!("发送队列满或已关闭: {}", e))
+        } else {
+            Err("未连接".to_string())
+        }
+    }
+
+    /// 发送原始数据包到服务器
+    pub fn send_raw(&self, data: Vec<u8>) -> Result<(), String> {
+        if let Some(tx) = &self.send_raw_tx {
+            tx.try_send(data)
+                .map_err(|e| format!("原始数据发送队列满或已关闭: {}", e))
         } else {
             Err("未连接".to_string())
         }

@@ -97,6 +97,15 @@ impl ConnectionManager {
         }
     }
 
+    /// 发送原始数据包到指定连接
+    pub fn send_raw(&self, id: usize, data: Vec<u8>) -> Result<(), String> {
+        if id < self.sessions.len() {
+            self.sessions[id].send_raw(data)
+        } else {
+            Err(format!("连接 {} 不存在", id))
+        }
+    }
+
     /// 切换前台连接
     pub fn switch_foreground(&mut self, id: usize) -> Result<(), String> {
         if id < self.sessions.len() {

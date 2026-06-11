@@ -83,8 +83,11 @@
   | "group" | 设置所属组 | string |
   | "regexp" | 设置正则表达式 | string |
   | "sequence" | 设置执行顺序 | number |
+  | "enabled" | 启用/禁用 | boolean/number |
+  | "send_to" | 发送目标 | number |
 
 - **示例**:
   ```lua
   SetAliasOption("go_n", "group", "movement")
+  SetAliasOption("go_n", "regexp", "^n$")
   ```

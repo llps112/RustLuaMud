@@ -91,21 +91,22 @@ AddTrigger 的扩展版本，支持可变参数。
 - **参数**:
   | info_type | 说明 | 返回值类型 |
   |-----------|------|-----------|
-  | 1 | 名称 | string |
-  | 2 | 匹配文本 | string |
-  | 3 | 响应文本 | string |
-  | 4 | 标志位 | integer |
-  | 5 | 发送目标 | integer |
-  | 6 | 序列 (sequence) | integer |
-  | 7 | 是否启用 | boolean |
-  | 8 | 所属组 | string |
-  | 9 | 正则表达式 | string |
+  | 1 | 匹配文本 | string |
+  | 2 | 响应文本 | string |
+  | 3 | 声音文件 | string |
+  | 4 | 脚本函数名 | string |
+  | 5 | 是否从日志排除 | boolean |
+  | 6 | 是否从输出排除 | boolean |
+  | 7 | 是否继续匹配 (Keep evaluating) | boolean |
+  | 8 | 是否启用 | boolean |
+  | 9 | 正则表达式 | boolean |
+  | 26 | 所属组 | string |
 
 - **示例**:
   ```lua
   local name = GetTriggerInfo("t1", 1)      -- 获取名称
-  local enabled = GetTriggerInfo("t1", 7)    -- 获取启用状态
-  local group = GetTriggerInfo("t1", 8)      -- 获取所属组
+  local enabled = GetTriggerInfo("t1", 8)    -- 获取启用状态
+  local group = GetTriggerInfo("t1", 26)     -- 获取所属组
   ```
 
 ---
@@ -120,11 +121,17 @@ AddTrigger 的扩展版本，支持可变参数。
   | "group" | 设置所属组 | string |
   | "regexp" | 设置正则表达式 | string |
   | "sequence" | 设置执行顺序 | number |
+  | "enabled" | 启用/禁用 | boolean/number |
+  | "send" | 设置发送文本 | string |
+  | "multiline" | 启用多行匹配 | boolean/number |
+  | "lines_to_match" | 多行匹配行数 | number |
+  | "omit_from_output" | 匹配行不显示 | boolean/number |
 
 - **示例**:
   ```lua
   SetTriggerOption("t1", "group", "my_group")
   SetTriggerOption("t1", "sequence", 10)
+  SetTriggerOption("t1", "regexp", "^您(.+)了")
   ```
 
 ---
