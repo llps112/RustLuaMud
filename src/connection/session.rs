@@ -181,7 +181,7 @@ impl Session {
 
             loop {
                 byte_buf.clear();
-                // 逐字节读取直到遇到 \n
+                // 逐字节读取直到遇到 \n（或 \r 作为部分行交付）
                 loop {
                     let mut one_byte = [0u8; 1];
                     match reader.read(&mut one_byte).await {
@@ -197,6 +197,27 @@ impl Session {
                             if one_byte[0] == b'\n' {
                                 break;
                             }
+                            if one_byte[0] == b'\r' && !byte_buf.is_empty() {
+                                // \r 作为部分行交付（MUD 常用 \r 覆盖当前行，无 \n）
+                                // 去掉 \r 本身，交付当前缓冲区内容
+                                byte_buf.pop(); // 移除 \r
+                                if !byte_buf.is_empty() {
+                                    // 先过滤 telnet IAC 协议字节
+                                    let cleaned = strip_telnet_iac(&byte_buf);
+                                    if !cleaned.is_empty() {
+                                        let line_str = match encoding {
+                                            Encoding::Gbk => decode_gbk(&cleaned),
+                                            Encoding::Utf8 => {
+                                                String::from_utf8_lossy(&cleaned).into_owned()
+                                            }
+                                        };
+                                        let _ = event_tx_read
+                                            .send(SessionEvent::Data(line_str))
+                                            .await;
+                                    }
+                                }
+                                byte_buf.clear();
+                            }
                         }
                         Err(e) => {
                             let _ = event_tx_read
@@ -208,6 +229,11 @@ impl Session {
                             return;
                         }
                     }
+                }
+
+                // 跳过仅含 \n 的空行（紧随 \r 交付后产生，如 CRLF 序列的第二个字节）
+                if byte_buf.len() == 1 && byte_buf[0] == b'\n' {
+                    continue;
                 }
 
                 // 过滤 telnet IAC 协议字节

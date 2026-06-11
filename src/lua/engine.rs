@@ -1641,6 +1641,15 @@ impl LuaEngine {
                 let host = state_rc_gi.borrow().host.clone();
                 Ok(Value::String(lua.create_string(&host)?))
             }
+            6 => {
+                // MushClient: GetInfo(6) 返回脚本引擎版本号
+                let version: String = lua
+                    .globals()
+                    .get::<mlua::Table>("jit")
+                    .and_then(|t| t.get::<String>("version"))
+                    .unwrap_or_else(|_| "LuaJIT".to_string());
+                Ok(Value::String(lua.create_string(&version)?))
+            }
             35 => {
                 let dir = script_dir_rc.borrow().clone();
                 match dir {

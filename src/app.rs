@@ -336,8 +336,23 @@ impl App {
                 if session_id < self.manager.sessions.len()
                     && self.manager.sessions[session_id].lua_engine.is_some()
                 {
-                    if let Some(ref mut engine) = self.manager.sessions[session_id].lua_engine {
+                    // 先排空 OnConnect() 产生的命令和日志，再发送
+                    let (queued_cmds, queued_logs) = {
+                        let engine = self.manager.sessions[session_id]
+                            .lua_engine
+                            .as_mut()
+                            .unwrap();
                         engine.set_connected(true);
+                        (engine.drain_commands(), engine.drain_logs())
+                    };
+                    for cmd in &queued_cmds {
+                        if let Err(e) = self.manager.send_to(session_id, cmd) {
+                            self.terminal
+                                .append_output(&format!("[发送错误] {}", e))?;
+                        }
+                    }
+                    for msg in &queued_logs {
+                        self.terminal.append_output(msg)?;
                     }
                 } else {
                     self.init_lua_for_session(session_id)?;
@@ -662,7 +677,7 @@ impl App {
         if let Some(cmd) = self.terminal.handle_key(key) {
             // 用户按了 Enter，提交命令
             if !cmd.is_empty() {
-                self.terminal.append_output(&format!("> {}", cmd))?;
+                self.terminal.append_output(&format!("> \x1b[33m{}\x1b[0m", cmd))?;
                 // 处理内置命令（以 / 开头）
                 if cmd.starts_with('/') {
                     self.handle_builtin_command(&cmd)?;
