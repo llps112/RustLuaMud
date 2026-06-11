@@ -1,3 +1,0 @@
-# 加密 class 文件夹下的所有文件
-scripts/class/** filter=git-crypt diff=git-crypt
-scripts/class/**/* filter=git-crypt diff=git-crypt
