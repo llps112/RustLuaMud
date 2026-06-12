@@ -672,7 +672,8 @@ impl App {
             }
             // 如果是前台连接，也在终端显示（保留 ANSI 码以显示颜色）
             if session_id == self.manager.foreground_id {
-                self.terminal.append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
+                self.terminal
+                    .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
             }
         }
         Ok(())
@@ -880,20 +881,25 @@ impl App {
                     Ok(mut engine) => match engine.load_script(&path) {
                         Ok(()) => {
                             self.manager.sessions[fg].lua_engine = Some(engine);
-                            self.terminal
-                                .append_output(&format!("\x1b[36m[Lua] 脚本已加载: {}\x1b[0m", path))?;
+                            self.terminal.append_output(&format!(
+                                "\x1b[36m[Lua] 脚本已加载: {}\x1b[0m",
+                                path
+                            ))?;
                             self.start_timers_for_session(fg);
                         }
                         Err(e) => {
                             let err_msg = e.to_string();
                             for line in format_lua_error(&err_msg) {
-                                self.terminal.append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", line))?;
+                                self.terminal
+                                    .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", line))?;
                             }
                         }
                     },
                     Err(e) => {
-                        self.terminal
-                            .append_output(&format!("\x1b[36m[Lua] 引擎初始化失败: {}\x1b[0m", e))?;
+                        self.terminal.append_output(&format!(
+                            "\x1b[36m[Lua] 引擎初始化失败: {}\x1b[0m",
+                            e
+                        ))?;
                     }
                 }
             }
@@ -935,7 +941,10 @@ impl App {
                                 Err(e) => {
                                     let err_msg = e.to_string();
                                     for line in format_lua_error(&err_msg) {
-                                        self.terminal.append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", line))?;
+                                        self.terminal.append_output(&format!(
+                                            "\x1b[36m[Lua] {}\x1b[0m",
+                                            line
+                                        ))?;
                                     }
                                     // 脚本加载错误也写入日志
                                     let name = self.manager.sessions[fg].name.clone();
@@ -946,8 +955,10 @@ impl App {
                             }
                         }
                         Err(e) => {
-                            self.terminal
-                                .append_output(&format!("\x1b[36m[Lua] 引擎初始化失败: {}\x1b[0m", e))?;
+                            self.terminal.append_output(&format!(
+                                "\x1b[36m[Lua] 引擎初始化失败: {}\x1b[0m",
+                                e
+                            ))?;
                         }
                     }
                 } else {
@@ -1078,7 +1089,8 @@ impl App {
                                 let clean = crate::ui::AnsiParser::strip_ansi(&msg);
                                 self.logger.log(&name, &clean);
                                 if id == self.manager.foreground_id {
-                                    self.terminal.append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
+                                    self.terminal
+                                        .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
                                 }
                             }
                             all_cmds

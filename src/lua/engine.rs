@@ -2946,7 +2946,12 @@ impl LuaEngine {
     pub fn fire_timer_by_name(&self, name: &str) {
         // 使用 catch_unwind 防止 panic 跨越 FFI 边界导致静默崩溃
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let index = self.state.borrow().timers.iter().position(|t| t.name == name);
+            let index = self
+                .state
+                .borrow()
+                .timers
+                .iter()
+                .position(|t| t.name == name);
             match index {
                 Some(i) => self.fire_timer_inner(i),
                 None => {} // 定时器可能已被回调删除，忽略
