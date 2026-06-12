@@ -1052,10 +1052,12 @@ impl LuaEngine {
         let note_fn = lua.create_function_mut(move |_, text: String| {
             let mut state = state_rc6.borrow_mut();
             let buffered = std::mem::take(&mut state.tell_buffer);
-            if !buffered.is_empty() {
-                state.pending_logs.push(buffered);
-            }
-            state.pending_logs.push(text);
+            let full_msg = if buffered.is_empty() {
+                text
+            } else {
+                format!("{}{}", buffered, text)
+            };
+            state.pending_logs.push(full_msg);
             Ok(())
         })?;
         globals.set("Note", note_fn)?;
@@ -1090,12 +1092,14 @@ impl LuaEngine {
             }
             let msg = parts.join("\t");
             let mut state = state_rc_print.borrow_mut();
-            // 先 flush tell_buffer 中的内联内容
+            // 先 flush tell_buffer 中的内联内容，与 print 内容合并为一行
             let buffered = std::mem::take(&mut state.tell_buffer);
-            if !buffered.is_empty() {
-                state.pending_logs.push(buffered);
-            }
-            state.pending_logs.push(msg);
+            let full_msg = if buffered.is_empty() {
+                msg
+            } else {
+                format!("{}{}", buffered, msg)
+            };
+            state.pending_logs.push(full_msg);
             drop(state);
             Ok(())
         })?;
@@ -3197,10 +3201,14 @@ impl LuaEngine {
     /// 取出待发送的日志消息
     pub fn drain_logs(&self) -> Vec<String> {
         let mut state = self.state.borrow_mut();
-        // flush 残留的 tell_buffer
+        // flush 残留的 tell_buffer（合并到 pending_logs 末尾）
         let buffered = std::mem::take(&mut state.tell_buffer);
         if !buffered.is_empty() {
-            state.pending_logs.push(buffered);
+            if let Some(last) = state.pending_logs.last_mut() {
+                last.push_str(&buffered);
+            } else {
+                state.pending_logs.push(buffered);
+            }
         }
         state.pending_logs.drain(..).collect()
     }
