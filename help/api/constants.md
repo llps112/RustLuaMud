@@ -29,17 +29,26 @@ AddTrigger("t1", "^(%w+):(%d+)", "",
 
 别名标志位，用于 `AddAlias`。
 
-| 常量 | 值 | 说明 |
-|------|-----|------|
+| 常量 | 官方值 | 说明 |
+|------|--------|------|
 | `alias_flag.Enabled` | 1 | 启用别名 |
+| `alias_flag.KeepEvaluating` | 8 | 保持继续评估 |
+| `alias_flag.IgnoreAliasCase` | 32 | 忽略大小写 |
+| `alias_flag.OmitFromLogFile` | 64 | 不在日志文件中记录 |
+| `alias_flag.RegularExpression` | **128** | 启用正则表达式匹配 |
+| `alias_flag.ExpandVariables` | 512 | 展开 @direction 等变量 |
 | `alias_flag.Replace` | 1024 | 同名替换 |
-| `alias_flag.RegularExpression` | 2048 | 启用正则表达式匹配 |
-| `alias_flag.IgnoreCase` | 4096 | 忽略大小写 |
+| `alias_flag.AliasSpeedWalk` | 2048 | 将发送串解释为 speedwalk 串 |
+| `alias_flag.AliasQueue` | 4096 | 按 speedwalk 延迟间隔排队发送 |
+| `alias_flag.AliasMenu` | 8192 | 此别名出现在别名菜单上 |
+| `alias_flag.Temporary` | 16384 | 临时别名，不保存到世界文件 |
+
+> **注意**：本项目 Lua 引擎实际 `alias_flag.RegularExpression = 32`（借用 trigger_flag 的值），以兼容现有脚本中硬编码的 `33`（`Enabled + RegularExpression`）。如需使用官方值 128，需同步修改脚本中所有硬编码 `33` 为 `129`。
 
 **组合使用**:
 ```lua
 AddAlias("go_n", "^n$", "north", 
-    alias_flag.Enabled + alias_flag.Replace)
+    alias_flag.Enabled + alias_flag.Replace + alias_flag.RegularExpression)
 
 AddAlias("goto", "^goto (.+)$", "go %1",
     alias_flag.Enabled + alias_flag.Replace + alias_flag.RegularExpression)

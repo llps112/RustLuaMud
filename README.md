@@ -135,6 +135,7 @@ password = "your_password"
 |-----|------|
 | `AddAlias(name, match, response, flags, [script])` | 注册别名 |
 | `DeleteAlias(name)` | 删除别名 |
+| `GetAliasInfo(name, code)` | 获取别名信息（1=匹配文本, 6=启用, 16=组, 18=发送位置等） |
 | `GetAliasList()` | 获取别名名称列表 |
 | `SetAliasOption(name, option, value)` | 设置别名选项 |
 
@@ -161,6 +162,10 @@ password = "your_password"
 |-----|------|
 | `send(cmd)` / `Execute(cmd)` | 发送命令到服务器 |
 | `DiscardQueue()` | 清空命令队列 |
+| `DoAfter(seconds, command)` | 延迟执行命令 |
+| `DoAfterNote(seconds, text)` | 延迟输出文本到窗口 |
+| `DoAfterSpecial(seconds, text, send_to)` | 延迟发送到指定位置 |
+| `DoAfterSpeedWalk(seconds, text)` | 延迟执行 speedwalk |
 | `Note(msg)` | 输出文本 |
 | `Tell(msg)` | 内联输出（不换行） |
 | `print(...)` | 标准 Lua print，重定向到输出窗口 |

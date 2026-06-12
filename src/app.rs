@@ -346,6 +346,7 @@ impl App {
                         (engine.drain_commands(), engine.drain_logs())
                     };
                     for cmd in &queued_cmds {
+                        self.logger.log_command(&name, cmd);
                         if let Err(e) = self.manager.send_to(session_id, cmd) {
                             self.terminal.append_output(&format!("[发送错误] {}", e))?;
                         }
@@ -408,6 +409,7 @@ impl App {
         }
 
         // 从 Session 自身获取配置
+        let name = self.manager.sessions[id].name.clone();
         let script_path = self.manager.sessions[id].script_path.clone();
         let username = self.manager.sessions[id].username.clone();
         let password = self.manager.sessions[id].password.clone();
@@ -451,6 +453,7 @@ impl App {
                                         ))?;
                                     }
                                 } else {
+                                    self.logger.log_command(&name, cmd);
                                     if let Err(e) = self.manager.send_to(id, cmd) {
                                         self.terminal
                                             .append_output(&format!("[发送错误] {}", e))?;
@@ -459,8 +462,11 @@ impl App {
                             }
 
                             // 排空并显示脚本加载期间的 Lua 日志
+                            let name = self.manager.sessions[id].name.clone();
                             let logs = engine.drain_logs();
                             for msg in logs {
+                                let clean = crate::ui::AnsiParser::strip_ansi(&msg);
+                                self.logger.log(&name, &clean);
                                 self.terminal.append_output(&msg)?;
                             }
 
@@ -501,6 +507,7 @@ impl App {
                             }
                         };
                         for cmd in &queued_cmds {
+                            self.logger.log_command(&name, cmd);
                             if let Err(e) = self.manager.send_to(id, cmd) {
                                 self.terminal.append_output(&format!("[发送错误] {}", e))?;
                             }
@@ -719,11 +726,7 @@ impl App {
                             let handled = engine.process_input(&cmd);
                             if handled {
                                 let commands = engine.drain_commands();
-                                for c in commands {
-                                    if let Err(e) = self.manager.send_to(fg, &c) {
-                                        self.terminal.append_output(&format!("[错误] {}", e))?;
-                                    }
-                                }
+                                self.send_lua_commands(fg, commands)?;
                                 self.drain_lua_logs(fg)?;
                             }
                             handled
@@ -931,9 +934,17 @@ impl App {
                             }
                             match engine.load_script(&path) {
                                 Ok(()) => {
+                                    // 排空并记录加载期间的 Lua 日志
+                                    let name = self.manager.sessions[fg].name.clone();
+                                    let logs = engine.drain_logs();
+                                    for msg in logs {
+                                        let clean = crate::ui::AnsiParser::strip_ansi(&msg);
+                                        self.logger.log(&name, &clean);
+                                        self.terminal.append_output(&format!("\x1b[36m{}\x1b[0m", msg))?;
+                                    }
                                     self.manager.sessions[fg].lua_engine = Some(engine);
                                     self.terminal.append_output(&format!(
-                                        "[Lua] 脚本已重新加载: {}",
+                                        "\x1b[36m[Lua] 脚本已重新加载: {}\x1b[0m",
                                         path
                                     ))?;
                                     self.start_timers_for_session(fg);

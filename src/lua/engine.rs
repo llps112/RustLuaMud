@@ -273,6 +273,7 @@ pub struct Trigger {
 /// 别名定义
 pub struct Alias {
     pub name: String,
+    pub match_text: String,
     pub pattern: Regex,
     pub callback: Function,
     pub enabled: bool,
@@ -1464,8 +1465,9 @@ impl LuaEngine {
             } else {
                 String::new()
             };
+            let is_regex = (flags & 32) != 0;
 
-            let re_str = if (flags & 32) != 0 {
+            let re_str = if is_regex {
                 convert_pcre_to_rust_regex(&match_str)
             } else {
                 regex_escape(&match_str)
@@ -1503,6 +1505,7 @@ impl LuaEngine {
 
             state_rc15.borrow_mut().aliases.push(Alias {
                 name,
+                match_text: match_str,
                 pattern: re,
                 callback,
                 enabled: (flags & 1) != 0,
@@ -1540,6 +1543,52 @@ impl LuaEngine {
             Ok(Value::Table(list))
         })?;
         globals.set("GetAliasList", get_alias_list_fn)?;
+
+        // GetAliasInfo(name, code) — MushClient API 兼容
+        let state_rc_gi = state_rc.clone();
+        let get_alias_info_fn =
+            lua.create_function_mut(move |lua, (name, code): (String, i64)| {
+                let state = state_rc_gi.borrow();
+                if let Some(a) = state.aliases.iter().find(|a| a.name == name) {
+                    match code {
+                        1 => Ok(Value::String(lua.create_string(&a.match_text)?)),
+                        2 => Ok(Value::String(lua.create_string(&a.response)?)),
+                        3 => Ok(Value::String(lua.create_string("")?)),
+                        4 => Ok(Value::Boolean(false)),
+                        5 => Ok(Value::Boolean(false)),
+                        6 => Ok(Value::Boolean(a.enabled)),
+                        7 => Ok(Value::Boolean(false)),
+                        8 => Ok(Value::Boolean(true)),
+                        9 => Ok(Value::Boolean(false)),
+                        10 => Ok(Value::Integer(0)),
+                        11 => Ok(Value::Integer(0)),
+                        12 => Ok(Value::Boolean(false)),
+                        13 => Ok(Value::Nil),
+                        14 => Ok(Value::Boolean(false)),
+                        15 => Ok(Value::Boolean(false)),
+                        16 => Ok(Value::String(lua.create_string(&a.group)?)),
+                        17 => Ok(Value::String(lua.create_string("")?)),
+                        18 => Ok(Value::Integer(a.send_to)),
+                        19 => Ok(Value::Integer(1)),
+                        20 => Ok(Value::Integer(a.sequence as i64)),
+                        21 => Ok(Value::Boolean(true)),
+                        22 => Ok(Value::Boolean(false)),
+                        23 => Ok(Value::Integer(0)),
+                        24 => Ok(Value::Integer(0)),
+                        25 => Ok(Value::Nil),
+                        26 => Ok(Value::Boolean(true)),
+                        27 => Ok(Value::Boolean(true)),
+                        28 => Ok(Value::Integer(0)),
+                        29 => Ok(Value::Boolean(false)),
+                        30 => Ok(Value::Number(0.0)),
+                        31 => Ok(Value::Integer(0)),
+                        _ => Ok(Value::Nil),
+                    }
+                } else {
+                    Ok(Value::Nil)
+                }
+            })?;
+        globals.set("GetAliasInfo", get_alias_info_fn)?;
 
         // SetAliasOption(name, key, value)
         let state_rc18 = state_rc.clone();
@@ -1676,6 +1725,135 @@ impl LuaEngine {
             Ok(Value::Integer(0))
         })?;
         globals.set("AddTimer", add_timer_fn)?;
+
+        // DoAfter(seconds, text) — 一次性临时定时器，发送文本到 MUD (send_to=0)
+        let state_rc_da = state_rc.clone();
+        let doafter_fn = lua.create_function_mut(move |lua, (seconds, text): (f64, String)| {
+            if seconds < 0.1 || seconds > 86399.0 {
+                return Ok(Value::Integer(1)); // eTimeInvalid
+            }
+            let mut state = state_rc_da.borrow_mut();
+            state.unique_counter += 1;
+            let timer_name = format!("__doafter_{}", state.unique_counter);
+            let interval_millis = (seconds * 1000.0) as u64;
+
+            let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
+            let send_text = format!("Execute([[{}]])", text);
+
+            state.timers.push(TimerDef {
+                name: timer_name,
+                interval_millis,
+                callback,
+                enabled: true,
+                group: String::new(),
+                one_shot: true,
+                at_time: false,
+                send_text,
+                last_fired: std::time::Instant::now(),
+            });
+            Ok(Value::Integer(0)) // eOK
+        })?;
+        globals.set("DoAfter", doafter_fn)?;
+
+        // DoAfterNote(seconds, text) — 一次性临时定时器，输出文本到窗口 (send_to=2)
+        let state_rc_dn = state_rc.clone();
+        let doafter_note_fn =
+            lua.create_function_mut(move |lua, (seconds, text): (f64, String)| {
+                if seconds < 0.1 || seconds > 86399.0 {
+                    return Ok(Value::Integer(1)); // eTimeInvalid
+                }
+                let mut state = state_rc_dn.borrow_mut();
+                state.unique_counter += 1;
+                let timer_name = format!("__doafter_note_{}", state.unique_counter);
+                let interval_millis = (seconds * 1000.0) as u64;
+
+                let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
+                let send_text = format!("Note([[{}]])", text);
+
+                state.timers.push(TimerDef {
+                    name: timer_name,
+                    interval_millis,
+                    callback,
+                    enabled: true,
+                    group: String::new(),
+                    one_shot: true,
+                    at_time: false,
+                    send_text,
+                    last_fired: std::time::Instant::now(),
+                });
+                Ok(Value::Integer(0))
+            })?;
+        globals.set("DoAfterNote", doafter_note_fn)?;
+
+        // DoAfterSpecial(seconds, text, send_to) — 可指定目标位置
+        let state_rc_ds = state_rc.clone();
+        let doafter_special_fn =
+            lua.create_function_mut(move |lua, (seconds, text, send_to): (f64, String, i64)| {
+                if seconds < 0.1 || seconds > 86399.0 {
+                    return Ok(Value::Integer(1)); // eTimeInvalid
+                }
+                if send_to < 0 || send_to > 14 {
+                    return Ok(Value::Integer(2)); // eOptionOutOfRange
+                }
+                let mut state = state_rc_ds.borrow_mut();
+                state.unique_counter += 1;
+                let timer_name = format!("__doafter_special_{}", state.unique_counter);
+                let interval_millis = (seconds * 1000.0) as u64;
+
+                let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
+                let send_text = match send_to {
+                    0 | 10 | 13 => format!("Execute([[{}]])", text), // World / Execute / Immediate
+                    2 => format!("Note([[{}]])", text),               // Output window
+                    3 => format!("SetStatus([[{}]])", text),          // Status line
+                    11 => format!("Execute([[{}]])", text),           // Speedwalk (Execute 处理)
+                    12 | 14 => text,                                  // Script engine — 直接执行 Lua
+                    _ => format!("Execute([[{}]])", text),            // 默认走 Execute
+                };
+
+                state.timers.push(TimerDef {
+                    name: timer_name,
+                    interval_millis,
+                    callback,
+                    enabled: true,
+                    group: String::new(),
+                    one_shot: true,
+                    at_time: false,
+                    send_text,
+                    last_fired: std::time::Instant::now(),
+                });
+                Ok(Value::Integer(0))
+            })?;
+        globals.set("DoAfterSpecial", doafter_special_fn)?;
+
+        // DoAfterSpeedWalk(seconds, text) — speedwalk 定时器 (send_to=11)
+        let state_rc_dw = state_rc.clone();
+        let doafter_sw_fn =
+            lua.create_function_mut(move |lua, (seconds, text): (f64, String)| {
+                if seconds < 0.1 || seconds > 86399.0 {
+                    return Ok(Value::Integer(1)); // eTimeInvalid
+                }
+                let mut state = state_rc_dw.borrow_mut();
+                state.unique_counter += 1;
+                let timer_name = format!("__doafter_sw_{}", state.unique_counter);
+                let interval_millis = (seconds * 1000.0) as u64;
+
+                let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
+                let send_text = format!("Execute([[{}]])", text);
+
+                state.timers.push(TimerDef {
+                    name: timer_name,
+                    interval_millis,
+                    callback,
+                    enabled: true,
+                    group: String::new(),
+                    one_shot: true,
+                    at_time: false,
+                    send_text,
+                    last_fired: std::time::Instant::now(),
+                });
+                Ok(Value::Integer(0))
+            })?;
+        globals.set("DoAfterSpeedWalk", doafter_sw_fn)?;
 
         // DeleteTimer(name)
         let state_rc20 = state_rc.clone();
@@ -2553,6 +2731,7 @@ impl LuaEngine {
                     .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", pattern, e)))?;
                 state_rc34.borrow_mut().aliases.push(Alias {
                     name: String::new(),
+                    match_text: pattern.clone(),
                     pattern: re,
                     callback,
                     enabled: true,
@@ -2889,8 +3068,17 @@ impl LuaEngine {
                 for (i, m) in caps_list.iter().enumerate() {
                     code = code.replace(&format!("%{}", i + 1), m);
                 }
+                let name = {
+                    let state = self.state.borrow();
+                    state.aliases[idx].name.clone()
+                };
                 let lua_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _ = self.lua.load(&code).exec();
+                    if let Err(e) = self.lua.load(&code).exec() {
+                        self.log_error(&format!(
+                            "[Lua] 别名 '{}' send_to=12 执行错误: {:?}",
+                            name, e
+                        ));
+                    }
                 }));
                 if lua_result.is_err() {
                     self.log_error(&format!("别名 send_to=12 执行中发生 panic: {}", code));
@@ -4351,6 +4539,25 @@ mod tests {
             assert!(matched);
             let result: Option<String> = eval(engine, "return alias_result").unwrap();
             assert_eq!(result, Some("goblin".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_alias_war_matching() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                function warteam() print("warteam called") end
+                AddAlias("alias_war","^war$","warteam()",alias_flag.Enabled + alias_flag.Replace + alias_flag.RegularExpression ,"")
+                SetAliasOption("alias_war","send_to",12)
+            "#,
+            )
+            .unwrap();
+            let matched = engine.process_input("war");
+            assert!(matched, "war alias should match 'war'");
+            let matched2 = engine.process_input("war ");
+            assert!(!matched2, "alias should not match 'war ' (with trailing space)");
         });
     }
 
@@ -6827,6 +7034,77 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_doafter_executes_command() {
+        with_engine(|engine| {
+            let count_before = engine.timer_count();
+            exec(engine, r#"DoAfter(5, "test_command")"#).unwrap();
+            assert_eq!(engine.timer_count(), count_before + 1, "DoAfter should create a timer");
+            // Fire the timer
+            engine.fire_timer(count_before);
+            let cmds = engine.drain_commands();
+            assert!(cmds.contains(&"test_command".to_string()), "DoAfter timer should send command");
+        });
+    }
+
+    #[test]
+    fn test_doafter_note_output() {
+        with_engine(|engine| {
+            exec(engine, r#"DoAfterNote(3, "test note")"#).unwrap();
+            let count = engine.timer_count();
+            engine.fire_timer(count - 1);
+            let logs = engine.drain_logs();
+            assert!(logs.iter().any(|l| l.contains("test note")), "DoAfterNote should produce Note output");
+        });
+    }
+
+    #[test]
+    fn test_doafter_invalid_time() {
+        with_engine(|engine| {
+            let r: i64 = eval(engine, "return DoAfter(0, 'x')").unwrap();
+            assert_eq!(r, 1, "time < 0.1 should return 1 (eTimeInvalid)");
+            let r2: i64 = eval(engine, "return DoAfter(99999, 'x')").unwrap();
+            assert_eq!(r2, 1, "time > 86399 should return 1 (eTimeInvalid)");
+        });
+    }
+
+    #[test]
+    fn test_doafter_special_send_to_script() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                doafter_special_result = nil
+                DoAfterSpecial(1, "doafter_special_result = 'fired'", 12)
+                "#,
+            )
+            .unwrap();
+            let count = engine.timer_count();
+            engine.fire_timer(count - 1);
+            let r: Option<String> = eval(engine, "return doafter_special_result").unwrap();
+            assert_eq!(r, Some("fired".to_string()), "DoAfterSpecial send_to=12 should execute Lua");
+        });
+    }
+
+    #[test]
+    fn test_doafter_special_invalid_send_to() {
+        with_engine(|engine| {
+            let r: i64 = eval(engine, "return DoAfterSpecial(1, 'x', 99)").unwrap();
+            assert_eq!(r, 2, "send_to > 14 should return 2 (eOptionOutOfRange)");
+        });
+    }
+
+    #[test]
+    fn test_doafter_speedwalk() {
+        with_engine(|engine| {
+            exec(engine, r#"DoAfterSpeedWalk(2, "n;e;n")"#).unwrap();
+            let count = engine.timer_count();
+            engine.fire_timer(count - 1);
+            let cmds = engine.drain_commands();
+            assert!(cmds.contains(&"n;e;n".to_string()), "DoAfterSpeedWalk should send speedwalk string");
+        });
+    }
+
     // ================================================================
     // 别名集成测试
     // ================================================================
@@ -7037,6 +7315,74 @@ mod tests {
             assert!(handled);
             let result: Option<String> = eval(engine, "return raw_input").unwrap();
             assert_eq!(result, Some("test".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_get_alias_info_match_text() {
+        with_engine(|engine| {
+            exec(engine, r#"AddAlias('test_ai', 'kill *', '', 33)"#).unwrap();
+            let result: Option<String> = eval(engine, r#"return GetAliasInfo('test_ai', 1)"#).unwrap();
+            assert_eq!(result, Some("kill *".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_get_alias_info_response_text() {
+        with_engine(|engine| {
+            exec(engine, r#"AddAlias('test_ai2', 'go *', 'go_command', 33)"#).unwrap();
+            let result: Option<String> = eval(engine, r#"return GetAliasInfo('test_ai2', 2)"#).unwrap();
+            assert_eq!(result, Some("go_command".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_get_alias_info_enabled() {
+        with_engine(|engine| {
+            exec(engine, r#"AddAlias('test_ai3', 'test', '', 1)"#).unwrap();
+            let result: Option<bool> = eval(engine, r#"return GetAliasInfo('test_ai3', 6)"#).unwrap();
+            assert_eq!(result, Some(true)); // flags=1 => bit0 Enabled set => enabled=true
+        });
+    }
+
+    #[test]
+    fn test_get_alias_info_send_to() {
+        with_engine(|engine| {
+            // response non-empty, no 5th arg => send_to=12
+            exec(engine, r#"AddAlias('test_ai4', 'test', 'do_something()', 33)"#).unwrap();
+            let result: Option<i64> = eval(engine, r#"return GetAliasInfo('test_ai4', 18)"#).unwrap();
+            assert_eq!(result, Some(12));
+        });
+    }
+
+    #[test]
+    fn test_get_alias_info_group() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                AddAlias('test_ai5', 'test', '', 33)
+                SetAliasOption('test_ai5', 'group', 'mygroup')
+            "#).unwrap();
+            let result: Option<String> = eval(engine, r#"return GetAliasInfo('test_ai5', 16)"#).unwrap();
+            assert_eq!(result, Some("mygroup".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_get_alias_info_nonexistent_returns_nil() {
+        with_engine(|engine| {
+            let result: mlua::Value = eval(engine, r#"return GetAliasInfo('nonexistent', 1)"#).unwrap();
+            assert!(matches!(result, mlua::Value::Nil));
+        });
+    }
+
+    #[test]
+    fn test_get_alias_info_shorthand_alias() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                alias('^hello$', function() end)
+            "#).unwrap();
+            let result: Option<String> = eval(engine, r#"return GetAliasInfo('', 1)"#).unwrap();
+            assert_eq!(result, Some("^hello$".to_string()));
         });
     }
 
