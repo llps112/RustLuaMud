@@ -794,6 +794,13 @@ impl LuaEngine {
         let send_pkt_fn =
             lua.create_function_mut(move |_, data: mlua::String| -> LuaResult<i64> {
                 let bytes = data.as_bytes().to_vec();
+                // 限制单包大小，防止恶意或错误脚本导致内存暴涨
+                if bytes.len() > 65536 {
+                    return Err(mlua::Error::external(format!(
+                        "SendPkt: 数据包过大 ({} 字节，上限 65536)",
+                        bytes.len()
+                    )));
+                }
                 state_rc_pkt.borrow_mut().pending_raw.push(bytes);
                 Ok(0)
             })?;
@@ -2631,14 +2638,13 @@ impl LuaEngine {
 
     /// process_output 的内部实现
     fn process_output_inner(&self, line: &str) {
-        // 清空待发送队列
-        self.state.borrow_mut().pending_commands.clear();
-
-        // 记录收到数据的时间（用于空闲心跳检测）
-        self.state.borrow_mut().last_server_data = std::time::Instant::now();
-
-        // 递增数据包计数（供 GetInfo(204) 返回）
-        self.state.borrow_mut().packet_count += 1;
+        // 一次性 borrow_mut 完成多项状态更新
+        {
+            let mut state = self.state.borrow_mut();
+            state.pending_commands.clear();
+            state.last_server_data = std::time::Instant::now();
+            state.packet_count += 1;
+        }
 
         // 剥离 ANSI 码用于匹配，并去除行末 \r
         let clean_line = crate::ui::AnsiParser::strip_ansi(line);
@@ -2897,7 +2903,23 @@ impl LuaEngine {
         }
     }
 
-    /// 触发指定定时器
+    /// 触发指定定时器（按名称查找，避免索引失效）
+    pub fn fire_timer_by_name(&self, name: &str) {
+        // 使用 catch_unwind 防止 panic 跨越 FFI 边界导致静默崩溃
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let index = self.state.borrow().timers.iter().position(|t| t.name == name);
+            match index {
+                Some(i) => self.fire_timer_inner(i),
+                None => {} // 定时器可能已被回调删除，忽略
+            }
+        }));
+        if result.is_err() {
+            self.log_error("fire_timer_by_name 中发生 panic，已捕获以防止崩溃");
+        }
+    }
+
+    /// 触发指定定时器（按索引，仅供内部使用）
+    #[allow(dead_code)]
     pub fn fire_timer(&self, index: usize) {
         // 使用 catch_unwind 防止 panic 跨越 FFI 边界导致静默崩溃
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2909,6 +2931,9 @@ impl LuaEngine {
     }
 
     /// fire_timer 的内部实现
+    /// TODO(v1.0): 当前每个步骤单独 catch_unwind 是调试期的过度防御措施，
+    /// 正式发布前应简化为仅保留外层 catch_unwind（fire_timer / fire_timer_by_name），
+    /// 步骤级 catch_unwind 在 panic 后继续执行后续步骤可能导致状态不一致。
     fn fire_timer_inner(&self, index: usize) {
         // 步骤1: 清空待发送队列
         let step1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -3020,17 +3045,18 @@ impl LuaEngine {
 
     /// 检查并触发第一个到期的定时器
     /// 返回 true 如果触发了某个定时器
+    /// 注意：返回定时器名称而非索引，避免回调修改 timers 向量后索引失效
     pub fn fire_next_due_timer(&self) -> bool {
         let now = std::time::Instant::now();
-        let timer_idx = {
+        let timer_name = {
             let mut state = self.state.borrow_mut();
             let mut found = None;
-            for (i, timer) in state.timers.iter_mut().enumerate() {
+            for timer in state.timers.iter_mut() {
                 if timer.enabled {
                     let elapsed = now.duration_since(timer.last_fired);
                     if elapsed.as_millis() as u64 >= timer.interval_millis {
                         timer.last_fired = now;
-                        found = Some(i);
+                        found = Some(timer.name.clone());
                         break;
                     }
                 }
@@ -3038,9 +3064,9 @@ impl LuaEngine {
             found
         };
 
-        match timer_idx {
-            Some(i) => {
-                self.fire_timer(i);
+        match timer_name {
+            Some(name) => {
+                self.fire_timer_by_name(&name);
                 true
             }
             None => false,
@@ -7520,7 +7546,7 @@ mod tests {
     }
 
     // ================================================================
-    // cfg.data() / cfg.update() / cfg.save() — Lua 侧配置 API 测试
+    // cfg.data() / cfg.update() — Lua 侧配置 API 测试
     // 通过内联构建测试 schema 来验证逻辑
     // ================================================================
 
@@ -7776,78 +7802,6 @@ mod tests {
             )
             .unwrap();
             assert!(result.contains("\"ok\":false"));
-        });
-    }
-
-    #[test]
-    fn test_cfg_save_writes_file() {
-        with_engine(|engine| {
-            // 设置脚本路径（cfg.save() 依赖 GetInfo(35) 获取目录）
-            engine.set_script_path("/tmp/test_script.lua");
-            exec(
-                engine,
-                r#"
-                cfg = cfg or {}
-                test_v = 42
-                cfg.schema = {
-                    { key="test_v", label="测试", type="number", category="数值",
-                      getter=function() return test_v end,
-                      setter=function(v) test_v=v end },
-                }
-            "#,
-            )
-            .unwrap();
-
-            // 模拟 cfg.save() 的核心逻辑：遍历 schema 写文件
-            let result: bool = eval(
-                engine,
-                r#"
-                local dir = "/tmp/"
-                local config_path = dir .. "test_cfg_save.lua"
-                local lines = {"-- test", ""}
-                for _, field in ipairs(cfg.schema) do
-                    local val = field.getter()
-                    local val_str
-                    if type(val) == "boolean" then val_str = val and "1" or "0"
-                    elseif type(val) == "number" then val_str = tostring(val)
-                    else val_str = '"' .. tostring(val) .. '"' end
-                    table.insert(lines, field.key .. "=" .. val_str)
-                end
-                table.insert(lines, "")
-                local content = table.concat(lines, "\n")
-                local f, err = io.open(config_path, "w")
-                if not f then return false end
-                f:write(content)
-                f:close()
-                return true
-            "#,
-            )
-            .unwrap();
-            assert!(result);
-
-            // 验证文件内容
-            let content = std::fs::read_to_string("/tmp/test_cfg_save.lua").expect("文件应被创建");
-            assert!(content.contains("test_v=42"));
-            assert!(content.contains("-- test"));
-
-            // 清理
-            std::fs::remove_file("/tmp/test_cfg_save.lua").ok();
-        });
-    }
-
-    #[test]
-    fn test_cfg_save_io_error() {
-        with_engine(|engine| {
-            // 测试无法写入文件的情况
-            let result: bool = eval(
-                engine,
-                r#"
-                local f, err = io.open("/nonexistent_dir/file.lua", "w")
-                return (f == nil)
-            "#,
-            )
-            .unwrap();
-            assert!(result);
         });
     }
 

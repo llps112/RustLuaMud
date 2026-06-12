@@ -8,7 +8,7 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 
 ## 特性
 
-- **MUSHclient 脚本兼容** — 完整实现 MUSHclient API（AddTrigger / AddAlias / AddTimer / SetStatus / Simulate 等），从 MUSHclient 拷贝的脚本可无缝运行
+- **MUSHclient 脚本兼容** — 实现常用 MUSHclient API（AddTrigger / AddAlias / AddTimer / GetInfo / GetTriggerInfo / GetTimerInfo / GetPluginInfo / SetStatus / Simulate / SendPkt / 变量管理等），从 MUSHclient 迁移的脚本可无缝运行
 - **多连接管理** — 单实例同时管理最多 10 个角色连接，支持前台/后台切换
 - **仅前台渲染** — 仅前台连接渲染终端输出，后台连接静默记录日志
 - **ANSI 颜色** — 完整解析 ANSI SGR 转义序列，终端彩色显示
@@ -24,6 +24,8 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 - **Simulate API** — 模拟服务器输出触发 Lua 触发器，支持多行匹配
 - **内置命令** — `/connect`、`/disconnect`、`/load`、`/lua`、`/list`、`/set` 等
 - **极低资源占用** — J1800 + 2GB 内存可流畅运行 10 连接
+
+> **注意**：本客户端仅实现了 MUSHclient 的部分常用 API。如果你的脚本使用了未实现的 API（如 `Accelerator`、`AddFont`、`ArrayCreate` 等），脚本将无法正常运行。使用前请确认脚本中调用的所有 API 都在本项目的兼容范围内。
 
 ---
 
@@ -370,6 +372,15 @@ let result = engine.eval_to_string("return json_decode('{\"key\":\"value\"}')");
 | 内存 | 最低 512MB（基础使用），2GB 推荐（10 连接） |
 | 终端 | 支持 UTF-8 和 ANSI 转义序列的终端（如 xterm、GNOME Terminal、iTerm2、Windows Terminal） |
 | Rust | 1.70+（edition 2021） |
+
+## 故障排查
+
+开发阶段已硬编码启用 `RUST_BACKTRACE=1`，panic 时会自动打印堆栈信息。正式版发布前会移除此设置，届时如需调试可手动设置：
+
+```bash
+export RUST_BACKTRACE=1
+./RustLuaMud
+```
 
 ---
 

@@ -9,7 +9,7 @@ use app::App;
 use config::AppConfig;
 
 fn main() {
-    // 设置环境变量以便任何逃逸的 panic 能打印堆栈信息
+    // TODO(v1.0): 正式发布前必须移除此行，把 RUST_BACKTRACE 控制权交给用户
     std::env::set_var("RUST_BACKTRACE", "1");
 
     let config = AppConfig::load_default();

@@ -706,7 +706,7 @@ impl App {
             // 用户按了 Enter，提交命令
             if !cmd.is_empty() {
                 self.terminal
-                    .append_output(&format!("> \x1b[33m{}\x1b[0m", cmd))?;
+                    .append_output(&format!("> \x1b[38;2;255;215;0m{}\x1b[0m", cmd))?;
                 // 处理内置命令（以 / 开头）
                 if cmd.starts_with('/') {
                     self.handle_builtin_command(&cmd)?;

@@ -182,34 +182,46 @@ impl Session {
             let intvl: libc::c_int = 5; // 探测间隔 5 秒
             let cnt: libc::c_int = 3; // 3 次失败后断开（最多 15+3*5=30 秒）
             unsafe {
-                libc::setsockopt(
+                let set_keepalive = libc::setsockopt(
                     fd,
                     libc::SOL_SOCKET,
                     libc::SO_KEEPALIVE,
                     &enable as *const _ as *const libc::c_void,
                     std::mem::size_of::<libc::c_int>() as libc::socklen_t,
                 );
-                libc::setsockopt(
+                if set_keepalive != 0 {
+                    eprintln!("[警告] 设置 SO_KEEPALIVE 失败，TCP keepalive 未启用");
+                }
+                let set_idle = libc::setsockopt(
                     fd,
                     libc::SOL_TCP,
                     libc::TCP_KEEPIDLE,
                     &idle as *const _ as *const libc::c_void,
                     std::mem::size_of::<libc::c_int>() as libc::socklen_t,
                 );
-                libc::setsockopt(
+                if set_idle != 0 {
+                    eprintln!("[警告] 设置 TCP_KEEPIDLE 失败");
+                }
+                let set_intvl = libc::setsockopt(
                     fd,
                     libc::SOL_TCP,
                     libc::TCP_KEEPINTVL,
                     &intvl as *const _ as *const libc::c_void,
                     std::mem::size_of::<libc::c_int>() as libc::socklen_t,
                 );
-                libc::setsockopt(
+                if set_intvl != 0 {
+                    eprintln!("[警告] 设置 TCP_KEEPINTVL 失败");
+                }
+                let set_cnt = libc::setsockopt(
                     fd,
                     libc::SOL_TCP,
                     libc::TCP_KEEPCNT,
                     &cnt as *const _ as *const libc::c_void,
                     std::mem::size_of::<libc::c_int>() as libc::socklen_t,
                 );
+                if set_cnt != 0 {
+                    eprintln!("[警告] 设置 TCP_KEEPCNT 失败");
+                }
             }
         }
 
