@@ -1803,11 +1803,11 @@ impl LuaEngine {
                 let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
                 let send_text = match send_to {
                     0 | 10 | 13 => format!("Execute([[{}]])", text), // World / Execute / Immediate
-                    2 => format!("Note([[{}]])", text),               // Output window
-                    3 => format!("SetStatus([[{}]])", text),          // Status line
-                    11 => format!("Execute([[{}]])", text),           // Speedwalk (Execute 处理)
-                    12 | 14 => text,                                  // Script engine — 直接执行 Lua
-                    _ => format!("Execute([[{}]])", text),            // 默认走 Execute
+                    2 => format!("Note([[{}]])", text),              // Output window
+                    3 => format!("SetStatus([[{}]])", text),         // Status line
+                    11 => format!("Execute([[{}]])", text),          // Speedwalk (Execute 处理)
+                    12 | 14 => text,                                 // Script engine — 直接执行 Lua
+                    _ => format!("Execute([[{}]])", text),           // 默认走 Execute
                 };
 
                 state.timers.push(TimerDef {
@@ -4557,7 +4557,10 @@ mod tests {
             let matched = engine.process_input("war");
             assert!(matched, "war alias should match 'war'");
             let matched2 = engine.process_input("war ");
-            assert!(!matched2, "alias should not match 'war ' (with trailing space)");
+            assert!(
+                !matched2,
+                "alias should not match 'war ' (with trailing space)"
+            );
         });
     }
 
@@ -7039,11 +7042,18 @@ mod tests {
         with_engine(|engine| {
             let count_before = engine.timer_count();
             exec(engine, r#"DoAfter(5, "test_command")"#).unwrap();
-            assert_eq!(engine.timer_count(), count_before + 1, "DoAfter should create a timer");
+            assert_eq!(
+                engine.timer_count(),
+                count_before + 1,
+                "DoAfter should create a timer"
+            );
             // Fire the timer
             engine.fire_timer(count_before);
             let cmds = engine.drain_commands();
-            assert!(cmds.contains(&"test_command".to_string()), "DoAfter timer should send command");
+            assert!(
+                cmds.contains(&"test_command".to_string()),
+                "DoAfter timer should send command"
+            );
         });
     }
 
@@ -7054,7 +7064,10 @@ mod tests {
             let count = engine.timer_count();
             engine.fire_timer(count - 1);
             let logs = engine.drain_logs();
-            assert!(logs.iter().any(|l| l.contains("test note")), "DoAfterNote should produce Note output");
+            assert!(
+                logs.iter().any(|l| l.contains("test note")),
+                "DoAfterNote should produce Note output"
+            );
         });
     }
 
@@ -7082,7 +7095,11 @@ mod tests {
             let count = engine.timer_count();
             engine.fire_timer(count - 1);
             let r: Option<String> = eval(engine, "return doafter_special_result").unwrap();
-            assert_eq!(r, Some("fired".to_string()), "DoAfterSpecial send_to=12 should execute Lua");
+            assert_eq!(
+                r,
+                Some("fired".to_string()),
+                "DoAfterSpecial send_to=12 should execute Lua"
+            );
         });
     }
 
@@ -7101,7 +7118,10 @@ mod tests {
             let count = engine.timer_count();
             engine.fire_timer(count - 1);
             let cmds = engine.drain_commands();
-            assert!(cmds.contains(&"n;e;n".to_string()), "DoAfterSpeedWalk should send speedwalk string");
+            assert!(
+                cmds.contains(&"n;e;n".to_string()),
+                "DoAfterSpeedWalk should send speedwalk string"
+            );
         });
     }
 
@@ -7322,7 +7342,8 @@ mod tests {
     fn test_get_alias_info_match_text() {
         with_engine(|engine| {
             exec(engine, r#"AddAlias('test_ai', 'kill *', '', 33)"#).unwrap();
-            let result: Option<String> = eval(engine, r#"return GetAliasInfo('test_ai', 1)"#).unwrap();
+            let result: Option<String> =
+                eval(engine, r#"return GetAliasInfo('test_ai', 1)"#).unwrap();
             assert_eq!(result, Some("kill *".to_string()));
         });
     }
@@ -7331,7 +7352,8 @@ mod tests {
     fn test_get_alias_info_response_text() {
         with_engine(|engine| {
             exec(engine, r#"AddAlias('test_ai2', 'go *', 'go_command', 33)"#).unwrap();
-            let result: Option<String> = eval(engine, r#"return GetAliasInfo('test_ai2', 2)"#).unwrap();
+            let result: Option<String> =
+                eval(engine, r#"return GetAliasInfo('test_ai2', 2)"#).unwrap();
             assert_eq!(result, Some("go_command".to_string()));
         });
     }
@@ -7340,7 +7362,8 @@ mod tests {
     fn test_get_alias_info_enabled() {
         with_engine(|engine| {
             exec(engine, r#"AddAlias('test_ai3', 'test', '', 1)"#).unwrap();
-            let result: Option<bool> = eval(engine, r#"return GetAliasInfo('test_ai3', 6)"#).unwrap();
+            let result: Option<bool> =
+                eval(engine, r#"return GetAliasInfo('test_ai3', 6)"#).unwrap();
             assert_eq!(result, Some(true)); // flags=1 => bit0 Enabled set => enabled=true
         });
     }
@@ -7349,8 +7372,13 @@ mod tests {
     fn test_get_alias_info_send_to() {
         with_engine(|engine| {
             // response non-empty, no 5th arg => send_to=12
-            exec(engine, r#"AddAlias('test_ai4', 'test', 'do_something()', 33)"#).unwrap();
-            let result: Option<i64> = eval(engine, r#"return GetAliasInfo('test_ai4', 18)"#).unwrap();
+            exec(
+                engine,
+                r#"AddAlias('test_ai4', 'test', 'do_something()', 33)"#,
+            )
+            .unwrap();
+            let result: Option<i64> =
+                eval(engine, r#"return GetAliasInfo('test_ai4', 18)"#).unwrap();
             assert_eq!(result, Some(12));
         });
     }
@@ -7358,11 +7386,16 @@ mod tests {
     #[test]
     fn test_get_alias_info_group() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 AddAlias('test_ai5', 'test', '', 33)
                 SetAliasOption('test_ai5', 'group', 'mygroup')
-            "#).unwrap();
-            let result: Option<String> = eval(engine, r#"return GetAliasInfo('test_ai5', 16)"#).unwrap();
+            "#,
+            )
+            .unwrap();
+            let result: Option<String> =
+                eval(engine, r#"return GetAliasInfo('test_ai5', 16)"#).unwrap();
             assert_eq!(result, Some("mygroup".to_string()));
         });
     }
@@ -7370,7 +7403,8 @@ mod tests {
     #[test]
     fn test_get_alias_info_nonexistent_returns_nil() {
         with_engine(|engine| {
-            let result: mlua::Value = eval(engine, r#"return GetAliasInfo('nonexistent', 1)"#).unwrap();
+            let result: mlua::Value =
+                eval(engine, r#"return GetAliasInfo('nonexistent', 1)"#).unwrap();
             assert!(matches!(result, mlua::Value::Nil));
         });
     }
@@ -7378,9 +7412,13 @@ mod tests {
     #[test]
     fn test_get_alias_info_shorthand_alias() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 alias('^hello$', function() end)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             let result: Option<String> = eval(engine, r#"return GetAliasInfo('', 1)"#).unwrap();
             assert_eq!(result, Some("^hello$".to_string()));
         });

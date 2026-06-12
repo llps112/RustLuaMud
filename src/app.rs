@@ -940,7 +940,8 @@ impl App {
                                     for msg in logs {
                                         let clean = crate::ui::AnsiParser::strip_ansi(&msg);
                                         self.logger.log(&name, &clean);
-                                        self.terminal.append_output(&format!("\x1b[36m{}\x1b[0m", msg))?;
+                                        self.terminal
+                                            .append_output(&format!("\x1b[36m{}\x1b[0m", msg))?;
                                     }
                                     self.manager.sessions[fg].lua_engine = Some(engine);
                                     self.terminal.append_output(&format!(
