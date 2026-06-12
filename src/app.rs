@@ -672,7 +672,7 @@ impl App {
             }
             // 如果是前台连接，也在终端显示（保留 ANSI 码以显示颜色）
             if session_id == self.manager.foreground_id {
-                self.terminal.append_output(&format!("[Lua] {}", msg))?;
+                self.terminal.append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
             }
         }
         Ok(())
@@ -706,7 +706,7 @@ impl App {
             // 用户按了 Enter，提交命令
             if !cmd.is_empty() {
                 self.terminal
-                    .append_output(&format!("> \x1b[38;2;255;215;0m{}\x1b[0m", cmd))?;
+                    .append_output(&format!("> \x1b[38;2;255;235;59m{}\x1b[0m", cmd))?;
                 // 处理内置命令（以 / 开头）
                 if cmd.starts_with('/') {
                     self.handle_builtin_command(&cmd)?;
@@ -881,19 +881,19 @@ impl App {
                         Ok(()) => {
                             self.manager.sessions[fg].lua_engine = Some(engine);
                             self.terminal
-                                .append_output(&format!("[Lua] 脚本已加载: {}", path))?;
+                                .append_output(&format!("\x1b[36m[Lua] 脚本已加载: {}\x1b[0m", path))?;
                             self.start_timers_for_session(fg);
                         }
                         Err(e) => {
                             let err_msg = e.to_string();
                             for line in format_lua_error(&err_msg) {
-                                self.terminal.append_output(&format!("[Lua] {}", line))?;
+                                self.terminal.append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", line))?;
                             }
                         }
                     },
                     Err(e) => {
                         self.terminal
-                            .append_output(&format!("[Lua] 引擎初始化失败: {}", e))?;
+                            .append_output(&format!("\x1b[36m[Lua] 引擎初始化失败: {}\x1b[0m", e))?;
                     }
                 }
             }
@@ -935,7 +935,7 @@ impl App {
                                 Err(e) => {
                                     let err_msg = e.to_string();
                                     for line in format_lua_error(&err_msg) {
-                                        self.terminal.append_output(&format!("[Lua] {}", line))?;
+                                        self.terminal.append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", line))?;
                                     }
                                     // 脚本加载错误也写入日志
                                     let name = self.manager.sessions[fg].name.clone();
@@ -947,12 +947,12 @@ impl App {
                         }
                         Err(e) => {
                             self.terminal
-                                .append_output(&format!("[Lua] 引擎初始化失败: {}", e))?;
+                                .append_output(&format!("\x1b[36m[Lua] 引擎初始化失败: {}\x1b[0m", e))?;
                         }
                     }
                 } else {
                     self.terminal
-                        .append_output("[Lua] 未找到之前加载的脚本路径")?;
+                        .append_output("\x1b[36m[Lua] 未找到之前加载的脚本路径\x1b[0m")?;
                 }
             }
 
@@ -1078,7 +1078,7 @@ impl App {
                                 let clean = crate::ui::AnsiParser::strip_ansi(&msg);
                                 self.logger.log(&name, &clean);
                                 if id == self.manager.foreground_id {
-                                    self.terminal.append_output(&format!("[Lua] {}", msg))?;
+                                    self.terminal.append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
                                 }
                             }
                             all_cmds

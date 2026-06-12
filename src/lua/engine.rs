@@ -311,6 +311,8 @@ struct ScriptState {
     pending_commands: Vec<String>,
     pending_raw: Vec<Vec<u8>>,
     pending_logs: Vec<String>,
+    /// Tell/io.write 的行缓冲区，用于实现内联输出（如 tprint 的缩进）
+    tell_buffer: String,
     recent_lines: Vec<String>,
     unique_counter: u64,
     connected: bool,
@@ -716,6 +718,7 @@ impl LuaEngine {
             pending_commands: Vec::new(),
             pending_raw: Vec::new(),
             pending_logs: Vec::new(),
+            tell_buffer: String::new(),
             recent_lines: Vec::new(),
             unique_counter: 0,
             connected: false,
@@ -1047,7 +1050,12 @@ impl LuaEngine {
         // Note(text)
         let state_rc6 = state_rc.clone();
         let note_fn = lua.create_function_mut(move |_, text: String| {
-            state_rc6.borrow_mut().pending_logs.push(text);
+            let mut state = state_rc6.borrow_mut();
+            let buffered = std::mem::take(&mut state.tell_buffer);
+            if !buffered.is_empty() {
+                state.pending_logs.push(buffered);
+            }
+            state.pending_logs.push(text);
             Ok(())
         })?;
         globals.set("Note", note_fn)?;
@@ -1081,7 +1089,14 @@ impl LuaEngine {
                 }
             }
             let msg = parts.join("\t");
-            state_rc_print.borrow_mut().pending_logs.push(msg);
+            let mut state = state_rc_print.borrow_mut();
+            // 先 flush tell_buffer 中的内联内容
+            let buffered = std::mem::take(&mut state.tell_buffer);
+            if !buffered.is_empty() {
+                state.pending_logs.push(buffered);
+            }
+            state.pending_logs.push(msg);
+            drop(state);
             Ok(())
         })?;
         globals.set("print", print_fn)?;
@@ -1095,10 +1110,24 @@ impl LuaEngine {
         })?;
         globals.set("SetStatus", set_status_fn)?;
 
-        // Tell(text)
+        // Tell(text...) — 追加到 tell_buffer，实现内联输出（支持多参数拼接）
         let state_rc7 = state_rc.clone();
-        let tell_fn = lua.create_function_mut(move |_, text: String| {
-            state_rc7.borrow_mut().pending_logs.push(text);
+        let tell_fn = lua.create_function_mut(move |_lua, args: mlua::MultiValue| {
+            let mut text = String::new();
+            for v in args.iter() {
+                match v {
+                    mlua::Value::Nil => text.push_str("nil"),
+                    mlua::Value::String(s) => {
+                        let s = s.as_bytes().to_vec();
+                        text.push_str(&String::from_utf8_lossy(&s));
+                    }
+                    mlua::Value::Number(n) => text.push_str(&n.to_string()),
+                    mlua::Value::Integer(i) => text.push_str(&i.to_string()),
+                    mlua::Value::Boolean(b) => text.push_str(if *b { "true" } else { "false" }),
+                    _ => text.push_str(&format!("{:?}", v)),
+                }
+            }
+            state_rc7.borrow_mut().tell_buffer.push_str(&text);
             Ok(())
         })?;
         globals.set("Tell", tell_fn)?;
@@ -1457,8 +1486,12 @@ impl LuaEngine {
             };
 
             // MUSHclient AddAlias 默认行为：
-            // 当 response 非空且没有提供 script 参数时，send_to 默认为 12（执行 Lua 代码）
-            let send_to = if !response.is_empty() && args.len() <= 4 {
+            // 当 response 非空且没有提供 script 参数（或 script 为空字符串）时，send_to 默认为 12（执行 Lua 代码）
+            let has_script = args.len() > 4 && {
+                let s = coerce_to_string(args[4].clone()).unwrap_or_default();
+                !s.is_empty()
+            };
+            let send_to = if !response.is_empty() && !has_script {
                 12 // send to script — Lua 代码执行
             } else {
                 0 // send to world
@@ -1544,6 +1577,8 @@ impl LuaEngine {
                         "send_to" => {
                             if let Value::Integer(n) = value {
                                 a.send_to = n;
+                            } else if let Value::Number(n) = value {
+                                a.send_to = n as i64;
                             }
                         }
                         _ => {}
@@ -3161,7 +3196,13 @@ impl LuaEngine {
 
     /// 取出待发送的日志消息
     pub fn drain_logs(&self) -> Vec<String> {
-        self.state.borrow_mut().pending_logs.drain(..).collect()
+        let mut state = self.state.borrow_mut();
+        // flush 残留的 tell_buffer
+        let buffered = std::mem::take(&mut state.tell_buffer);
+        if !buffered.is_empty() {
+            state.pending_logs.push(buffered);
+        }
+        state.pending_logs.drain(..).collect()
     }
 
     /// 获取 SetStatus 设置的状态栏文本

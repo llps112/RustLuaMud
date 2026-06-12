@@ -66,7 +66,7 @@ username = "your_character_name"
 password = "your_password"
 ```
 
-> `profiles/example.toml` 为示例文件，程序启动时自动跳过，不会加载。
+> `profiles/example.toml` 为示例文件，程序启动时自动跳过，不会加载。如需临时禁用某个角色配置，可将文件后缀改为非 `.toml`（如 `.bak`），恢复时改回即可。
 
 程序启动时会自动扫描 `profiles/` 目录，加载所有 `.toml` 配置文件（`example.toml` 除外），按文件名排序依次连接。
 
