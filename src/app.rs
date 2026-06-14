@@ -592,24 +592,23 @@ impl App {
                 }
             } else if depth < max_depth {
                 // 非 / 开头的命令：先尝试别名匹配（与 MUSHclient Execute 行为一致）
-                let alias_handled = if let Some(ref engine) =
-                    self.manager.sessions[session_id].lua_engine
-                {
-                    let handled = engine.process_input(&cmd);
-                    if handled {
-                        let sub_commands = engine.drain_commands();
-                        if !sub_commands.is_empty() {
-                            // 别名匹配成功，产生的命令加入队列继续处理
-                            for sub_cmd in sub_commands {
-                                queue.push_front(sub_cmd);
+                let alias_handled =
+                    if let Some(ref engine) = self.manager.sessions[session_id].lua_engine {
+                        let handled = engine.process_input(&cmd);
+                        if handled {
+                            let sub_commands = engine.drain_commands();
+                            if !sub_commands.is_empty() {
+                                // 别名匹配成功，产生的命令加入队列继续处理
+                                for sub_cmd in sub_commands {
+                                    queue.push_front(sub_cmd);
+                                }
                             }
+                            self.drain_lua_logs(session_id)?;
                         }
-                        self.drain_lua_logs(session_id)?;
-                    }
-                    handled
-                } else {
-                    false
-                };
+                        handled
+                    } else {
+                        false
+                    };
 
                 if !alias_handled {
                     // 无别名匹配，直接发送到 MUD

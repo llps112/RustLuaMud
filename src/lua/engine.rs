@@ -7586,14 +7586,22 @@ mod tests {
             assert!(handled1);
             let cmds1 = engine.drain_commands();
             // Execute("north") 产生的 "north" 命令
-            assert!(cmds1.contains(&"north".to_string()), "go 别名应产生 north 命令，实际: {:?}", cmds1);
+            assert!(
+                cmds1.contains(&"north".to_string()),
+                "go 别名应产生 north 命令，实际: {:?}",
+                cmds1
+            );
 
             // 第二层：north 匹配别名
             let handled2 = engine.process_input("north");
             assert!(handled2);
             let cmds2 = engine.drain_commands();
             // Execute("n") 产生的 "n" 命令
-            assert!(cmds2.contains(&"n".to_string()), "north 别名应产生 n 命令，实际: {:?}", cmds2);
+            assert!(
+                cmds2.contains(&"n".to_string()),
+                "north 别名应产生 n 命令，实际: {:?}",
+                cmds2
+            );
         });
     }
 
