@@ -7500,6 +7500,103 @@ mod tests {
         });
     }
 
+    /// 验证 Execute("war") 产生的命令可以通过 process_input 被别名拦截
+    /// 这是 send_lua_commands 方案A的核心逻辑链
+    #[test]
+    fn test_execute_command_intercepted_by_alias() {
+        with_engine(|engine| {
+            // 注册 war 别名：匹配 "war"，执行 warteam()，send_to=12
+            exec(
+                engine,
+                r#"
+                AddAlias('alias_war', '^war$', 'warteam()', 33, '')
+                SetAliasOption('alias_war', 'send_to', 12)
+                function warteam()
+                    Execute('teamwith alice bob')
+                end
+            "#,
+            )
+            .unwrap();
+
+            // 模拟触发器回调中 run("war") → Execute("war")
+            // Execute 把 "war" 压入 pending_commands
+            engine.process_output("some trigger line");
+            // 手动模拟 Execute("war") 的效果
+            {
+                let mut state = engine.state.borrow_mut();
+                state.pending_commands.push("war".to_string());
+            }
+            let cmds = engine.drain_commands();
+            assert!(cmds.contains(&"war".to_string()));
+
+            // 模拟 send_lua_commands 方案A：对 "war" 调用 process_input
+            let handled = engine.process_input("war");
+            assert!(handled, "war 应被 alias_war 匹配");
+
+            let sub_cmds = engine.drain_commands();
+            assert!(
+                sub_cmds.contains(&"teamwith alice bob".to_string()),
+                "别名匹配后应产生 teamwith 命令，实际: {:?}",
+                sub_cmds
+            );
+        });
+    }
+
+    /// 验证非别名命令不会被拦截，直接通过
+    #[test]
+    fn test_execute_command_not_alias_passes_through() {
+        with_engine(|engine| {
+            // 只注册 war 别名
+            exec(
+                engine,
+                r#"
+                AddAlias('alias_war', '^war$', 'warteam()', 33, '')
+                SetAliasOption('alias_war', 'send_to', 12)
+                function warteam()
+                    Execute('teamwith alice bob')
+                end
+            "#,
+            )
+            .unwrap();
+
+            // "look" 不是别名，process_input 应返回 false
+            let handled = engine.process_input("look");
+            assert!(!handled, "look 不应被任何别名匹配");
+        });
+    }
+
+    /// 验证别名链式调用：别名A产生命令被别名B拦截
+    #[test]
+    fn test_alias_chain_interception() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"
+                -- 别名A: "go" → 回调中 Execute("north")
+                AddAlias('go_alias', '^go$', '', 33, 'function() Execute("north") end')
+
+                -- 别名B: "north" → 回调中 Execute("n")
+                AddAlias('north_alias', '^north$', '', 33, 'function() Execute("n") end')
+            "#,
+            )
+            .unwrap();
+
+            // 第一层：go 匹配别名
+            let handled1 = engine.process_input("go");
+            assert!(handled1);
+            let cmds1 = engine.drain_commands();
+            // Execute("north") 产生的 "north" 命令
+            assert!(cmds1.contains(&"north".to_string()), "go 别名应产生 north 命令，实际: {:?}", cmds1);
+
+            // 第二层：north 匹配别名
+            let handled2 = engine.process_input("north");
+            assert!(handled2);
+            let cmds2 = engine.drain_commands();
+            // Execute("n") 产生的 "n" 命令
+            assert!(cmds2.contains(&"n".to_string()), "north 别名应产生 n 命令，实际: {:?}", cmds2);
+        });
+    }
+
     #[test]
     fn test_gbk_dosth5_matching() {
         // 测试 dosth5 正则匹配

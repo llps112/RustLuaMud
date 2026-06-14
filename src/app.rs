@@ -562,7 +562,13 @@ impl App {
         } else {
             return Ok(());
         };
-        for cmd in commands {
+        // 使用队列处理命令，别名匹配可能产生新命令需要继续处理
+        let mut queue: std::collections::VecDeque<String> = commands.into_iter().collect();
+        // 防止无限递归：限制别名匹配的嵌套深度
+        let mut depth = 0;
+        let max_depth = 10;
+
+        while let Some(cmd) = queue.pop_front() {
             if cmd.starts_with('/') {
                 // / 开头的命令作为 Lua 代码执行
                 let lua_code = &cmd[1..]; // 去掉前导 /
@@ -571,7 +577,6 @@ impl App {
                     match engine.eval_code(lua_code) {
                         Ok(_) => {
                             let sub_commands = engine.drain_commands();
-                            // 递归处理子命令（避免无限递归，只处理一层）
                             for sub_cmd in sub_commands {
                                 self.logger.log_command(&name, &sub_cmd);
                                 if let Err(e) = self.manager.send_to(session_id, &sub_cmd) {
@@ -585,7 +590,37 @@ impl App {
                         }
                     }
                 }
+            } else if depth < max_depth {
+                // 非 / 开头的命令：先尝试别名匹配（与 MUSHclient Execute 行为一致）
+                let alias_handled = if let Some(ref engine) =
+                    self.manager.sessions[session_id].lua_engine
+                {
+                    let handled = engine.process_input(&cmd);
+                    if handled {
+                        let sub_commands = engine.drain_commands();
+                        if !sub_commands.is_empty() {
+                            // 别名匹配成功，产生的命令加入队列继续处理
+                            for sub_cmd in sub_commands {
+                                queue.push_front(sub_cmd);
+                            }
+                        }
+                        self.drain_lua_logs(session_id)?;
+                    }
+                    handled
+                } else {
+                    false
+                };
+
+                if !alias_handled {
+                    // 无别名匹配，直接发送到 MUD
+                    self.logger.log_command(&name, &cmd);
+                    if let Err(e) = self.manager.send_to(session_id, &cmd) {
+                        self.terminal.append_output(&format!("[发送错误] {}", e))?;
+                    }
+                }
+                depth += 1;
             } else {
+                // 超过嵌套深度，直接发送防止无限递归
                 self.logger.log_command(&name, &cmd);
                 if let Err(e) = self.manager.send_to(session_id, &cmd) {
                     self.terminal.append_output(&format!("[发送错误] {}", e))?;
@@ -727,6 +762,8 @@ impl App {
                             if handled {
                                 let commands = engine.drain_commands();
                                 self.send_lua_commands(fg, commands)?;
+                                self.drain_lua_logs(fg)?;
+                            } else {
                                 self.drain_lua_logs(fg)?;
                             }
                             handled
