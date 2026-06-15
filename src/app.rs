@@ -804,6 +804,11 @@ impl App {
                     reconnect_delay_secs: 5,
                     username: None,
                     password: None,
+                    socks5_enable: false,
+                    socks5_host: None,
+                    socks5_port: 1080,
+                    socks5_username: None,
+                    socks5_password: None,
                 };
 
                 let id = match self.manager.add_connection_dynamic(&conn_config) {
@@ -1156,9 +1161,11 @@ impl App {
                 }
             }
             ManagerEvent::StateChange(id, state) => {
-                if id < self.manager.sessions.len() {
-                    self.manager.sessions[id].state = state.clone();
+                // 检查 session 是否仍然存在（可能已被 /close 移除）
+                if id >= self.manager.sessions.len() {
+                    return Ok(());
                 }
+                self.manager.sessions[id].state = state.clone();
                 // 同步 Lua 引擎的连接状态（同步到对应 session，不限于前台）
                 if let Some(ref mut engine) = self.manager.sessions[id].lua_engine {
                     engine.set_connected(matches!(state, SessionState::Connected));
@@ -1172,11 +1179,7 @@ impl App {
                     SessionState::Connecting => "连接中...",
                     SessionState::Reconnecting => "重连中...",
                 };
-                let name = if id < self.manager.sessions.len() {
-                    &self.manager.sessions[id].name
-                } else {
-                    "未知"
-                };
+                let name = &self.manager.sessions[id].name;
                 self.terminal.append_output(&format!(
                     "[系统] 连接 {} ({}) {}",
                     id + 1,
@@ -1186,11 +1189,7 @@ impl App {
 
                 // 自动重连：断开时启动延迟重连任务
                 if state == SessionState::Disconnected {
-                    let session = if id < self.manager.sessions.len() {
-                        &self.manager.sessions[id]
-                    } else {
-                        return Ok(());
-                    };
+                    let session = &self.manager.sessions[id];
                     if session.auto_reconnect {
                         let delay = session.reconnect_delay_secs;
                         self.terminal

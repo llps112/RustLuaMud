@@ -1,6 +1,7 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio_socks::tcp::Socks5Stream;
 
 use crate::config::ConnectionConfig;
 
@@ -61,6 +62,17 @@ pub struct Session {
     pub password: Option<String>,
     /// 是否自动连接
     pub auto_connect: bool,
+
+    /// SOCKS5 代理开关
+    pub socks5_enable: bool,
+    /// SOCKS5 代理地址
+    pub socks5_host: Option<String>,
+    /// SOCKS5 代理端口
+    pub socks5_port: u16,
+    /// SOCKS5 代理用户名（可选）
+    pub socks5_username: Option<String>,
+    /// SOCKS5 代理密码（可选）
+    pub socks5_password: Option<String>,
 
     // 发送命令的通道
     send_tx: Option<mpsc::Sender<String>>,
@@ -149,6 +161,11 @@ impl Session {
             username: config.username.clone(),
             password: config.password.clone(),
             auto_connect: config.auto_connect,
+            socks5_enable: config.socks5_enable,
+            socks5_host: config.socks5_host.clone(),
+            socks5_port: config.socks5_port,
+            socks5_username: config.socks5_username.clone(),
+            socks5_password: config.socks5_password.clone(),
             send_tx: None,
             send_raw_tx: None,
         }
@@ -159,12 +176,48 @@ impl Session {
         let addr = format!("{}:{}", self.host, self.port);
         self.state = SessionState::Connecting;
 
-        // 解析服务器地址
-        let addr = format!("{}:{}", self.host, self.port);
+        // 判断是否使用 SOCKS5 代理
+        let use_socks5 = self.socks5_enable
+            && self.socks5_host.as_ref().is_some_and(|h| !h.is_empty());
 
-        let tokio_stream = TcpStream::connect(&addr)
-            .await
-            .map_err(|e| format!("连接 {} 失败: {}", addr, e))?;
+        let tokio_stream: TcpStream = if use_socks5 {
+            // 通过 SOCKS5 代理连接
+            let proxy_addr = format!("{}:{}", self.socks5_host.as_ref().unwrap(), self.socks5_port);
+            let target_addr = format!("{}:{}", self.host, self.port);
+            
+            let proxy_stream = if let Some(ref username) = self.socks5_username {
+                if !username.is_empty() {
+                    // 带认证的连接
+                    let password = self.socks5_password.as_deref().unwrap_or("");
+                    Socks5Stream::connect_with_password(
+                        proxy_addr.as_str(),
+                        target_addr.as_str(),
+                        username,
+                        password,
+                    )
+                    .await
+                    .map_err(|e| format!("SOCKS5 代理连接 {} 失败: {}", proxy_addr, e))?
+                } else {
+                    // 无认证的连接
+                    Socks5Stream::connect(proxy_addr.as_str(), target_addr.as_str())
+                        .await
+                        .map_err(|e| format!("SOCKS5 代理连接 {} 失败: {}", proxy_addr, e))?
+                }
+            } else {
+                // 无认证的连接
+                Socks5Stream::connect(proxy_addr.as_str(), target_addr.as_str())
+                    .await
+                    .map_err(|e| format!("SOCKS5 代理连接 {} 失败: {}", proxy_addr, e))?
+            };
+            
+            // 从 Socks5Stream 提取底层 TcpStream
+            proxy_stream.into_inner()
+        } else {
+            // 直连
+            TcpStream::connect(&addr)
+                .await
+                .map_err(|e| format!("连接 {} 失败: {}", addr, e))?
+        };
 
         // 转换到 std 流来配置 keepalive
         let std_stream = tokio_stream
@@ -531,6 +584,11 @@ mod tests {
             reconnect_delay_secs: 5,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         };
         let session = Session::new(1, &config);
         assert_eq!(session.name, "test");
@@ -553,6 +611,11 @@ mod tests {
             reconnect_delay_secs: 5,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         };
         let session = Session::new(1, &config);
         assert!(session.send("hello").is_err());
@@ -571,6 +634,11 @@ mod tests {
             reconnect_delay_secs: 5,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         };
         let mut session = Session::new(1, &config);
         session.disconnect();
@@ -590,6 +658,11 @@ mod tests {
             reconnect_delay_secs: 5,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         };
         let session = Session::new(2, &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -608,6 +681,11 @@ mod tests {
             reconnect_delay_secs: 5,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         };
         let session = Session::new(3, &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -626,6 +704,11 @@ mod tests {
             reconnect_delay_secs: 5,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         };
         let session = Session::new(5, &config);
         assert_eq!(session.script_path, Some("/path/to/script.lua".to_string()));
@@ -644,6 +727,11 @@ mod tests {
             reconnect_delay_secs: 5,
             username: Some("player".to_string()),
             password: Some("secret".to_string()),
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         };
         let session = Session::new(6, &config);
         assert_eq!(session.username, Some("player".to_string()));
@@ -663,6 +751,11 @@ mod tests {
             reconnect_delay_secs: 3,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         };
         let session = Session::new(7, &config);
         assert!(session.auto_connect);
@@ -683,6 +776,11 @@ mod tests {
             reconnect_delay_secs: 5,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         };
         let session = Session::new(8, &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -701,6 +799,11 @@ mod tests {
             reconnect_delay_secs: 5,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         };
         let session = Session::new(9, &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -767,6 +870,11 @@ mod tests {
             reconnect_delay_secs: 5,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         };
         let session = Session::new(1, &config);
         assert!(session.output_lines.is_empty());
@@ -785,6 +893,11 @@ mod tests {
             reconnect_delay_secs: 5,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         };
         let session = Session::new(1, &config);
         assert!(session.lua_engine.is_none());
@@ -803,6 +916,11 @@ mod tests {
             reconnect_delay_secs: 5,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         };
         let mut session = Session::new(1, &config);
         session.disconnect();
@@ -815,6 +933,133 @@ mod tests {
     fn test_session_state_equality() {
         assert_eq!(SessionState::Connected, SessionState::Connected);
         assert_ne!(SessionState::Connected, SessionState::Disconnected);
+    }
+
+    #[test]
+    fn test_session_socks5_disabled_by_default() {
+        let config = ConnectionConfig {
+            name: "test".to_string(),
+            host: "localhost".to_string(),
+            port: 4000,
+            encoding: None,
+            script: None,
+            auto_connect: true,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
+        };
+        let session = Session::new(1, &config);
+        assert!(!session.socks5_enable);
+        assert!(session.socks5_host.is_none());
+        assert_eq!(session.socks5_port, 1080);
+    }
+
+    #[test]
+    fn test_session_socks5_enabled_with_host() {
+        let config = ConnectionConfig {
+            name: "test".to_string(),
+            host: "localhost".to_string(),
+            port: 4000,
+            encoding: None,
+            script: None,
+            auto_connect: true,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+            socks5_enable: true,
+            socks5_host: Some("127.0.0.1".to_string()),
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
+        };
+        let session = Session::new(1, &config);
+        assert!(session.socks5_enable);
+        assert_eq!(session.socks5_host, Some("127.0.0.1".to_string()));
+        assert_eq!(session.socks5_port, 1080);
+    }
+
+    #[test]
+    fn test_session_socks5_with_authentication() {
+        let config = ConnectionConfig {
+            name: "test".to_string(),
+            host: "localhost".to_string(),
+            port: 4000,
+            encoding: None,
+            script: None,
+            auto_connect: true,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+            socks5_enable: true,
+            socks5_host: Some("proxy.example.com".to_string()),
+            socks5_port: 1081,
+            socks5_username: Some("user".to_string()),
+            socks5_password: Some("pass".to_string()),
+        };
+        let session = Session::new(1, &config);
+        assert!(session.socks5_enable);
+        assert_eq!(session.socks5_host, Some("proxy.example.com".to_string()));
+        assert_eq!(session.socks5_port, 1081);
+        assert_eq!(session.socks5_username, Some("user".to_string()));
+        assert_eq!(session.socks5_password, Some("pass".to_string()));
+    }
+
+    #[test]
+    fn test_session_socks5_enabled_but_no_host() {
+        // 如果启用了 SOCKS5 但没有配置 host，应该回退到直连
+        let config = ConnectionConfig {
+            name: "test".to_string(),
+            host: "localhost".to_string(),
+            port: 4000,
+            encoding: None,
+            script: None,
+            auto_connect: true,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+            socks5_enable: true,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
+        };
+        let session = Session::new(1, &config);
+        assert!(session.socks5_enable);
+        assert!(session.socks5_host.is_none());
+    }
+
+    #[test]
+    fn test_session_socks5_enabled_but_empty_host() {
+        // 如果启用了 SOCKS5 但 host 为空字符串，应该回退到直连
+        let config = ConnectionConfig {
+            name: "test".to_string(),
+            host: "localhost".to_string(),
+            port: 4000,
+            encoding: None,
+            script: None,
+            auto_connect: true,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+            socks5_enable: true,
+            socks5_host: Some("".to_string()),
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
+        };
+        let session = Session::new(1, &config);
+        assert!(session.socks5_enable);
+        assert_eq!(session.socks5_host, Some("".to_string()));
     }
 
     // === 异步集成测试（本地 TCP 回环对） ===
@@ -831,6 +1076,11 @@ mod tests {
             reconnect_delay_secs: 1,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         }
     }
 
@@ -846,6 +1096,11 @@ mod tests {
             reconnect_delay_secs: 1,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         }
     }
 

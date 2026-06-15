@@ -10,6 +10,8 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 
 - **MUSHclient 脚本兼容** — 实现常用 MUSHclient API（AddTrigger / AddAlias / AddTimer / GetInfo / GetTriggerInfo / GetTimerInfo / GetPluginInfo / SetStatus / Simulate / SendPkt / 变量管理等），从 MUSHclient 迁移的脚本可无缝运行
 - **多连接管理** — 单实例同时管理最多 10 个角色连接，支持前台/后台切换
+- **SOCKS5 代理** — 每个角色可独立配置 SOCKS5 代理，支持认证，方便多开挂机规避同 IP 限制
+- **输出历史滚动** — PageUp/PageDown 翻页查看历史输出，End 键回到底部，新输出不影响当前浏览位置
 - **仅前台渲染** — 仅前台连接渲染终端输出，后台连接静默记录日志
 - **ANSI 颜色** — 完整解析 ANSI SGR 转义序列，终端彩色显示
 - **LuaJIT 脚本引擎** — 触发器、别名、定时器、变量管理、协程支持
@@ -64,6 +66,13 @@ reconnect_delay_secs = 5
 # 留空则不注入，需手动输入或通过 Lua 脚本设置
 username = "your_character_name"
 password = "your_password"
+
+# SOCKS5 代理（可选，不设置则直连）
+socks5_enable = true
+socks5_host = "127.0.0.1"
+socks5_port = 1080
+socks5_username = "user"   # 可选，留空或不设置表示无认证
+socks5_password = "pass"   # 可选
 ```
 
 > `profiles/example.toml` 为示例文件，程序启动时自动跳过，不会加载。如需临时禁用某个角色配置，可将文件后缀改为非 `.toml`（如 `.bak`），恢复时改回即可。
@@ -75,6 +84,20 @@ password = "your_password"
 ```bash
 ./target/release/RustLuaMud
 ```
+
+#### 多实例运行
+
+如需运行多个客户端实例（使用不同的角色配置），可使用 `--profiles` 参数指定不同的配置目录：
+
+```bash
+# 第一个实例（默认使用 profiles/ 目录）
+./target/release/RustLuaMud
+
+# 第二个实例（使用 profiles2/ 目录）
+./target/release/RustLuaMud --profiles profiles2
+```
+
+每个实例将加载指定目录下的角色配置文件，实现完全独立的多实例运行。
 
 ### 文档
 
@@ -90,6 +113,8 @@ password = "your_password"
 | `Alt+0` | 切换到第 10 个连接 |
 | `Ctrl+C` / `Ctrl+D` | 退出程序 |
 | `↑` / `↓` | 浏览命令历史 |
+| `PageUp` / `PageDown` | 向上/向下滚动查看历史输出（每次滚动半屏） |
+| `End` | 输入框为空时回到输出底部，有内容时光标移到行尾 |
 
 ---
 
@@ -365,6 +390,7 @@ let result = engine.eval_to_string("return json_decode('{\"key\":\"value\"}')");
 | 配置解析 | toml + serde |
 | 编码处理 | encoding_rs |
 | 日志时间 | chrono |
+| SOCKS5 代理 | tokio-socks |
 
 ---
 
@@ -401,6 +427,14 @@ export RUST_BACKTRACE=1
 ---
 
 ## 版本历史
+
+### v0.1.2 (2026-06-15)
+
+- 修复 `Execute()` 命令绕过别名匹配的问题，确保 Lua 脚本中的命令也经过别名系统处理
+- 新增 `--profiles` 命令行参数，支持多实例运行（每个实例使用不同的配置目录）
+- 实现输出历史滚动功能：PageUp/PageDown 翻页查看，End 键回到底部，新输出不影响当前浏览位置
+- 实现 SOCKS5 代理支持，每个角色可独立配置代理服务器（支持认证）
+- 新增 629 个单元测试，覆盖核心功能
 
 ### v0.1.1 (2026-06-10)
 

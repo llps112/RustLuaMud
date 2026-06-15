@@ -140,6 +140,8 @@ pub struct TerminalState {
     pub clear_on_next_key: bool,
     /// 最近一次看到的 ANSI SGR 颜色序列，用于跨行颜色继承
     pub last_ansi_sgr: String,
+    /// 输出区滚动偏移（0 = 底部，即最新输出）
+    pub scroll_offset: usize,
 }
 
 impl TerminalState {
@@ -161,6 +163,7 @@ impl TerminalState {
             keep_command: true,
             clear_on_next_key: false,
             last_ansi_sgr: String::new(),
+            scroll_offset: 0,
         }
     }
 
@@ -311,7 +314,34 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::End) => {
                 self.clear_on_next_key = false;
-                self.input_cursor = self.input_buffer.chars().count();
+                if self.input_buffer.is_empty() {
+                    // 输入框为空时，End 键回到底部
+                    self.scroll_offset = 0;
+                } else {
+                    // 输入框有内容时，光标移到行尾
+                    self.input_cursor = self.input_buffer.chars().count();
+                }
+                None
+            }
+
+            (KeyModifiers::NONE, KeyCode::PageUp) => {
+                self.clear_on_next_key = false;
+                // 向上滚动半屏
+                let scroll_amount = (self.output_height() / 2) as usize;
+                let max_offset = if self.output_lines.len() > self.output_height() as usize {
+                    self.output_lines.len() - self.output_height() as usize
+                } else {
+                    0
+                };
+                self.scroll_offset = (self.scroll_offset + scroll_amount).min(max_offset);
+                None
+            }
+
+            (KeyModifiers::NONE, KeyCode::PageDown) => {
+                self.clear_on_next_key = false;
+                // 向下滚动半屏
+                let scroll_amount = (self.output_height() / 2) as usize;
+                self.scroll_offset = self.scroll_offset.saturating_sub(scroll_amount);
                 None
             }
 
@@ -347,12 +377,28 @@ impl TerminalState {
     /// 获取当前可见的输出行
     pub fn visible_output_lines(&self) -> &[String] {
         let output_height = self.output_height() as usize;
-        let start = if self.output_lines.len() > output_height {
-            self.output_lines.len() - output_height
+        let total_lines = self.output_lines.len();
+        
+        if total_lines == 0 {
+            return &[];
+        }
+        
+        // 计算可见范围的起始位置
+        // scroll_offset = 0 表示显示最新的 output_height 行
+        // scroll_offset = N 表示向上滚动 N 行
+        let end = if total_lines > output_height {
+            total_lines - self.scroll_offset.min(total_lines - output_height)
+        } else {
+            total_lines
+        };
+        
+        let start = if end > output_height {
+            end - output_height
         } else {
             0
         };
-        &self.output_lines[start..]
+        
+        &self.output_lines[start..end]
     }
 
     /// 获取输入行显示内容（考虑滚动）
@@ -727,6 +773,168 @@ mod tests {
         assert_eq!(visible.len(), output_height);
         // Should show the last output_height lines
         assert_eq!(visible[0], format!("line 5"));
+    }
+
+    #[test]
+    fn test_page_up_scrolls_half_screen() {
+        let mut state = TerminalState::new(80, 24);
+        let output_height = state.output_height() as usize;
+        // 添加足够多的输出行
+        for i in 0..output_height * 3 {
+            state.push_output(&format!("line {}", i));
+        }
+        
+        // 初始状态：scroll_offset = 0
+        assert_eq!(state.scroll_offset, 0);
+        
+        // 按 PageUp，应该向上滚动半屏
+        state.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(state.scroll_offset, output_height / 2);
+        
+        // 再按一次 PageUp
+        state.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        // output_height / 2 * 2 (整数除法可能少1)
+        assert_eq!(state.scroll_offset, (output_height / 2) * 2);
+    }
+
+    #[test]
+    fn test_page_down_scrolls_half_screen() {
+        let mut state = TerminalState::new(80, 24);
+        let output_height = state.output_height() as usize;
+        // 添加足够多的输出行
+        for i in 0..output_height * 3 {
+            state.push_output(&format!("line {}", i));
+        }
+        
+        // 先向上滚动
+        state.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        let offset_before = state.scroll_offset;
+        
+        // 按 PageDown，应该向下滚动半屏
+        state.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(state.scroll_offset, offset_before - output_height / 2);
+    }
+
+    #[test]
+    fn test_page_up_boundary_at_top() {
+        let mut state = TerminalState::new(80, 24);
+        let output_height = state.output_height() as usize;
+        // 只添加少量输出行
+        for i in 0..output_height + 5 {
+            state.push_output(&format!("line {}", i));
+        }
+        
+        // 连续按 PageUp 直到顶部
+        let max_offset = 5; // 总共 5 行可以向上滚动
+        for _ in 0..10 {
+            state.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        }
+        
+        // 应该停在最大偏移量
+        assert_eq!(state.scroll_offset, max_offset);
+    }
+
+    #[test]
+    fn test_page_down_boundary_at_bottom() {
+        let mut state = TerminalState::new(80, 24);
+        let output_height = state.output_height() as usize;
+        // 添加足够多的输出行
+        for i in 0..output_height * 3 {
+            state.push_output(&format!("line {}", i));
+        }
+        
+        // 先向上滚动很多
+        for _ in 0..10 {
+            state.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        }
+        assert!(state.scroll_offset > 0);
+        
+        // 连续按 PageDown 直到回到底部
+        for _ in 0..10 {
+            state.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        
+        // 应该回到 0
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_end_key_returns_to_bottom_when_input_empty() {
+        let mut state = TerminalState::new(80, 24);
+        let output_height = state.output_height() as usize;
+        // 添加足够多的输出行
+        for i in 0..output_height * 3 {
+            state.push_output(&format!("line {}", i));
+        }
+        
+        // 先向上滚动
+        state.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(state.scroll_offset > 0);
+        
+        // 输入框为空时按 End，应该回到底部
+        state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_end_key_moves_cursor_when_input_has_content() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 0;
+        
+        // 输入框有内容时按 End，光标应该移到行尾
+        state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(state.input_cursor, 5);
+        // scroll_offset 不应该改变
+        assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_visible_output_lines_with_scroll_offset() {
+        let mut state = TerminalState::new(80, 24);
+        let output_height = state.output_height() as usize;
+        // 添加足够多的输出行（至少 output_height + 10）
+        let total = output_height + 10;
+        for i in 0..total {
+            state.push_output(&format!("line {}", i));
+        }
+        
+        // 初始状态：显示最后 output_height 行
+        let visible = state.visible_output_lines();
+        assert_eq!(visible[0], format!("line {}", total - output_height));
+        
+        // 向上滚动 3 行
+        state.scroll_offset = 3;
+        let visible = state.visible_output_lines();
+        assert_eq!(visible[0], format!("line {}", total - output_height - 3));
+        
+        // 向上滚动 5 行
+        state.scroll_offset = 5;
+        let visible = state.visible_output_lines();
+        assert_eq!(visible[0], format!("line {}", total - output_height - 5));
+    }
+
+    #[test]
+    fn test_new_output_does_not_reset_scroll_offset() {
+        let mut state = TerminalState::new(80, 24);
+        let output_height = state.output_height() as usize;
+        // 添加足够多的输出行
+        for i in 0..output_height * 3 {
+            state.push_output(&format!("line {}", i));
+        }
+        
+        // 向上滚动
+        state.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        let offset_before = state.scroll_offset;
+        assert!(offset_before > 0);
+        
+        // 添加新输出
+        state.push_output("new line");
+        
+        // scroll_offset 不应该改变
+        assert_eq!(state.scroll_offset, offset_before);
     }
 
     #[test]

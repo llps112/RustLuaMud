@@ -189,6 +189,11 @@ mod tests {
             reconnect_delay_secs: 5,
             username: None,
             password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
         }
     }
 

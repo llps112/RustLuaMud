@@ -64,6 +64,21 @@ pub struct ConnectionConfig {
     pub username: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+    /// SOCKS5 代理开关，默认 false（直连）
+    #[serde(default)]
+    pub socks5_enable: bool,
+    /// SOCKS5 代理地址
+    #[serde(default)]
+    pub socks5_host: Option<String>,
+    /// SOCKS5 代理端口，默认 1080
+    #[serde(default = "default_socks5_port")]
+    pub socks5_port: u16,
+    /// SOCKS5 代理用户名（可选）
+    #[serde(default)]
+    pub socks5_username: Option<String>,
+    /// SOCKS5 代理密码（可选）
+    #[serde(default)]
+    pub socks5_password: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -71,6 +86,9 @@ fn default_true() -> bool {
 }
 fn default_reconnect_delay() -> u64 {
     5
+}
+fn default_socks5_port() -> u16 {
+    1080
 }
 
 #[derive(Debug, Deserialize, Clone)]

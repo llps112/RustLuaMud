@@ -22,3 +22,4 @@ mlua = { version = "0.11", features = ["luajit", "vendored", "serialize"] }
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile = "3"
+tokio-socks = "0.5"
