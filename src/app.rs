@@ -963,6 +963,11 @@ impl App {
                     .lua_engine
                     .as_ref()
                     .map(|e| e.get_variables());
+                // 保存原 engine 的连接状态
+                let saved_conn_state = self.manager.sessions[fg]
+                    .lua_engine
+                    .as_ref()
+                    .map(|e| e.get_connection_state());
                 if let Some(path) = script_path {
                     match crate::lua::LuaEngine::new() {
                         Ok(mut engine) => {
@@ -972,6 +977,10 @@ impl App {
                                     engine.set_variable(k, v);
                                     engine.set_global(k, v);
                                 }
+                            }
+                            // 恢复之前保存的连接状态
+                            if let Some(ref conn_state) = saved_conn_state {
+                                engine.restore_connection_state(conn_state);
                             }
                             match engine.load_script(&path) {
                                 Ok(()) => {

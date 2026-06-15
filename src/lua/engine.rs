@@ -331,6 +331,17 @@ struct ScriptState {
     last_server_data: std::time::Instant,
 }
 
+/// 连接状态（用于 reload 时保存和恢复）
+#[derive(Debug, Clone)]
+pub struct ConnectionState {
+    pub connected: bool,
+    pub host: String,
+    pub port: u16,
+    pub world_name: String,
+    pub char_name: String,
+    pub status_text: String,
+}
+
 /// Lua 引擎与脚本运行时
 /// Lua 合法转义字符集合
 const LUA_VALID_ESCAPES: &[u8] = b"abfnrtv\\\"'0123456789xzZuU";
@@ -3352,6 +3363,30 @@ impl LuaEngine {
     /// 获取所有变量（用于 reload 时恢复）
     pub fn get_variables(&self) -> std::collections::HashMap<String, String> {
         self.state.borrow().variables.clone()
+    }
+
+    /// 获取连接状态（用于 reload 时恢复）
+    pub fn get_connection_state(&self) -> ConnectionState {
+        let state = self.state.borrow();
+        ConnectionState {
+            connected: state.connected,
+            host: state.host.clone(),
+            port: state.port,
+            world_name: state.world_name.clone(),
+            char_name: state.char_name.clone(),
+            status_text: state.status_text.clone(),
+        }
+    }
+
+    /// 恢复连接状态（用于 reload 后）
+    pub fn restore_connection_state(&mut self, conn_state: &ConnectionState) {
+        let mut state = self.state.borrow_mut();
+        state.connected = conn_state.connected;
+        state.host = conn_state.host.clone();
+        state.port = conn_state.port;
+        state.world_name = conn_state.world_name.clone();
+        state.char_name = conn_state.char_name.clone();
+        state.status_text = conn_state.status_text.clone();
     }
 
     /// 设置连接状态，连接成功时自动调用 OnConnect()（由 Lua 脚本覆盖实现）
