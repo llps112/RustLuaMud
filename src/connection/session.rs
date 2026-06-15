@@ -177,14 +177,18 @@ impl Session {
         self.state = SessionState::Connecting;
 
         // 判断是否使用 SOCKS5 代理
-        let use_socks5 = self.socks5_enable
-            && self.socks5_host.as_ref().is_some_and(|h| !h.is_empty());
+        let use_socks5 =
+            self.socks5_enable && self.socks5_host.as_ref().is_some_and(|h| !h.is_empty());
 
         let tokio_stream: TcpStream = if use_socks5 {
             // 通过 SOCKS5 代理连接
-            let proxy_addr = format!("{}:{}", self.socks5_host.as_ref().unwrap(), self.socks5_port);
+            let proxy_addr = format!(
+                "{}:{}",
+                self.socks5_host.as_ref().unwrap(),
+                self.socks5_port
+            );
             let target_addr = format!("{}:{}", self.host, self.port);
-            
+
             let proxy_stream = if let Some(ref username) = self.socks5_username {
                 if !username.is_empty() {
                     // 带认证的连接
@@ -209,7 +213,7 @@ impl Session {
                     .await
                     .map_err(|e| format!("SOCKS5 代理连接 {} 失败: {}", proxy_addr, e))?
             };
-            
+
             // 从 Socks5Stream 提取底层 TcpStream
             proxy_stream.into_inner()
         } else {
