@@ -12,7 +12,16 @@ fn main() {
     // TODO(v1.0): 正式发布前必须移除此行，把 RUST_BACKTRACE 控制权交给用户
     std::env::set_var("RUST_BACKTRACE", "1");
 
-    let config = AppConfig::load_default();
+    // 解析 --profiles 参数
+    let args: Vec<String> = std::env::args().collect();
+    let profiles_dir = args
+        .windows(2)
+        .find(|w| w[0] == "--profiles")
+        .map(|w| w[1].as_str())
+        .unwrap_or("profiles")
+        .to_string();
+
+    let config = AppConfig::load_default(&profiles_dir);
 
     let rt = tokio::runtime::Runtime::new().expect("无法创建 tokio runtime");
 

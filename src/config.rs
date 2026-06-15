@@ -82,9 +82,9 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    pub fn load_default() -> Self {
+    pub fn load_default(profiles_dir: &str) -> Self {
         // 从 profiles 目录加载所有角色配置作为默认连接
-        let (profiles, skipped) = Self::load_profiles("profiles");
+        let (profiles, skipped) = Self::load_profiles(profiles_dir);
         if !profiles.is_empty() {
             if skipped > 0 {
                 eprintln!("警告: {} 个角色配置加载失败", skipped);
@@ -95,7 +95,7 @@ impl AppConfig {
             };
         }
 
-        eprintln!("警告: profiles 目录未找到角色配置，使用默认配置");
+        eprintln!("警告: {} 目录未找到角色配置，使用默认配置", profiles_dir);
         Self::default()
     }
 
@@ -382,5 +382,32 @@ password = "secret""#
         assert_eq!(config.reconnect_delay_secs, 10);
         assert_eq!(config.username, Some("player".to_string()));
         assert_eq!(config.password, Some("secret".to_string()));
+    }
+
+    #[test]
+    fn test_load_default_with_custom_dir() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("custom.toml");
+        let mut f = fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"name = "custom"
+host = "custom.com"
+port = 6000"#
+        )
+        .unwrap();
+
+        let config = AppConfig::load_default(dir.path().to_str().unwrap());
+        assert_eq!(config.connections.len(), 1);
+        assert_eq!(config.connections[0].name, "custom");
+        assert_eq!(config.connections[0].host, "custom.com");
+        assert_eq!(config.connections[0].port, 6000);
+    }
+
+    #[test]
+    fn test_load_default_with_nonexistent_dir() {
+        // 目录不存在时应该返回默认配置
+        let config = AppConfig::load_default("/nonexistent/path/that/does/not/exist");
+        assert!(config.connections.is_empty());
     }
 }
