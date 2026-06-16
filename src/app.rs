@@ -785,12 +785,12 @@ impl App {
         // Alt+Left: 切换到前一个连接 (循环), Alt+Right: 切换到后一个连接 (循环)
         let total = self.manager.sessions.len();
         if total > 0 {
-            if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Left {
+            if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Left {
                 let new_id = (self.manager.foreground_id + total - 1) % total;
                 self.switch_foreground(new_id)?;
                 return Ok(());
             }
-            if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Right {
+            if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Right {
                 let new_id = (self.manager.foreground_id + 1) % total;
                 self.switch_foreground(new_id)?;
                 return Ok(());

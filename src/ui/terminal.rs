@@ -4,6 +4,7 @@ use crossterm::{
     execute, queue,
     style::{self, Color, Print, SetForegroundColor},
     terminal::{self, ClearType},
+    event::{EnableMouseCapture, DisableMouseCapture},
 };
 use std::io::{self, Write};
 
@@ -495,8 +496,8 @@ impl Terminal {
     pub fn new() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
         let (width, height) = terminal::size()?;
-        // 启用鼠标事件捕获（按钮 + SGR 扩展模式），不跟踪拖拽
-        let _ = write!(io::stdout(), "\x1b[?1000h\x1b[?1006h");
+        // 启用鼠标事件捕获
+        execute!(io::stdout(), EnableMouseCapture)?;
         Ok(Self {
             state: TerminalState::new(width, height),
         })
@@ -681,7 +682,7 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        let _ = write!(io::stdout(), "\x1b[?1006l\x1b[?1000l");
+        let _ = execute!(io::stdout(), DisableMouseCapture);
         let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
     }
