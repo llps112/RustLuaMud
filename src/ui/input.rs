@@ -10,6 +10,10 @@ pub enum InputEvent {
     Quit,
     /// 切换到指定编号的连接 (0-based)
     SwitchConnection(usize),
+    /// 切换到前一个连接
+    SwitchPrev,
+    /// 切换到后一个连接
+    SwitchNext,
 }
 
 /// 输入处理器
@@ -27,6 +31,11 @@ impl InputHandler {
             (KeyModifiers::ALT, KeyCode::Char(c)) if ('1'..='9').contains(&c) => {
                 Some(InputEvent::SwitchConnection((c as usize) - ('1' as usize)))
             }
+
+            // Alt+Left: 前一个连接
+            (KeyModifiers::ALT, KeyCode::Left) => Some(InputEvent::SwitchPrev),
+            // Alt+Right: 后一个连接
+            (KeyModifiers::ALT, KeyCode::Right) => Some(InputEvent::SwitchNext),
 
             // Enter: 提交当前输入行（由 app 层管理输入缓冲区）
             (KeyModifiers::NONE, KeyCode::Enter) => Some(InputEvent::Command(String::new())),
@@ -86,6 +95,26 @@ mod tests {
     fn test_alt_letter_unhandled() {
         let result = InputHandler::handle_key_event(alt_key('a'));
         assert!(result.is_none());
+    }
+
+    fn alt_left_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)
+    }
+
+    fn alt_right_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Right, KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn test_alt_left_switches_prev() {
+        let result = InputHandler::handle_key_event(alt_left_key());
+        assert!(matches!(result, Some(InputEvent::SwitchPrev)));
+    }
+
+    #[test]
+    fn test_alt_right_switches_next() {
+        let result = InputHandler::handle_key_event(alt_right_key());
+        assert!(matches!(result, Some(InputEvent::SwitchNext)));
     }
 
     #[test]

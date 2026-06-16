@@ -758,6 +758,21 @@ impl App {
             }
         }
 
+        // Alt+Left: 切换到前一个连接 (循环), Alt+Right: 切换到后一个连接 (循环)
+        let total = self.manager.sessions.len();
+        if total > 0 {
+            if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Left {
+                let new_id = (self.manager.foreground_id + total - 1) % total;
+                self.switch_foreground(new_id)?;
+                return Ok(());
+            }
+            if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Right {
+                let new_id = (self.manager.foreground_id + 1) % total;
+                self.switch_foreground(new_id)?;
+                return Ok(());
+            }
+        }
+
         // 其他按键交给终端处理
         if let Some(cmd) = self.terminal.handle_key(key) {
             // 用户按了 Enter，提交命令
@@ -1126,6 +1141,8 @@ impl App {
                     .append_output("  /set keep_command on|off     执行后保留命令栏输入")?;
                 self.terminal
                     .append_output("  Alt+0~9                     切换前台连接 (最多10个)")?;
+                self.terminal
+                    .append_output("  Alt+←/→                     循环切换前台连接")?;
             }
         }
         Ok(())
