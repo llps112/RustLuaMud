@@ -154,8 +154,12 @@ cargo build --release
 
 #### Ubuntu 22.04 LTS
 ```bash
-# 安装 Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# 安装 Rust（国内服务器使用中科大镜像）
+export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
+export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
+curl --proto '=https' --tlsv1.2 -sSf https://mirrors.ustc.edu.cn/rust-static/rustup/rustup-init.sh | sh -s -- -y
+
+# 安装完成后刷新环境变量
 source $HOME/.cargo/env
 
 # 安装编译依赖
@@ -166,6 +170,18 @@ sudo apt install -y build-essential pkg-config libssl-dev
 rustc --version  # 应该 >= 1.70
 cargo --version
 ```
+
+> **提示**：如果 `cargo build` 时下载依赖缓慢，可以配置 Cargo 镜像：
+> ```bash
+> mkdir -p ~/.cargo
+> cat > ~/.cargo/config.toml << 'EOF'
+> [source.crates-io]
+> replace-with = 'ustc'
+> 
+> [source.ustc]
+> registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+> EOF
+> ```
 
 #### macOS
 ```bash

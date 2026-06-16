@@ -33,6 +33,24 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 
 ## 快速开始
 
+### 安装 Rust
+
+```bash
+# 国内服务器（推荐，使用中科大镜像）
+export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
+export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
+curl --proto '=https' --tlsv1.2 -sSf https://mirrors.ustc.edu.cn/rust-static/rustup/rustup-init.sh | sh -s -- -y
+
+# 海外服务器（使用官方源）
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+```
+
+安装完成后刷新环境变量：
+
+```bash
+source $HOME/.cargo/env
+```
+
 ### 编译
 
 ```bash
