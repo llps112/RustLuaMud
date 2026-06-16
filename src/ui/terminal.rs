@@ -1,10 +1,10 @@
 use crossterm::{
     cursor,
+    event::{DisableMouseCapture, EnableMouseCapture},
     event::{KeyCode, KeyEvent, KeyModifiers},
     execute, queue,
     style::{self, Color, Print, SetForegroundColor},
     terminal::{self, ClearType},
-    event::{EnableMouseCapture, DisableMouseCapture},
 };
 use std::io::{self, Write};
 
@@ -75,7 +75,10 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
 /// 计算字符串的可见宽度（忽略 ANSI 转义序列）
 fn visible_width(s: &str) -> usize {
     let stripped = AnsiParser::strip_ansi(s);
-    stripped.chars().map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)).sum()
+    stripped
+        .chars()
+        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum()
 }
 
 /// 构建 session 状态栏字符串（纯逻辑，无 IO 依赖）
@@ -107,7 +110,11 @@ fn build_status_bar(
             bar.push_str(&format!("[{}]{}\x1b[0m{} ", i + 1, info.name, state_icon));
         }
         let end_x = visible_width(&bar) as u16;
-        regions.push(ClickRegion { start_x, end_x, session_id: i });
+        regions.push(ClickRegion {
+            start_x,
+            end_x,
+            session_id: i,
+        });
     }
     let right_text = "RustLuaMud";
     if visible_width(&bar) + right_text.len() + 2 < total_width {
