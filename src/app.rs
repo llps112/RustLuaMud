@@ -1164,8 +1164,7 @@ impl App {
                         self.switch_foreground(target_id)?;
                         self.terminal.append_output(&format!(
                             "[系统] 已切换到连接 {} ({})",
-                            id,
-                            self.manager.sessions[target_id].name
+                            id, self.manager.sessions[target_id].name
                         ))?;
                     } else {
                         self.terminal
@@ -1188,10 +1187,8 @@ impl App {
                             self.manager.sessions[id].name
                         ))?;
                     } else {
-                        self.terminal.append_output(&format!(
-                            "[错误] 未找到角色 '{}'",
-                            target
-                        ))?;
+                        self.terminal
+                            .append_output(&format!("[错误] 未找到角色 '{}'", target))?;
                     }
                 }
             }
