@@ -10,6 +10,14 @@ use std::io::{self, Write};
 use crate::connection::{SessionInfo, SessionState};
 use crate::ui::{ensure_ansi_reset, AnsiParser};
 
+/// 可点击区域（状态栏上的 session 标签）
+#[derive(Debug, Clone)]
+pub struct ClickRegion {
+    pub start_x: u16,
+    pub end_x: u16,
+    pub session_id: usize,
+}
+
 /// 提取字符串中最后一组 CSI SGR 序列（形如 \x1b[...m），返回完整序列
 fn extract_last_sgr(s: &str) -> Option<String> {
     let mut last = None;
@@ -63,9 +71,21 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
     result
 }
 
+/// 计算字符串的可见宽度（忽略 ANSI 转义序列）
+fn visible_width(s: &str) -> usize {
+    let stripped = AnsiParser::strip_ansi(s);
+    stripped.chars().map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)).sum()
+}
+
 /// 构建 session 状态栏字符串（纯逻辑，无 IO 依赖）
-fn build_status_bar(sessions: &[SessionInfo], foreground_id: usize, total_width: usize) -> String {
+/// 返回 (状态栏字符串, 可点击区域列表)
+fn build_status_bar(
+    sessions: &[SessionInfo],
+    foreground_id: usize,
+    total_width: usize,
+) -> (String, Vec<ClickRegion>) {
     let mut bar = String::new();
+    let mut regions = Vec::new();
     for (i, info) in sessions.iter().enumerate() {
         let state_icon = match info.state {
             SessionState::Connected => "\x1b[32m●\x1b[0m",
@@ -73,6 +93,8 @@ fn build_status_bar(sessions: &[SessionInfo], foreground_id: usize, total_width:
             SessionState::Connecting => "\x1b[33m◎\x1b[0m",
             SessionState::Reconnecting => "\x1b[35m⟳\x1b[0m",
         };
+        // 记录当前 x 位置（不包括 ANSI 码的可见宽度）
+        let start_x = visible_width(&bar) as u16;
         if i == foreground_id {
             bar.push_str(&format!(
                 "\x1b[33m[{}]{}\x1b[0m{} ",
@@ -83,14 +105,19 @@ fn build_status_bar(sessions: &[SessionInfo], foreground_id: usize, total_width:
         } else {
             bar.push_str(&format!("[{}]{}\x1b[0m{} ", i + 1, info.name, state_icon));
         }
+        let end_x = visible_width(&bar) as u16;
+        regions.push(ClickRegion { start_x, end_x, session_id: i });
     }
     let right_text = "RustLuaMud";
-    if bar.len() + right_text.len() + 2 < total_width {
-        let padding = total_width - bar.len() - right_text.len() - 2;
-        bar.extend(std::iter::repeat_n(' ', padding));
+    if visible_width(&bar) + right_text.len() + 2 < total_width {
+        // 当前 bar 的可见宽度
+        let padding = total_width - visible_width(&bar) - right_text.len() - 2;
+        for _ in 0..padding {
+            bar.push(' ');
+        }
         bar.push_str(&format!("\x1b[36m{}\x1b[0m", right_text));
     }
-    bar
+    (bar, regions)
 }
 
 /// 构建 Lua SetStatus 状态栏字符串（前台连接的自定义状态文本）
@@ -142,6 +169,8 @@ pub struct TerminalState {
     pub last_ansi_sgr: String,
     /// 输出区滚动偏移（0 = 底部，即最新输出）
     pub scroll_offset: usize,
+    /// 状态栏可点击区域
+    pub status_bar_regions: Vec<ClickRegion>,
 }
 
 impl TerminalState {
@@ -164,6 +193,7 @@ impl TerminalState {
             clear_on_next_key: false,
             last_ansi_sgr: String::new(),
             scroll_offset: 0,
+            status_bar_regions: Vec::new(),
         }
     }
 
@@ -364,8 +394,9 @@ impl TerminalState {
 
     /// 更新状态栏缓存（纯逻辑）
     pub fn update_status_bar(&mut self, sessions: &[SessionInfo], foreground_id: usize) {
-        let bar = build_status_bar(sessions, foreground_id, self.width as usize);
+        let (bar, regions) = build_status_bar(sessions, foreground_id, self.width as usize);
         self.status_bar_cache = Some(bar);
+        self.status_bar_regions = regions;
     }
 
     /// 更新 Lua 状态栏缓存（纯逻辑）
@@ -464,6 +495,8 @@ impl Terminal {
     pub fn new() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
         let (width, height) = terminal::size()?;
+        // 启用鼠标事件捕获（按钮 + SGR 扩展模式），不跟踪拖拽
+        let _ = write!(io::stdout(), "\x1b[?1000h\x1b[?1006h");
         Ok(Self {
             state: TerminalState::new(width, height),
         })
@@ -648,8 +681,16 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
+        let _ = write!(io::stdout(), "\x1b[?1006l\x1b[?1000l");
         let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
+    }
+}
+
+/// 获取状态栏可点击区域
+impl Terminal {
+    pub fn click_regions(&self) -> &[ClickRegion] {
+        &self.state.status_bar_regions
     }
 }
 
@@ -1193,8 +1234,9 @@ mod tests {
 
     #[test]
     fn test_build_status_bar_empty() {
-        let bar = build_status_bar(&[], 0, 80);
+        let (bar, regions) = build_status_bar(&[], 0, 80);
         assert!(bar.contains("RustLuaMud"));
+        assert!(regions.is_empty());
     }
 
     #[test]
@@ -1211,10 +1253,14 @@ mod tests {
                 status_text: String::new(),
             },
         ];
-        let bar = build_status_bar(&sessions, 0, 80);
+        let (bar, regions) = build_status_bar(&sessions, 0, 80);
         assert!(bar.contains("mud1"));
         assert!(bar.contains("mud2"));
         assert!(bar.contains("RustLuaMud"));
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].session_id, 0);
+        assert_eq!(regions[1].session_id, 1);
+        assert!(regions[1].start_x >= regions[0].end_x);
     }
 
     #[test]
@@ -1224,7 +1270,7 @@ mod tests {
             state: SessionState::Connected,
             status_text: String::new(),
         }];
-        let bar = build_status_bar(&sessions, 0, 80);
+        let (bar, _regions) = build_status_bar(&sessions, 0, 80);
         // Foreground should have yellow highlight
         assert!(bar.contains("\x1b[33m[1]"));
     }

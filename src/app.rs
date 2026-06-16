@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyModifiers};
+use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -285,11 +285,18 @@ impl App {
             tokio::select! {
                 // 处理终端键盘事件
                 Some(Ok(event)) = term_events.next() => {
-                    if let CrosstermEvent::Key(key) = event {
-                        self.handle_key_event(key)?;
-                    } else if let CrosstermEvent::Resize(w, h) = event {
-                        self.terminal.resize(w, h);
-                        self.update_status_bar()?;
+                    match event {
+                        CrosstermEvent::Key(key) => {
+                            self.handle_key_event(key)?;
+                        }
+                        CrosstermEvent::Mouse(mouse) => {
+                            self.handle_mouse_event(mouse)?;
+                        }
+                        CrosstermEvent::Resize(w, h) => {
+                            self.terminal.resize(w, h);
+                            self.update_status_bar()?;
+                        }
+                        _ => {}
                     }
                 }
 
@@ -715,6 +722,23 @@ impl App {
             if session_id == self.manager.foreground_id {
                 self.terminal
                     .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 处理鼠标事件
+    fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) -> io::Result<()> {
+        // 只在状态栏行（y=0）响应鼠标点击
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && mouse.row == 0 {
+            let x = mouse.column;
+            for region in self.terminal.click_regions() {
+                if x >= region.start_x && x < region.end_x {
+                    if region.session_id < self.manager.sessions.len() {
+                        self.switch_foreground(region.session_id)?;
+                    }
+                    break;
+                }
             }
         }
         Ok(())
