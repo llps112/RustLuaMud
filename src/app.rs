@@ -75,6 +75,8 @@ enum BuiltinCommand {
     Lua { code: String },
     /// /set <选项> <值>
     Set { option: String, value: String },
+    /// /switch <角色名或编号>
+    Switch { target: String },
     /// 未知命令
     Unknown,
 }
@@ -131,6 +133,15 @@ fn parse_builtin_command(cmd: &str) -> BuiltinCommand {
                 BuiltinCommand::Set {
                     option: parts[1].to_string(),
                     value: parts[2].to_string(),
+                }
+            }
+        }
+        "/switch" => {
+            if parts.len() < 2 {
+                BuiltinCommand::Unknown
+            } else {
+                BuiltinCommand::Switch {
+                    target: parts[1].to_string(),
                 }
             }
         }
@@ -1145,6 +1156,46 @@ impl App {
                 }
             },
 
+            BuiltinCommand::Switch { target } => {
+                // 尝试解析为数字
+                if let Ok(id) = target.parse::<usize>() {
+                    if id > 0 && id <= self.manager.sessions.len() {
+                        let target_id = id - 1;
+                        self.switch_foreground(target_id)?;
+                        self.terminal.append_output(&format!(
+                            "[系统] 已切换到连接 {} ({})",
+                            id,
+                            self.manager.sessions[target_id].name
+                        ))?;
+                    } else {
+                        self.terminal
+                            .append_output(&format!("[错误] 连接 {} 不存在", id))?;
+                    }
+                } else {
+                    // 按名称查找
+                    let target_name = target.to_lowercase();
+                    if let Some((id, _)) = self
+                        .manager
+                        .sessions
+                        .iter()
+                        .enumerate()
+                        .find(|(_, s)| s.name.to_lowercase() == target_name)
+                    {
+                        self.switch_foreground(id)?;
+                        self.terminal.append_output(&format!(
+                            "[系统] 已切换到连接 {} ({})",
+                            id + 1,
+                            self.manager.sessions[id].name
+                        ))?;
+                    } else {
+                        self.terminal.append_output(&format!(
+                            "[错误] 未找到角色 '{}'",
+                            target
+                        ))?;
+                    }
+                }
+            }
+
             BuiltinCommand::Unknown => {
                 self.terminal.append_output("内置命令:")?;
                 self.terminal
@@ -1165,6 +1216,8 @@ impl App {
                     .append_output("  /lua <Lua 代码>             直接执行 Lua 代码")?;
                 self.terminal
                     .append_output("  /set keep_command on|off     执行后保留命令栏输入")?;
+                self.terminal
+                    .append_output("  /switch <编号或名称>        切换到指定连接")?;
                 self.terminal
                     .append_output("  Alt+0~9                     切换前台连接 (最多10个)")?;
                 self.terminal
