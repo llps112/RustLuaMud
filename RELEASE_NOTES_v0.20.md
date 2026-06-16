@@ -282,15 +282,14 @@ sudo cp target/release/RustLuaMud /usr/local/bin/
 ### 配置目录
 
 ```bash
-# 创建配置目录
-mkdir -p profiles scripts logs
-
 # 复制示例配置
 cp profiles/example.toml profiles/mychar.toml
 
 # 编辑配置
 nano profiles/mychar.toml
 ```
+
+> **说明**：`profiles/`、`profiles2/`、`scripts/` 目录已包含在仓库中，`logs/` 目录会在首次运行时自动创建。
 
 ### 验证安装
 
