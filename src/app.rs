@@ -731,6 +731,9 @@ impl App {
         }
 
         // Alt+1~9: 切换到第 1~9 个连接, Alt+0: 切换到第 10 个连接
+        // 支持两种模式：
+        // 1. 标准模式：带 ALT 修饰符的数字键
+        // 2. xterm 8-bit 模式：Alt+数字 发送高位字符 (U+00B0~U+00B9)
         if key.modifiers.contains(KeyModifiers::ALT) {
             if let KeyCode::Char(c) = key.code {
                 if let Some(digit) = c.to_digit(10) {
@@ -740,6 +743,18 @@ impl App {
                     }
                     return Ok(());
                 }
+            }
+        }
+
+        // xterm 8-bit 模式：Alt+数字 发送高位字符 (0x30 | 0x80 = 0xB0)
+        // U+00B0 (°) = Alt+0, U+00B1 (±) = Alt+1, ..., U+00B9 (¹) = Alt+9
+        if let KeyCode::Char(c) = key.code {
+            if let Some(digit) = Self::parse_xterm_alt_digit(c) {
+                let id = if digit == 0 { 9 } else { (digit as usize) - 1 };
+                if id < self.manager.sessions.len() {
+                    self.switch_foreground(id)?;
+                }
+                return Ok(());
             }
         }
 
@@ -787,6 +802,18 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// 解析 xterm 8-bit 模式的 Alt+数字
+    /// xterm 在 8-bit 模式下，Alt+数字 会发送 U+00B0~U+00B9 范围的字符
+    /// 例如：Alt+1 → U+00B1 (±), Alt+2 → U+00B2 (²)
+    fn parse_xterm_alt_digit(c: char) -> Option<u8> {
+        let code = c as u32;
+        if (0x00B0..=0x00B9).contains(&code) {
+            Some((code - 0x00B0) as u8)
+        } else {
+            None
+        }
     }
 
     /// 处理内置命令（基于 parse_builtin_command 分发）
