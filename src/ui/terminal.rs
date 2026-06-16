@@ -403,7 +403,7 @@ impl TerminalState {
 
     /// 获取输入行显示内容（考虑滚动）
     pub fn input_display(&self) -> (String, usize) {
-        use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+        use unicode_width::UnicodeWidthChar;
 
         let prompt_len: usize = 2; // "> "
         let avail_width = self.width as usize - prompt_len;

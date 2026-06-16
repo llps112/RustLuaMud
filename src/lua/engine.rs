@@ -2799,6 +2799,7 @@ impl LuaEngine {
     }
 
     /// 执行 Lua 代码并返回字符串结果
+    #[allow(dead_code)]
     pub fn eval_to_string(&self, code: &str) -> Result<String, String> {
         self.lua
             .load(code)
@@ -3340,6 +3341,7 @@ impl LuaEngine {
     }
 
     /// 设置端口（本引擎扩展，非 MushClient 标准 GetInfo）
+    #[allow(dead_code)]
     pub fn set_port(&self, port: u16) {
         self.state.borrow_mut().port = port;
     }
@@ -3447,6 +3449,7 @@ impl LuaEngine {
     }
 
     /// 获取定时器列表（interval_millis）
+    #[allow(dead_code)]
     pub fn timer_intervals(&self) -> Vec<u64> {
         self.state
             .borrow()

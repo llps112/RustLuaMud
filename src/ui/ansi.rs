@@ -94,6 +94,7 @@ impl AnsiState {
 
     /// 生成 SGR 重置或还原序列
     /// 如果状态为非激活，返回空字符串
+    #[allow(dead_code)]
     pub fn reset_sequence(&self) -> &'static str {
         if self.is_active() {
             "\x1b[0m"
@@ -105,6 +106,7 @@ impl AnsiState {
 
 /// ANSI 解析器配置
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AnsiParserConfig {
     /// 严格模式：记录所有缺失终止编码的日志
     pub strict: bool,
@@ -123,6 +125,7 @@ impl Default for AnsiParserConfig {
 
 /// 诊断日志条目
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AnsiLogEntry {
     /// 原始行内容（截断显示）
     pub raw_preview: String,
@@ -131,6 +134,7 @@ pub struct AnsiLogEntry {
 }
 
 /// ANSI SGR 解析器
+#[allow(dead_code)]
 pub struct AnsiParser {
     config: AnsiParserConfig,
     logs: Vec<AnsiLogEntry>,
@@ -155,6 +159,7 @@ impl AnsiParser {
     }
 
     /// 使用默认配置创建解析器
+    #[allow(dead_code)]
     pub fn with_logging() -> Self {
         Self::new(AnsiParserConfig {
             strict: true,
@@ -171,11 +176,13 @@ impl AnsiParser {
     }
 
     /// 获取诊断日志
+    #[allow(dead_code)]
     pub fn logs(&self) -> &[AnsiLogEntry] {
         &self.logs
     }
 
     /// 清空诊断日志
+    #[allow(dead_code)]
     pub fn clear_logs(&mut self) {
         self.logs.clear();
     }
@@ -184,6 +191,7 @@ impl AnsiParser {
     /// 1. 扫描 ANSI 序列追踪颜色状态
     /// 2. 如果行尾缺少终止编码，自动补充 \x1b[0m
     /// 3. 返回处理后的文本（保证行尾状态为 reset）
+    #[allow(dead_code)]
     pub fn process_line(&mut self, line: &str) -> String {
         let final_state = self.scan_line(line);
         if final_state.is_active() {
@@ -239,6 +247,7 @@ impl AnsiParser {
 
     /// 解析一行文本并应用 ANSI 序列到给定状态
     /// 用于多行累积解析
+    #[allow(dead_code)]
     pub fn scan_into(&self, line: &str, state: &mut AnsiState) {
         let mut chars = line.chars().peekable();
 
@@ -258,6 +267,7 @@ impl AnsiParser {
     }
 
     /// 消费 CSI 参数字节和中间字节
+    #[allow(dead_code)]
     fn consume_csi_params(&self, chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
         let mut params = String::new();
         // 参数字节: 0x30-0x3f (0-9;:<->?)

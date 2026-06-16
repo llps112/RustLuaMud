@@ -9,6 +9,7 @@ pub struct GeneralConfig {
     #[serde(default = "default_log_dir")]
     pub log_dir: String,
     #[serde(default = "default_profile_dir")]
+    #[allow(dead_code)]
     pub profile_dir: String,
     #[serde(default = "default_log_rotation_size_mb")]
     pub log_rotation_size_mb: u64,
