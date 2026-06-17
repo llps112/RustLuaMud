@@ -149,6 +149,49 @@ fn parse_builtin_command(cmd: &str) -> BuiltinCommand {
     }
 }
 
+/// 解析分号分隔的命令，支持转义（\; 表示字面量分号）
+fn split_commands(cmd: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut chars = cmd.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // 转义字符：检查下一个字符
+            if let Some(&next) = chars.peek() {
+                if next == ';' {
+                    // \; 表示字面量分号
+                    current.push(';');
+                    chars.next();
+                } else {
+                    // 其他情况保留反斜杠
+                    current.push('\\');
+                }
+            } else {
+                // 字符串末尾的反斜杠
+                current.push('\\');
+            }
+        } else if c == ';' {
+            // 分号：结束当前命令
+            let trimmed = current.trim();
+            if !trimmed.is_empty() {
+                result.push(trimmed.to_string());
+            }
+            current.clear();
+        } else {
+            current.push(c);
+        }
+    }
+
+    // 处理最后一个命令
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        result.push(trimmed.to_string());
+    }
+
+    result
+}
+
 /// 重连请求
 struct ReconnectRequest {
     session_id: usize,
@@ -820,33 +863,43 @@ impl App {
                 if cmd.starts_with('/') {
                     self.handle_builtin_command(&cmd)?;
                 } else {
-                    // 先尝试别名匹配
-                    let fg = self.manager.foreground_id;
-                    let alias_handled = if fg < self.manager.sessions.len() {
-                        if let Some(ref engine) = self.manager.sessions[fg].lua_engine {
-                            let handled = engine.process_input(&cmd);
-                            if handled {
-                                let commands = engine.drain_commands();
-                                self.send_lua_commands(fg, commands)?;
-                                self.drain_lua_logs(fg)?;
-                            } else {
-                                self.drain_lua_logs(fg)?;
-                            }
-                            handled
-                        } else {
-                            false
-                        }
+                    // 检查是否包含分号，如果有则拆分处理
+                    let commands = if cmd.contains(';') {
+                        split_commands(&cmd)
                     } else {
-                        false
+                        vec![cmd]
                     };
 
-                    if !alias_handled {
-                        // 无别名匹配，发送到前台连接
-                        if let Some(fg) = self.manager.sessions.get(self.manager.foreground_id) {
-                            self.logger.log_command(&fg.name, &cmd);
-                        }
-                        if let Err(e) = self.manager.send_to_foreground(&cmd) {
-                            self.terminal.append_output(&format!("[错误] {}", e))?;
+                    // 逐条处理命令
+                    for single_cmd in commands {
+                        // 先尝试别名匹配
+                        let fg = self.manager.foreground_id;
+                        let alias_handled = if fg < self.manager.sessions.len() {
+                            if let Some(ref engine) = self.manager.sessions[fg].lua_engine {
+                                let handled = engine.process_input(&single_cmd);
+                                if handled {
+                                    let commands = engine.drain_commands();
+                                    self.send_lua_commands(fg, commands)?;
+                                    self.drain_lua_logs(fg)?;
+                                } else {
+                                    self.drain_lua_logs(fg)?;
+                                }
+                                handled
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                        if !alias_handled {
+                            // 无别名匹配，发送到前台连接
+                            if let Some(fg) = self.manager.sessions.get(self.manager.foreground_id) {
+                                self.logger.log_command(&fg.name, &single_cmd);
+                            }
+                            if let Err(e) = self.manager.send_to_foreground(&single_cmd) {
+                                self.terminal.append_output(&format!("[错误] {}", e))?;
+                            }
                         }
                     }
                 }
@@ -1664,5 +1717,77 @@ mod tests {
     #[test]
     fn test_term_settings_path() {
         assert_eq!(TermSettings::path(), "profiles/terminal.json");
+    }
+
+    #[test]
+    fn test_split_commands_basic() {
+        let result = split_commands("east;east;look");
+        assert_eq!(result, vec!["east", "east", "look"]);
+    }
+
+    #[test]
+    fn test_split_commands_single() {
+        let result = split_commands("look");
+        assert_eq!(result, vec!["look"]);
+    }
+
+    #[test]
+    fn test_split_commands_empty() {
+        let result = split_commands("");
+        assert_eq!(result, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_split_commands_escape_semicolon() {
+        let result = split_commands("say hello\\;world");
+        assert_eq!(result, vec!["say hello;world"]);
+    }
+
+    #[test]
+    fn test_split_commands_mixed_escape() {
+        let result = split_commands("east;say hi\\;there;west");
+        assert_eq!(result, vec!["east", "say hi;there", "west"]);
+    }
+
+    #[test]
+    fn test_split_commands_empty_parts() {
+        let result = split_commands("east;;west");
+        assert_eq!(result, vec!["east", "west"]);
+    }
+
+    #[test]
+    fn test_split_commands_whitespace() {
+        let result = split_commands("  east  ;  west  ");
+        assert_eq!(result, vec!["east", "west"]);
+    }
+
+    #[test]
+    fn test_split_commands_trailing_semicolon() {
+        let result = split_commands("east;");
+        assert_eq!(result, vec!["east"]);
+    }
+
+    #[test]
+    fn test_split_commands_leading_semicolon() {
+        let result = split_commands(";east");
+        assert_eq!(result, vec!["east"]);
+    }
+
+    #[test]
+    fn test_split_commands_backslash_not_before_semicolon() {
+        let result = split_commands("east\\;west");
+        assert_eq!(result, vec!["east;west"]);
+    }
+
+    #[test]
+    fn test_split_commands_trailing_backslash() {
+        let result = split_commands("east\\");
+        assert_eq!(result, vec!["east\\"]);
+    }
+
+    #[test]
+    fn test_split_commands_backslash_at_end() {
+        let result = split_commands("say test\\");
+        assert_eq!(result, vec!["say test\\"]);
     }
 }
