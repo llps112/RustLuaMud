@@ -484,6 +484,8 @@ impl App {
                 engine.set_host(&host);
                 // 注入世界名称（供 GetInfo(2) 返回）
                 engine.set_world_name(&self.manager.sessions[id].name);
+                // 注入日志目录（供 GetInfo(58) 返回）
+                engine.set_log_dir(&self.config.general.log_dir);
 
                 // 注入登录凭证到 Lua 变量和全局变量
                 if let Some(ref name) = username {

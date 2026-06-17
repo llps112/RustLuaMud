@@ -615,6 +615,7 @@ pub struct LuaEngine {
     state: Rc<RefCell<ScriptState>>,
     script_path: Rc<RefCell<Option<String>>>,
     script_dir: Rc<RefCell<Option<String>>>,
+    log_dir: Rc<RefCell<Option<String>>>,
 }
 
 // ============================================================
@@ -748,12 +749,14 @@ impl LuaEngine {
 
         let script_dir = Rc::new(RefCell::new(None::<String>));
         let script_path = Rc::new(RefCell::new(None::<String>));
+        let log_dir = Rc::new(RefCell::new(None::<String>));
 
         let mut engine = Self {
             lua,
             state,
             script_path,
             script_dir,
+            log_dir,
         };
         engine.register_api()?;
         Ok(engine)
@@ -761,12 +764,26 @@ impl LuaEngine {
 
     /// 设置脚本路径（同时提取目录）
     pub fn set_script_path(&mut self, path: &str) {
-        if let Some(pos) = path.rfind('/') {
-            *self.script_dir.borrow_mut() = Some(path[..pos + 1].to_string());
+        // 同时支持 / 和 \ 分隔符，兼容 Linux 和 Windows
+        let pos = path.rfind(|c| c == '/' || c == '\\');
+        if let Some(p) = pos {
+            *self.script_dir.borrow_mut() = Some(path[..p + 1].to_string());
         } else {
             *self.script_dir.borrow_mut() = Some("./".to_string());
         }
         *self.script_path.borrow_mut() = Some(path.to_string());
+    }
+
+    /// 设置日志目录（供 GetInfo(58) 返回）
+    pub fn set_log_dir(&mut self, path: &str) {
+        // 规范化：确保末尾带平台原生路径分隔符
+        let sep = if cfg!(windows) { "\\" } else { "/" };
+        let normalized = if path.ends_with('/') || path.ends_with('\\') {
+            path.to_string()
+        } else {
+            format!("{}{}", path, sep)
+        };
+        *self.log_dir.borrow_mut() = Some(normalized);
     }
 
     /// 注册 Lua API
@@ -2007,8 +2024,8 @@ impl LuaEngine {
         // ============================================================
 
         // GetInfo(code) — MushClient API 兼容
-        let script_dir_rc = self.script_dir.clone();
         let script_path_rc = self.script_path.clone();
+        let log_dir_rc = self.log_dir.clone();
         let state_rc_gi = state_rc.clone();
         let get_info_fn = lua.create_function_mut(move |lua, code: i64| match code {
             1 => {
@@ -2045,13 +2062,13 @@ impl LuaEngine {
             }
             58 => {
                 // MushClient: GetInfo(58) = Log files default path (directory)
-                let dir = script_dir_rc.borrow().clone();
+                // 返回配置的日志目录，供脚本写入日志文件
+                let dir = log_dir_rc.borrow().clone();
+                let sep = if cfg!(windows) { "\\" } else { "/" };
+                let default_dir = format!("logs{}", sep);
                 match dir {
-                    Some(d) => {
-                        let win_path = d.replace('/', "\\");
-                        Ok(Value::String(lua.create_string(&win_path)?))
-                    }
-                    None => Ok(Value::String(lua.create_string("")?)),
+                    Some(d) => Ok(Value::String(lua.create_string(&d)?)),
+                    None => Ok(Value::String(lua.create_string(&default_dir)?)),
                 }
             }
             204 => {
@@ -5037,11 +5054,14 @@ mod tests {
     #[test]
     fn test_get_info_58() {
         with_engine(|engine| {
-            engine.set_script_path("/home/user/scripts/main.lua");
+            // 未设置 log_dir 时返回默认值
             let dir: String = eval(engine, "return GetInfo(58)").unwrap();
-            assert!(dir.contains("scripts"));
-            assert!(dir.contains('\\'));
-            assert!(!dir.contains('/'));
+            assert_eq!(dir, "logs/");
+
+            // 设置 log_dir 后返回配置的路径
+            engine.set_log_dir("logs");
+            let dir: String = eval(engine, "return GetInfo(58)").unwrap();
+            assert_eq!(dir, "logs/");
         });
     }
 

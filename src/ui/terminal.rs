@@ -655,12 +655,20 @@ impl Terminal {
     }
 
     /// 处理键盘事件，返回是否需要发送命令
-    /// 注：仅重绘输入行（不触发 refresh_all），Enter 后的全屏刷新由调用方负责
+    /// PgUp/PgDn 需要重绘输出区（滚动），其他键仅重绘输入行
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<String> {
+        let needs_output_redraw = matches!(
+            key.code,
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::End | KeyCode::Home
+        );
         let result = self.state.handle_key(key);
         let mut stdout = io::stdout();
-        let _ = self.draw_input_line(&mut stdout);
-        let _ = stdout.flush();
+        if needs_output_redraw {
+            let _ = self.refresh_output_area(&mut stdout);
+        } else {
+            let _ = self.draw_input_line(&mut stdout);
+            let _ = stdout.flush();
+        }
         result
     }
 
