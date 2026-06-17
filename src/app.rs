@@ -894,7 +894,8 @@ impl App {
 
                         if !alias_handled {
                             // 无别名匹配，发送到前台连接
-                            if let Some(fg) = self.manager.sessions.get(self.manager.foreground_id) {
+                            if let Some(fg) = self.manager.sessions.get(self.manager.foreground_id)
+                            {
                                 self.logger.log_command(&fg.name, &single_cmd);
                             }
                             if let Err(e) = self.manager.send_to_foreground(&single_cmd) {
