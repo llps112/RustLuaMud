@@ -1,0 +1,3 @@
+[submodule "scripts/private"]
+	path = scripts/private
+	url = git@github.com:llps112/RustLuaMud-scripts.git
