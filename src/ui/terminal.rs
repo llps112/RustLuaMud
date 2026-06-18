@@ -155,6 +155,12 @@ pub struct TerminalState {
     pub history: Vec<String>,
     /// 历史浏览位置
     pub history_pos: usize,
+    /// 历史最大容量
+    pub history_max: usize,
+    /// 前缀搜索的当前前缀（非空时 Up/Down 按前缀匹配过滤历史）
+    pub history_prefix: String,
+    /// 是否处于普通历史浏览模式（按Up从历史载入，非前缀搜索）
+    pub history_browsing: bool,
     /// 终端宽度（列数）
     pub width: u16,
     /// 终端高度（行数）
@@ -190,6 +196,9 @@ impl TerminalState {
             input_cursor: 0,
             history: Vec::new(),
             history_pos: 0,
+            history_max: 1000,
+            history_prefix: String::new(),
+            history_browsing: false,
             width,
             height,
             status_height: 1,
@@ -272,7 +281,12 @@ impl TerminalState {
                 let cmd = self.input_buffer.clone();
                 if !cmd.is_empty() {
                     self.history.push(cmd.clone());
+                    if self.history.len() > self.history_max {
+                        self.history.remove(0);
+                    }
                     self.history_pos = self.history.len();
+                    self.history_prefix.clear();
+                    self.history_browsing = false;
                 }
                 if self.keep_command {
                     // 保留文本，光标回到行首，下次按键替换旧内容
@@ -281,12 +295,16 @@ impl TerminalState {
                 } else {
                     self.input_buffer.clear();
                     self.input_cursor = 0;
+                    self.history_prefix.clear();
+                    self.history_browsing = false;
                 }
                 Some(cmd)
             }
 
             (KeyModifiers::NONE, KeyCode::Backspace) => {
                 self.clear_on_next_key = false;
+                self.history_prefix.clear();
+                self.history_browsing = false;
                 if self.input_cursor > 0 {
                     self.input_cursor -= 1;
                     let byte_pos = char_pos_to_byte_pos(&self.input_buffer, self.input_cursor);
@@ -297,6 +315,8 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::Delete) => {
                 self.clear_on_next_key = false;
+                self.history_prefix.clear();
+                self.history_browsing = false;
                 if self.input_cursor < self.input_buffer.chars().count() {
                     let byte_pos = char_pos_to_byte_pos(&self.input_buffer, self.input_cursor);
                     self.input_buffer.remove(byte_pos);
@@ -322,22 +342,70 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::Up) => {
                 self.clear_on_next_key = false;
-                if self.history_pos > 0 {
+                if !self.input_buffer.is_empty() && !self.history_browsing {
+                    // 用户手动输入文本 → 进入前缀搜索模式
+                    self.history_prefix.clone_from(&self.input_buffer);
+                    self.history_pos = self.history.len();
+                    for pos in (0..self.history.len()).rev() {
+                        if self.history[pos].starts_with(&self.history_prefix) {
+                            self.history_pos = pos;
+                            self.input_buffer = self.history[pos].clone();
+                            self.input_cursor = self.input_buffer.chars().count();
+                            self.history_browsing = true;
+                            break;
+                        }
+                    }
+                } else if !self.history_prefix.is_empty() {
+                    // 前缀搜索模式：继续向上找
+                    if self.history_pos > 0 {
+                        for pos in (0..self.history_pos).rev() {
+                            if self.history[pos].starts_with(&self.history_prefix) {
+                                self.history_pos = pos;
+                                self.input_buffer = self.history[pos].clone();
+                                self.input_cursor = self.input_buffer.chars().count();
+                                break;
+                            }
+                        }
+                    }
+                } else if self.history_pos > 0 {
+                    // 输入为空：普通历史浏览
                     self.history_pos -= 1;
                     self.input_buffer = self.history[self.history_pos].clone();
                     self.input_cursor = self.input_buffer.chars().count();
+                    self.history_browsing = true;
                 }
                 None
             }
 
             (KeyModifiers::NONE, KeyCode::Down) => {
                 self.clear_on_next_key = false;
-                if self.history_pos < self.history.len() {
+                if !self.history_prefix.is_empty() {
+                    // 前缀搜索模式：向下找
+                    let mut found = false;
+                    for pos in self.history_pos + 1..self.history.len() {
+                        if self.history[pos].starts_with(&self.history_prefix) {
+                            self.history_pos = pos;
+                            self.input_buffer = self.history[pos].clone();
+                            self.input_cursor = self.input_buffer.chars().count();
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        // 没有更多匹配，退出前缀搜索，恢复前缀
+                        self.history_pos = self.history.len();
+                        self.input_buffer = self.history_prefix.clone();
+                        self.input_cursor = self.input_buffer.chars().count();
+                        self.history_prefix.clear();
+                        self.history_browsing = false;
+                    }
+                } else if self.history_pos < self.history.len() {
                     self.history_pos += 1;
                     if self.history_pos < self.history.len() {
                         self.input_buffer = self.history[self.history_pos].clone();
                     } else {
                         self.input_buffer.clear();
+                        self.history_browsing = false;
                     }
                     self.input_cursor = self.input_buffer.chars().count();
                 }
@@ -389,10 +457,15 @@ impl TerminalState {
                     self.input_buffer.clear();
                     self.input_cursor = 0;
                     self.clear_on_next_key = false;
+                    self.history_prefix.clear();
+                    self.history_browsing = false;
                 }
                 let byte_pos = char_pos_to_byte_pos(&self.input_buffer, self.input_cursor);
                 self.input_buffer.insert(byte_pos, c);
                 self.input_cursor += 1;
+                // 编辑输入后退出前缀搜索和历史浏览模式
+                self.history_prefix.clear();
+                self.history_browsing = false;
                 None
             }
 
