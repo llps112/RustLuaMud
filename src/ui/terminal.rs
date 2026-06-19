@@ -1086,11 +1086,7 @@ mod tests {
         assert!(offset_before > 0);
 
         // 记录当前可见行
-        let visible_before: Vec<String> = state
-            .visible_output_lines()
-            .iter()
-            .cloned()
-            .collect();
+        let visible_before: Vec<String> = state.visible_output_lines().iter().cloned().collect();
 
         // 添加新输出
         state.push_output("new line");
@@ -1099,11 +1095,7 @@ mod tests {
         assert_eq!(state.scroll_offset, offset_before + 1);
 
         // 视口内容应保持相同
-        let visible_after: Vec<String> = state
-            .visible_output_lines()
-            .iter()
-            .cloned()
-            .collect();
+        let visible_after: Vec<String> = state.visible_output_lines().iter().cloned().collect();
         assert_eq!(visible_before, visible_after);
     }
 
