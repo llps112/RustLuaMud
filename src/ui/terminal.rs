@@ -773,7 +773,12 @@ impl Terminal {
         let (display_str, cursor_x) = self.state.input_display();
         if self.state.text_selected && !display_str.is_empty() {
             // 反选效果（\x1b[7m）：高亮显示被选中的文本
-            queue!(stdout, Print("\x1b[7m"), Print(&display_str), Print("\x1b[27m"))?;
+            queue!(
+                stdout,
+                Print("\x1b[7m"),
+                Print(&display_str),
+                Print("\x1b[27m")
+            )?;
         } else {
             queue!(stdout, Print(&display_str))?;
         }
