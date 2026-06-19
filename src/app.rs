@@ -1807,7 +1807,10 @@ mod tests {
     fn test_format_lua_error_stack_traceback() {
         let err = "stack traceback:\n\t[string \"line\"]:1: in main chunk";
         let result = format_lua_error(err);
-        assert_eq!(result, vec!["stack traceback:", "[string \"line\"]:1: in main chunk"]);
+        assert_eq!(
+            result,
+            vec!["stack traceback:", "[string \"line\"]:1: in main chunk"]
+        );
     }
 
     #[test]
@@ -1838,13 +1841,23 @@ mod tests {
     #[test]
     fn test_parse_builtin_switch_by_name() {
         let result = parse_builtin_command("/switch char2");
-        assert_eq!(result, BuiltinCommand::Switch { target: "char2".to_string() });
+        assert_eq!(
+            result,
+            BuiltinCommand::Switch {
+                target: "char2".to_string()
+            }
+        );
     }
 
     #[test]
     fn test_parse_builtin_switch_alias() {
         let result = parse_builtin_command("/sw char2");
-        assert_eq!(result, BuiltinCommand::Switch { target: "char2".to_string() });
+        assert_eq!(
+            result,
+            BuiltinCommand::Switch {
+                target: "char2".to_string()
+            }
+        );
     }
 
     #[test]
@@ -1862,16 +1875,24 @@ mod tests {
     #[test]
     fn test_parse_builtin_switch_by_number() {
         let result = parse_builtin_command("/switch 3");
-        assert_eq!(result, BuiltinCommand::Switch { target: "3".to_string() });
+        assert_eq!(
+            result,
+            BuiltinCommand::Switch {
+                target: "3".to_string()
+            }
+        );
     }
 
     #[test]
     fn test_parse_builtin_connect_host_port_separate() {
         let result = parse_builtin_command("/connect char2 mud.example.com 6666");
-        assert_eq!(result, BuiltinCommand::Connect {
-            name: "char2".to_string(),
-            host: "mud.example.com".to_string(),
-            port: 6666,
-        });
+        assert_eq!(
+            result,
+            BuiltinCommand::Connect {
+                name: "char2".to_string(),
+                host: "mud.example.com".to_string(),
+                port: 6666,
+            }
+        );
     }
 }
