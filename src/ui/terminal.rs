@@ -10,6 +10,14 @@ use std::io::{self, Write};
 use crate::connection::{SessionInfo, SessionState};
 use crate::ui::{ensure_ansi_reset, AnsiParser};
 
+/// 可点击区域（状态栏上的 session 标签）
+#[derive(Debug, Clone)]
+pub struct ClickRegion {
+    pub start_x: u16,
+    pub end_x: u16,
+    pub session_id: usize,
+}
+
 /// 提取字符串中最后一组 CSI SGR 序列（形如 \x1b[...m），返回完整序列
 fn extract_last_sgr(s: &str) -> Option<String> {
     let mut last = None;
@@ -63,9 +71,24 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
     result
 }
 
+/// 计算字符串的可见宽度（忽略 ANSI 转义序列）
+fn visible_width(s: &str) -> usize {
+    let stripped = AnsiParser::strip_ansi(s);
+    stripped
+        .chars()
+        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum()
+}
+
 /// 构建 session 状态栏字符串（纯逻辑，无 IO 依赖）
-fn build_status_bar(sessions: &[SessionInfo], foreground_id: usize, total_width: usize) -> String {
+/// 返回 (状态栏字符串, 可点击区域列表)
+fn build_status_bar(
+    sessions: &[SessionInfo],
+    foreground_id: usize,
+    total_width: usize,
+) -> (String, Vec<ClickRegion>) {
     let mut bar = String::new();
+    let mut regions = Vec::new();
     for (i, info) in sessions.iter().enumerate() {
         let state_icon = match info.state {
             SessionState::Connected => "\x1b[32m●\x1b[0m",
@@ -73,6 +96,8 @@ fn build_status_bar(sessions: &[SessionInfo], foreground_id: usize, total_width:
             SessionState::Connecting => "\x1b[33m◎\x1b[0m",
             SessionState::Reconnecting => "\x1b[35m⟳\x1b[0m",
         };
+        // 记录当前 x 位置（不包括 ANSI 码的可见宽度）
+        let start_x = visible_width(&bar) as u16;
         if i == foreground_id {
             bar.push_str(&format!(
                 "\x1b[33m[{}]{}\x1b[0m{} ",
@@ -83,14 +108,23 @@ fn build_status_bar(sessions: &[SessionInfo], foreground_id: usize, total_width:
         } else {
             bar.push_str(&format!("[{}]{}\x1b[0m{} ", i + 1, info.name, state_icon));
         }
+        let end_x = visible_width(&bar) as u16;
+        regions.push(ClickRegion {
+            start_x,
+            end_x,
+            session_id: i,
+        });
     }
     let right_text = "RustLuaMud";
-    if bar.len() + right_text.len() + 2 < total_width {
-        let padding = total_width - bar.len() - right_text.len() - 2;
-        bar.extend(std::iter::repeat_n(' ', padding));
+    if visible_width(&bar) + right_text.len() + 2 < total_width {
+        // 当前 bar 的可见宽度
+        let padding = total_width - visible_width(&bar) - right_text.len() - 2;
+        for _ in 0..padding {
+            bar.push(' ');
+        }
         bar.push_str(&format!("\x1b[36m{}\x1b[0m", right_text));
     }
-    bar
+    (bar, regions)
 }
 
 /// 构建 Lua SetStatus 状态栏字符串（前台连接的自定义状态文本）
@@ -120,6 +154,12 @@ pub struct TerminalState {
     pub history: Vec<String>,
     /// 历史浏览位置
     pub history_pos: usize,
+    /// 历史最大容量
+    pub history_max: usize,
+    /// 前缀搜索的当前前缀（非空时 Up/Down 按前缀匹配过滤历史）
+    pub history_prefix: String,
+    /// 是否处于普通历史浏览模式（按Up从历史载入，非前缀搜索）
+    pub history_browsing: bool,
     /// 终端宽度（列数）
     pub width: u16,
     /// 终端高度（行数）
@@ -138,10 +178,14 @@ pub struct TerminalState {
     pub keep_command: bool,
     /// Enter 后下次按键先清空输入（模拟"全选替换"行为）
     pub clear_on_next_key: bool,
+    /// Enter 后文本处于全选高亮状态，光标在文本末尾
+    pub text_selected: bool,
     /// 最近一次看到的 ANSI SGR 颜色序列，用于跨行颜色继承
     pub last_ansi_sgr: String,
     /// 输出区滚动偏移（0 = 底部，即最新输出）
     pub scroll_offset: usize,
+    /// 状态栏可点击区域
+    pub status_bar_regions: Vec<ClickRegion>,
 }
 
 impl TerminalState {
@@ -153,6 +197,9 @@ impl TerminalState {
             input_cursor: 0,
             history: Vec::new(),
             history_pos: 0,
+            history_max: 1000,
+            history_prefix: String::new(),
+            history_browsing: false,
             width,
             height,
             status_height: 1,
@@ -162,8 +209,10 @@ impl TerminalState {
             lua_status_cache: None,
             keep_command: true,
             clear_on_next_key: false,
+            text_selected: false,
             last_ansi_sgr: String::new(),
             scroll_offset: 0,
+            status_bar_regions: Vec::new(),
         }
     }
 
@@ -178,6 +227,8 @@ impl TerminalState {
     /// 自动补上颜色前缀，实现行间颜色继承（如服务器在 ">" 行设置红色，
     /// 下一行"面色凝重"无 ANSI，自动继承红色）
     pub fn push_output(&mut self, line: &str) {
+        let old_len = self.output_lines.len();
+
         for part in line.split_inclusive('\n') {
             let trimmed = part.trim_end_matches('\n').trim_end_matches('\r');
             if !trimmed.is_empty() {
@@ -216,11 +267,31 @@ impl TerminalState {
                 }
             }
         }
+
+        let new_lines = self.output_lines.len() - old_len;
+
         // 限制缓冲区大小
         let max_lines = 5000;
-        if self.output_lines.len() > max_lines {
+        let drained = if self.output_lines.len() > max_lines {
             let drain_count = self.output_lines.len() - max_lines;
             self.output_lines.drain(..drain_count);
+            drain_count
+        } else {
+            0
+        };
+
+        // 历史浏览模式（scroll_offset > 0）：调整偏移量保持视口稳定
+        // 新行追加到底部 → scroll_offset 增加；旧行从顶部移除 → scroll_offset 减少
+        if self.scroll_offset > 0 && (new_lines > 0 || drained > 0) {
+            self.scroll_offset = self
+                .scroll_offset
+                .saturating_add(new_lines)
+                .saturating_sub(drained);
+            let max_offset = self
+                .output_lines
+                .len()
+                .saturating_sub(self.output_height() as usize);
+            self.scroll_offset = self.scroll_offset.min(max_offset);
         }
     }
 
@@ -231,24 +302,41 @@ impl TerminalState {
             | (KeyModifiers::CONTROL, KeyCode::Char('d')) => None,
 
             (KeyModifiers::NONE, KeyCode::Enter) => {
+                self.scroll_offset = 0;
                 let cmd = self.input_buffer.clone();
                 if !cmd.is_empty() {
                     self.history.push(cmd.clone());
+                    if self.history.len() > self.history_max {
+                        self.history.remove(0);
+                    }
                     self.history_pos = self.history.len();
+                    self.history_prefix.clear();
+                    self.history_browsing = false;
                 }
                 if self.keep_command {
-                    // 保留文本，光标回到行首，下次按键替换旧内容
-                    self.input_cursor = 0;
+                    // 保留文本，全选高亮，光标移到末尾，下次按键替换旧内容
+                    self.input_cursor = self.input_buffer.chars().count();
                     self.clear_on_next_key = true;
+                    self.text_selected = !self.input_buffer.is_empty();
                 } else {
                     self.input_buffer.clear();
                     self.input_cursor = 0;
+                    self.history_prefix.clear();
+                    self.history_browsing = false;
                 }
                 Some(cmd)
             }
 
             (KeyModifiers::NONE, KeyCode::Backspace) => {
                 self.clear_on_next_key = false;
+                if self.text_selected {
+                    self.input_buffer.clear();
+                    self.input_cursor = 0;
+                    self.text_selected = false;
+                    return None;
+                }
+                self.history_prefix.clear();
+                self.history_browsing = false;
                 if self.input_cursor > 0 {
                     self.input_cursor -= 1;
                     let byte_pos = char_pos_to_byte_pos(&self.input_buffer, self.input_cursor);
@@ -259,6 +347,14 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::Delete) => {
                 self.clear_on_next_key = false;
+                if self.text_selected {
+                    self.input_buffer.clear();
+                    self.input_cursor = 0;
+                    self.text_selected = false;
+                    return None;
+                }
+                self.history_prefix.clear();
+                self.history_browsing = false;
                 if self.input_cursor < self.input_buffer.chars().count() {
                     let byte_pos = char_pos_to_byte_pos(&self.input_buffer, self.input_cursor);
                     self.input_buffer.remove(byte_pos);
@@ -268,6 +364,7 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::Left) => {
                 self.clear_on_next_key = false;
+                self.text_selected = false;
                 if self.input_cursor > 0 {
                     self.input_cursor -= 1;
                 }
@@ -276,6 +373,7 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::Right) => {
                 self.clear_on_next_key = false;
+                self.text_selected = false;
                 if self.input_cursor < self.input_buffer.chars().count() {
                     self.input_cursor += 1;
                 }
@@ -284,22 +382,72 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::Up) => {
                 self.clear_on_next_key = false;
-                if self.history_pos > 0 {
+                self.text_selected = false;
+                if !self.input_buffer.is_empty() && !self.history_browsing {
+                    // 用户手动输入文本 → 进入前缀搜索模式
+                    self.history_prefix.clone_from(&self.input_buffer);
+                    self.history_pos = self.history.len();
+                    for pos in (0..self.history.len()).rev() {
+                        if self.history[pos].starts_with(&self.history_prefix) {
+                            self.history_pos = pos;
+                            self.input_buffer = self.history[pos].clone();
+                            self.input_cursor = self.input_buffer.chars().count();
+                            self.history_browsing = true;
+                            break;
+                        }
+                    }
+                } else if !self.history_prefix.is_empty() {
+                    // 前缀搜索模式：继续向上找
+                    if self.history_pos > 0 {
+                        for pos in (0..self.history_pos).rev() {
+                            if self.history[pos].starts_with(&self.history_prefix) {
+                                self.history_pos = pos;
+                                self.input_buffer = self.history[pos].clone();
+                                self.input_cursor = self.input_buffer.chars().count();
+                                break;
+                            }
+                        }
+                    }
+                } else if self.history_pos > 0 {
+                    // 输入为空：普通历史浏览
                     self.history_pos -= 1;
                     self.input_buffer = self.history[self.history_pos].clone();
                     self.input_cursor = self.input_buffer.chars().count();
+                    self.history_browsing = true;
                 }
                 None
             }
 
             (KeyModifiers::NONE, KeyCode::Down) => {
                 self.clear_on_next_key = false;
-                if self.history_pos < self.history.len() {
+                self.text_selected = false;
+                if !self.history_prefix.is_empty() {
+                    // 前缀搜索模式：向下找
+                    let mut found = false;
+                    for pos in self.history_pos + 1..self.history.len() {
+                        if self.history[pos].starts_with(&self.history_prefix) {
+                            self.history_pos = pos;
+                            self.input_buffer = self.history[pos].clone();
+                            self.input_cursor = self.input_buffer.chars().count();
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        // 没有更多匹配，退出前缀搜索，恢复前缀
+                        self.history_pos = self.history.len();
+                        self.input_buffer = self.history_prefix.clone();
+                        self.input_cursor = self.input_buffer.chars().count();
+                        self.history_prefix.clear();
+                        self.history_browsing = false;
+                    }
+                } else if self.history_pos < self.history.len() {
                     self.history_pos += 1;
                     if self.history_pos < self.history.len() {
                         self.input_buffer = self.history[self.history_pos].clone();
                     } else {
                         self.input_buffer.clear();
+                        self.history_browsing = false;
                     }
                     self.input_cursor = self.input_buffer.chars().count();
                 }
@@ -308,12 +456,14 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::Home) => {
                 self.clear_on_next_key = false;
+                self.text_selected = false;
                 self.input_cursor = 0;
                 None
             }
 
             (KeyModifiers::NONE, KeyCode::End) => {
                 self.clear_on_next_key = false;
+                self.text_selected = false;
                 if self.input_buffer.is_empty() {
                     // 输入框为空时，End 键回到底部
                     self.scroll_offset = 0;
@@ -326,6 +476,7 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::PageUp) => {
                 self.clear_on_next_key = false;
+                self.text_selected = false;
                 // 向上滚动半屏
                 let scroll_amount = (self.output_height() / 2) as usize;
                 let max_offset = if self.output_lines.len() > self.output_height() as usize {
@@ -339,6 +490,7 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::PageDown) => {
                 self.clear_on_next_key = false;
+                self.text_selected = false;
                 // 向下滚动半屏
                 let scroll_amount = (self.output_height() / 2) as usize;
                 self.scroll_offset = self.scroll_offset.saturating_sub(scroll_amount);
@@ -351,10 +503,16 @@ impl TerminalState {
                     self.input_buffer.clear();
                     self.input_cursor = 0;
                     self.clear_on_next_key = false;
+                    self.text_selected = false;
+                    self.history_prefix.clear();
+                    self.history_browsing = false;
                 }
                 let byte_pos = char_pos_to_byte_pos(&self.input_buffer, self.input_cursor);
                 self.input_buffer.insert(byte_pos, c);
                 self.input_cursor += 1;
+                // 编辑输入后退出前缀搜索和历史浏览模式
+                self.history_prefix.clear();
+                self.history_browsing = false;
                 None
             }
 
@@ -364,8 +522,9 @@ impl TerminalState {
 
     /// 更新状态栏缓存（纯逻辑）
     pub fn update_status_bar(&mut self, sessions: &[SessionInfo], foreground_id: usize) {
-        let bar = build_status_bar(sessions, foreground_id, self.width as usize);
+        let (bar, regions) = build_status_bar(sessions, foreground_id, self.width as usize);
         self.status_bar_cache = Some(bar);
+        self.status_bar_regions = regions;
     }
 
     /// 更新 Lua 状态栏缓存（纯逻辑）
@@ -392,18 +551,14 @@ impl TerminalState {
             total_lines
         };
 
-        let start = if end > output_height {
-            end - output_height
-        } else {
-            0
-        };
+        let start = end.saturating_sub(output_height);
 
         &self.output_lines[start..end]
     }
 
     /// 获取输入行显示内容（考虑滚动）
     pub fn input_display(&self) -> (String, usize) {
-        use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+        use unicode_width::UnicodeWidthChar;
 
         let prompt_len: usize = 2; // "> "
         let avail_width = self.width as usize - prompt_len;
@@ -434,12 +589,17 @@ impl TerminalState {
         // 计算显示结束字符索引
         let mut display_col = 0;
         let mut display_end = total_chars;
-        for i in display_start..total_chars {
-            if display_col + char_widths[i] > avail_width {
+        for (i, &w) in char_widths
+            .iter()
+            .enumerate()
+            .skip(display_start)
+            .take(total_chars - display_start)
+        {
+            if display_col + w > avail_width {
                 display_end = i;
                 break;
             }
-            display_col += char_widths[i];
+            display_col += w;
         }
 
         let display_str: String = chars[display_start..display_end].iter().collect();
@@ -464,6 +624,10 @@ impl Terminal {
     pub fn new() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
         let (width, height) = terminal::size()?;
+        // 启用鼠标点击追踪（仅 ?1000h，不含 ?1002h 拖拽追踪）
+        // 终端处于鼠标应用模式时，按住 Shift 拖拽可绕过应用模式进行原生文本选中
+        write!(io::stdout(), "\x1b[?1000h\x1b[?1006h")?;
+        io::stdout().flush()?;
         Ok(Self {
             state: TerminalState::new(width, height),
         })
@@ -608,18 +772,36 @@ impl Terminal {
         queue!(stdout, style::ResetColor)?;
 
         let (display_str, cursor_x) = self.state.input_display();
-        queue!(stdout, Print(&display_str))?;
+        if self.state.text_selected && !display_str.is_empty() {
+            // 反选效果（\x1b[7m）：高亮显示被选中的文本
+            queue!(
+                stdout,
+                Print("\x1b[7m"),
+                Print(&display_str),
+                Print("\x1b[27m")
+            )?;
+        } else {
+            queue!(stdout, Print(&display_str))?;
+        }
         queue!(stdout, cursor::MoveTo(cursor_x as u16, input_y))?;
         Ok(())
     }
 
     /// 处理键盘事件，返回是否需要发送命令
-    /// 注：仅重绘输入行（不触发 refresh_all），Enter 后的全屏刷新由调用方负责
+    /// PgUp/PgDn 需要重绘输出区（滚动），其他键仅重绘输入行
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<String> {
+        let needs_output_redraw = matches!(
+            key.code,
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::End | KeyCode::Home
+        );
         let result = self.state.handle_key(key);
         let mut stdout = io::stdout();
-        let _ = self.draw_input_line(&mut stdout);
-        let _ = stdout.flush();
+        if needs_output_redraw {
+            let _ = self.refresh_output_area(&mut stdout);
+        } else {
+            let _ = self.draw_input_line(&mut stdout);
+            let _ = stdout.flush();
+        }
         result
     }
 
@@ -648,8 +830,17 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
+        let _ = write!(io::stdout(), "\x1b[?1000l\x1b[?1006l");
+        let _ = io::stdout().flush();
         let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
+    }
+}
+
+/// 获取状态栏可点击区域
+impl Terminal {
+    pub fn click_regions(&self) -> &[ClickRegion] {
+        &self.state.status_bar_regions
     }
 }
 
@@ -917,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_output_does_not_reset_scroll_offset() {
+    fn test_new_output_preserves_scroll_viewport() {
         let mut state = TerminalState::new(80, 24);
         let output_height = state.output_height() as usize;
         // 添加足够多的输出行
@@ -930,11 +1121,18 @@ mod tests {
         let offset_before = state.scroll_offset;
         assert!(offset_before > 0);
 
+        // 记录当前可见行
+        let visible_before: Vec<String> = state.visible_output_lines().iter().cloned().collect();
+
         // 添加新输出
         state.push_output("new line");
 
-        // scroll_offset 不应该改变
-        assert_eq!(state.scroll_offset, offset_before);
+        // scroll_offset 应增加，保持视口内容不变
+        assert_eq!(state.scroll_offset, offset_before + 1);
+
+        // 视口内容应保持相同
+        let visible_after: Vec<String> = state.visible_output_lines().iter().cloned().collect();
+        assert_eq!(visible_before, visible_after);
     }
 
     #[test]
@@ -960,9 +1158,10 @@ mod tests {
         assert_eq!(result, Some("hello".to_string()));
         // 缓冲区应被保留
         assert_eq!(state.input_buffer, "hello");
-        // 光标回到行首
-        assert_eq!(state.input_cursor, 0);
+        // 光标移到末尾，全选高亮
+        assert_eq!(state.input_cursor, 5);
         assert!(state.clear_on_next_key);
+        assert!(state.text_selected);
         assert_eq!(state.history, vec!["hello"]);
     }
 
@@ -991,19 +1190,22 @@ mod tests {
         let mut state = TerminalState::new(80, 24);
         state.keep_command = true;
         state.input_buffer = "hello".to_string();
+        state.input_cursor = 5;
         let _ = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(state.clear_on_next_key);
-        // 按方向键取消全选状态
-        let _ = state.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(state.text_selected);
+        // 按方向键取消全选状态（光标在末尾，Left 移到 "o" 之前）
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert!(!state.clear_on_next_key);
-        // clear_on_next_key 已取消，正常插入（光标此时在位置 1，即 "e" 之前）
+        assert!(!state.text_selected);
+        // clear_on_next_key 已取消，光标在末尾前，正常插入
         let _ = state.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
-        assert_eq!(state.input_buffer, "hXello");
+        assert_eq!(state.input_buffer, "hellXo");
         // End 再到末尾
         let _ = state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         // 清除 clear_on_next_key
         let _ = state.handle_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
-        assert_eq!(state.input_buffer, "hXello!");
+        assert_eq!(state.input_buffer, "hellXo!");
     }
 
     #[test]
@@ -1193,8 +1395,9 @@ mod tests {
 
     #[test]
     fn test_build_status_bar_empty() {
-        let bar = build_status_bar(&[], 0, 80);
+        let (bar, regions) = build_status_bar(&[], 0, 80);
         assert!(bar.contains("RustLuaMud"));
+        assert!(regions.is_empty());
     }
 
     #[test]
@@ -1211,10 +1414,14 @@ mod tests {
                 status_text: String::new(),
             },
         ];
-        let bar = build_status_bar(&sessions, 0, 80);
+        let (bar, regions) = build_status_bar(&sessions, 0, 80);
         assert!(bar.contains("mud1"));
         assert!(bar.contains("mud2"));
         assert!(bar.contains("RustLuaMud"));
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].session_id, 0);
+        assert_eq!(regions[1].session_id, 1);
+        assert!(regions[1].start_x >= regions[0].end_x);
     }
 
     #[test]
@@ -1224,7 +1431,7 @@ mod tests {
             state: SessionState::Connected,
             status_text: String::new(),
         }];
-        let bar = build_status_bar(&sessions, 0, 80);
+        let (bar, _regions) = build_status_bar(&sessions, 0, 80);
         // Foreground should have yellow highlight
         assert!(bar.contains("\x1b[33m[1]"));
     }
@@ -1241,6 +1448,10 @@ mod tests {
         assert!(state.status_bar_cache.is_some());
         let bar = state.status_bar_cache.as_ref().unwrap();
         assert!(bar.contains("test"));
+        // 验证可点击区域
+        assert_eq!(state.status_bar_regions.len(), 1);
+        assert_eq!(state.status_bar_regions[0].session_id, 0);
+        assert!(state.status_bar_regions[0].end_x > state.status_bar_regions[0].start_x);
     }
 
     // ---- 新增覆盖测试 ----
@@ -1280,6 +1491,7 @@ mod tests {
         assert!(state.history.is_empty());
         // input_buffer 仍为空，clear_on_next_key 已置位（不影响）
         assert!(state.clear_on_next_key);
+        assert!(!state.text_selected);
         assert!(state.input_buffer.is_empty());
     }
 
@@ -1340,13 +1552,91 @@ mod tests {
         state.input_buffer = "hello".to_string();
         state.input_cursor = 3;
         state.clear_on_next_key = true;
+        state.text_selected = true;
         // Home 取消标志并回到开头
         let _ = state.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         assert!(!state.clear_on_next_key);
+        assert!(!state.text_selected);
         assert_eq!(state.input_cursor, 0);
         // End 到末尾
         let _ = state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         assert_eq!(state.input_cursor, 5);
+    }
+
+    #[test]
+    fn test_text_selected_backspace_clears_buffer() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 5;
+        state.text_selected = true;
+        // Backspace 清空缓冲区
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(state.input_buffer.is_empty());
+        assert_eq!(state.input_cursor, 0);
+        assert!(!state.text_selected);
+    }
+
+    #[test]
+    fn test_text_selected_delete_clears_buffer() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 5;
+        state.text_selected = true;
+        // Delete 清空缓冲区
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert!(state.input_buffer.is_empty());
+        assert_eq!(state.input_cursor, 0);
+        assert!(!state.text_selected);
+    }
+
+    #[test]
+    fn test_text_selected_cancelled_by_nav_keys() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.text_selected = true;
+        state.input_cursor = 5;
+
+        // Right 取消
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(!state.text_selected);
+        state.text_selected = true;
+
+        // Down 取消
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(!state.text_selected);
+        state.text_selected = true;
+
+        // Up 取消
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert!(!state.text_selected);
+        state.text_selected = true;
+
+        // End 取消
+        let _ = state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert!(!state.text_selected);
+        state.text_selected = true;
+
+        // PgUp 取消
+        let _ = state.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(!state.text_selected);
+        state.text_selected = true;
+
+        // PgDn 取消
+        let _ = state.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert!(!state.text_selected);
+    }
+
+    #[test]
+    fn test_text_selected_not_set_when_keep_command_false() {
+        let mut state = TerminalState::new(80, 24);
+        state.keep_command = false;
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 5;
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // 缓冲区应清空，text_selected 应为 false
+        assert!(state.input_buffer.is_empty());
+        assert_eq!(state.input_cursor, 0);
+        assert!(!state.text_selected);
     }
 
     #[test]

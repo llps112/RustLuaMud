@@ -26,3 +26,6 @@ socks5_host = "127.0.0.1"
 socks5_port = 1080
 socks5_username = ""
 socks5_password = ""
+
+# 日志文件保留数量（可选，默认 24，即保留最近 24 个小时的日志文件）
+# log_rotation_count = 168

@@ -2,15 +2,20 @@
 logs/
 *.log
 /*.txt
-profiles/wudaodm.toml
 .git-crypt-key
 .trae/
-scripts/class/
-scripts/class.zip
-scripts/class-utf8/
-scripts/michen_xkx.lua
-scripts/xkxMAP.db
-/xkxMAP.db
-scripts/config_*.lua
-/tarpaulin-report.html
-coverage_reports/
+
+# profiles: 只保留 example.toml
+profiles/*
+!profiles/example.toml
+
+# profiles2: 忽略所有内容
+profiles2/
+
+# scripts: 只保留 example.lua 和 lua/ 目录
+scripts/*
+!scripts/example.lua
+!scripts/lua/
+!scripts/private
+!scripts/class
+!scripts/class-utf8

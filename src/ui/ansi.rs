@@ -34,9 +34,9 @@
 /// - SGR 49:  默认背景色
 /// - SGR 90-97:  亮色前景
 /// - SGR 100-107: 亮色背景
-
+///
 /// ANSI 颜色/属性状态快照
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AnsiState {
     /// 前景色代码: None=默认, Some(0-255)=ANSI 4-bit/8-bit
     pub foreground: Option<u8>,
@@ -60,23 +60,6 @@ pub struct AnsiState {
     pub strikethrough: bool,
 }
 
-impl Default for AnsiState {
-    fn default() -> Self {
-        Self {
-            foreground: None,
-            background: None,
-            bold: false,
-            dim: false,
-            italic: false,
-            underline: false,
-            blink: false,
-            reverse: false,
-            conceal: false,
-            strikethrough: false,
-        }
-    }
-}
-
 impl AnsiState {
     /// 是否处于"已激活"状态（有任何非默认属性）
     pub fn is_active(&self) -> bool {
@@ -94,6 +77,7 @@ impl AnsiState {
 
     /// 生成 SGR 重置或还原序列
     /// 如果状态为非激活，返回空字符串
+    #[allow(dead_code)]
     pub fn reset_sequence(&self) -> &'static str {
         if self.is_active() {
             "\x1b[0m"
@@ -105,6 +89,7 @@ impl AnsiState {
 
 /// ANSI 解析器配置
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AnsiParserConfig {
     /// 严格模式：记录所有缺失终止编码的日志
     pub strict: bool,
@@ -123,6 +108,7 @@ impl Default for AnsiParserConfig {
 
 /// 诊断日志条目
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AnsiLogEntry {
     /// 原始行内容（截断显示）
     pub raw_preview: String,
@@ -131,6 +117,7 @@ pub struct AnsiLogEntry {
 }
 
 /// ANSI SGR 解析器
+#[allow(dead_code)]
 pub struct AnsiParser {
     config: AnsiParserConfig,
     logs: Vec<AnsiLogEntry>,
@@ -155,6 +142,7 @@ impl AnsiParser {
     }
 
     /// 使用默认配置创建解析器
+    #[allow(dead_code)]
     pub fn with_logging() -> Self {
         Self::new(AnsiParserConfig {
             strict: true,
@@ -171,11 +159,13 @@ impl AnsiParser {
     }
 
     /// 获取诊断日志
+    #[allow(dead_code)]
     pub fn logs(&self) -> &[AnsiLogEntry] {
         &self.logs
     }
 
     /// 清空诊断日志
+    #[allow(dead_code)]
     pub fn clear_logs(&mut self) {
         self.logs.clear();
     }
@@ -184,6 +174,7 @@ impl AnsiParser {
     /// 1. 扫描 ANSI 序列追踪颜色状态
     /// 2. 如果行尾缺少终止编码，自动补充 \x1b[0m
     /// 3. 返回处理后的文本（保证行尾状态为 reset）
+    #[allow(dead_code)]
     pub fn process_line(&mut self, line: &str) -> String {
         let final_state = self.scan_line(line);
         if final_state.is_active() {
@@ -220,15 +211,13 @@ impl AnsiParser {
         let mut chars = line.chars().peekable();
 
         while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                if chars.peek() == Some(&'[') {
-                    chars.next(); // 消费 '['
-                    let params_str = self::consume_csi_params(&mut chars);
-                    if let Some(final_byte) = chars.next() {
-                        if final_byte == 'm' {
-                            // SGR 序列：解析参数并更新状态
-                            apply_sgr(&params_str, &mut state);
-                        }
+            if c == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next(); // 消费 '['
+                let params_str = self::consume_csi_params(&mut chars);
+                if let Some(final_byte) = chars.next() {
+                    if final_byte == 'm' {
+                        // SGR 序列：解析参数并更新状态
+                        apply_sgr(&params_str, &mut state);
                     }
                 }
             }
@@ -239,18 +228,17 @@ impl AnsiParser {
 
     /// 解析一行文本并应用 ANSI 序列到给定状态
     /// 用于多行累积解析
+    #[allow(dead_code)]
     pub fn scan_into(&self, line: &str, state: &mut AnsiState) {
         let mut chars = line.chars().peekable();
 
         while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                if chars.peek() == Some(&'[') {
-                    chars.next(); // 消费 '['
-                    let params_str = self::consume_csi_params(&mut chars);
-                    if let Some(final_byte) = chars.next() {
-                        if final_byte == 'm' {
-                            apply_sgr(&params_str, state);
-                        }
+            if c == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next(); // 消费 '['
+                let params_str = self::consume_csi_params(&mut chars);
+                if let Some(final_byte) = chars.next() {
+                    if final_byte == 'm' {
+                        apply_sgr(&params_str, state);
                     }
                 }
             }
@@ -258,6 +246,7 @@ impl AnsiParser {
     }
 
     /// 消费 CSI 参数字节和中间字节
+    #[allow(dead_code)]
     fn consume_csi_params(&self, chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
         let mut params = String::new();
         // 参数字节: 0x30-0x3f (0-9;:<->?)
@@ -388,21 +377,20 @@ fn apply_sgr(params_str: &str, state: &mut AnsiState) {
             }
         };
         match p {
-            38 => {
+            38
                 // 扩展前景色
-                if i + 1 < params.len() {
+                if i + 1 < params.len() => {
                     match params[i + 1] {
-                        "5" => {
+                        "5"
                             // 256 色
-                            if i + 2 < params.len() {
+                            if i + 2 < params.len() => {
                                 if let Ok(color) = params[i + 2].parse::<u8>() {
                                     state.foreground = Some(color);
                                 }
                             }
-                        }
-                        "2" => {
+                        "2"
                             // RGB: 有损转换为最近的 8-bit 色
-                            if i + 4 < params.len() {
+                            if i + 4 < params.len() => {
                                 let r = params[i + 2].parse::<u8>().unwrap_or(0);
                                 let g = params[i + 3].parse::<u8>().unwrap_or(0);
                                 let b = params[i + 4].parse::<u8>().unwrap_or(0);
@@ -416,35 +404,30 @@ fn apply_sgr(params_str: &str, state: &mut AnsiState) {
                                     232 + (gray / 11) as u8
                                 });
                             }
-                        }
                         _ => {}
                     }
                 }
-            }
-            48 => {
+            48
                 // 扩展背景色
-                if i + 1 < params.len() {
+                if i + 1 < params.len() => {
                     match params[i + 1] {
-                        "5" => {
-                            if i + 2 < params.len() {
+                        "5"
+                            if i + 2 < params.len() => {
                                 if let Ok(color) = params[i + 2].parse::<u8>() {
                                     state.background = Some(color);
                                 }
                             }
-                        }
-                        "2" => {
-                            if i + 4 < params.len() {
+                        "2"
+                            if i + 4 < params.len() => {
                                 let r = params[i + 2].parse::<u8>().unwrap_or(0);
                                 let g = params[i + 3].parse::<u8>().unwrap_or(0);
                                 let b = params[i + 4].parse::<u8>().unwrap_or(0);
                                 let gray = (r as u16 + g as u16 + b as u16) / 3;
                                 state.background = Some(232 + (gray / 11) as u8);
                             }
-                        }
                         _ => {}
                     }
                 }
-            }
             _ => {}
         }
         i += 1;

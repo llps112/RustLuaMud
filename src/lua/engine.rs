@@ -615,6 +615,7 @@ pub struct LuaEngine {
     state: Rc<RefCell<ScriptState>>,
     script_path: Rc<RefCell<Option<String>>>,
     script_dir: Rc<RefCell<Option<String>>>,
+    log_dir: Rc<RefCell<Option<String>>>,
 }
 
 // ============================================================
@@ -657,26 +658,22 @@ fn lua_value_to_json(val: &mlua::Value) -> serde_json::Value {
             if is_array && i > 1 {
                 // 数组
                 let mut arr = Vec::new();
-                for pair in t.clone().pairs::<i64, mlua::Value>() {
-                    if let Ok((_, v)) = pair {
-                        arr.push(lua_value_to_json(&v));
-                    }
+                for (_, v) in t.clone().pairs::<i64, mlua::Value>().flatten() {
+                    arr.push(lua_value_to_json(&v));
                 }
                 serde_json::Value::Array(arr)
             } else {
                 // 对象
                 let mut map = serde_json::Map::new();
-                for pair in t.clone().pairs::<mlua::Value, mlua::Value>() {
-                    if let Ok((k, v)) = pair {
-                        let key = match &k {
-                            mlua::Value::String(s) => {
-                                let owned: Vec<u8> = s.as_bytes().to_vec();
-                                String::from_utf8_lossy(&owned).to_string()
-                            }
-                            _ => format!("{:?}", k),
-                        };
-                        map.insert(key, lua_value_to_json(&v));
-                    }
+                for (k, v) in t.clone().pairs::<mlua::Value, mlua::Value>().flatten() {
+                    let key = match &k {
+                        mlua::Value::String(s) => {
+                            let owned: Vec<u8> = s.as_bytes().to_vec();
+                            String::from_utf8_lossy(&owned).to_string()
+                        }
+                        _ => format!("{:?}", k),
+                    };
+                    map.insert(key, lua_value_to_json(&v));
                 }
                 serde_json::Value::Object(map)
             }
@@ -748,12 +745,14 @@ impl LuaEngine {
 
         let script_dir = Rc::new(RefCell::new(None::<String>));
         let script_path = Rc::new(RefCell::new(None::<String>));
+        let log_dir = Rc::new(RefCell::new(None::<String>));
 
         let mut engine = Self {
             lua,
             state,
             script_path,
             script_dir,
+            log_dir,
         };
         engine.register_api()?;
         Ok(engine)
@@ -761,12 +760,26 @@ impl LuaEngine {
 
     /// 设置脚本路径（同时提取目录）
     pub fn set_script_path(&mut self, path: &str) {
-        if let Some(pos) = path.rfind('/') {
-            *self.script_dir.borrow_mut() = Some(path[..pos + 1].to_string());
+        // 同时支持 / 和 \ 分隔符，兼容 Linux 和 Windows
+        let pos = path.rfind(['/', '\\']);
+        if let Some(p) = pos {
+            *self.script_dir.borrow_mut() = Some(path[..p + 1].to_string());
         } else {
             *self.script_dir.borrow_mut() = Some("./".to_string());
         }
         *self.script_path.borrow_mut() = Some(path.to_string());
+    }
+
+    /// 设置日志目录（供 GetInfo(58) 返回）
+    pub fn set_log_dir(&mut self, path: &str) {
+        // 规范化：确保末尾带平台原生路径分隔符
+        let sep = if cfg!(windows) { "\\" } else { "/" };
+        let normalized = if path.ends_with('/') || path.ends_with('\\') {
+            path.to_string()
+        } else {
+            format!("{}{}", path, sep)
+        };
+        *self.log_dir.borrow_mut() = Some(normalized);
     }
 
     /// 注册 Lua API
@@ -1165,7 +1178,7 @@ impl LuaEngine {
         let json_decode_fn = lua.create_function_mut(move |lua, json_str: String| {
             let json_val: serde_json::Value = serde_json::from_str(&json_str)
                 .map_err(|e| mlua::Error::external(format!("json_decode 失败: {}", e)))?;
-            let lua_val = json_to_lua_value(&lua, &json_val)?;
+            let lua_val = json_to_lua_value(lua, &json_val)?;
             Ok(lua_val)
         })?;
         globals.set("json_decode", json_decode_fn)?;
@@ -1740,7 +1753,7 @@ impl LuaEngine {
         // DoAfter(seconds, text) — 一次性临时定时器，发送文本到 MUD (send_to=0)
         let state_rc_da = state_rc.clone();
         let doafter_fn = lua.create_function_mut(move |lua, (seconds, text): (f64, String)| {
-            if seconds < 0.1 || seconds > 86399.0 {
+            if !(0.1..=86399.0).contains(&seconds) {
                 return Ok(Value::Integer(1)); // eTimeInvalid
             }
             let mut state = state_rc_da.borrow_mut();
@@ -1770,7 +1783,7 @@ impl LuaEngine {
         let state_rc_dn = state_rc.clone();
         let doafter_note_fn =
             lua.create_function_mut(move |lua, (seconds, text): (f64, String)| {
-                if seconds < 0.1 || seconds > 86399.0 {
+                if !(0.1..=86399.0).contains(&seconds) {
                     return Ok(Value::Integer(1)); // eTimeInvalid
                 }
                 let mut state = state_rc_dn.borrow_mut();
@@ -1800,10 +1813,10 @@ impl LuaEngine {
         let state_rc_ds = state_rc.clone();
         let doafter_special_fn =
             lua.create_function_mut(move |lua, (seconds, text, send_to): (f64, String, i64)| {
-                if seconds < 0.1 || seconds > 86399.0 {
+                if !(0.1..=86399.0).contains(&seconds) {
                     return Ok(Value::Integer(1)); // eTimeInvalid
                 }
-                if send_to < 0 || send_to > 14 {
+                if !(0..=14).contains(&send_to) {
                     return Ok(Value::Integer(2)); // eOptionOutOfRange
                 }
                 let mut state = state_rc_ds.borrow_mut();
@@ -1840,7 +1853,7 @@ impl LuaEngine {
         let state_rc_dw = state_rc.clone();
         let doafter_sw_fn =
             lua.create_function_mut(move |lua, (seconds, text): (f64, String)| {
-                if seconds < 0.1 || seconds > 86399.0 {
+                if !(0.1..=86399.0).contains(&seconds) {
                     return Ok(Value::Integer(1)); // eTimeInvalid
                 }
                 let mut state = state_rc_dw.borrow_mut();
@@ -2007,8 +2020,8 @@ impl LuaEngine {
         // ============================================================
 
         // GetInfo(code) — MushClient API 兼容
-        let script_dir_rc = self.script_dir.clone();
         let script_path_rc = self.script_path.clone();
+        let log_dir_rc = self.log_dir.clone();
         let state_rc_gi = state_rc.clone();
         let get_info_fn = lua.create_function_mut(move |lua, code: i64| match code {
             1 => {
@@ -2045,13 +2058,13 @@ impl LuaEngine {
             }
             58 => {
                 // MushClient: GetInfo(58) = Log files default path (directory)
-                let dir = script_dir_rc.borrow().clone();
+                // 返回配置的日志目录，供脚本写入日志文件
+                let dir = log_dir_rc.borrow().clone();
+                let sep = if cfg!(windows) { "\\" } else { "/" };
+                let default_dir = format!("logs{}", sep);
                 match dir {
-                    Some(d) => {
-                        let win_path = d.replace('/', "\\");
-                        Ok(Value::String(lua.create_string(&win_path)?))
-                    }
-                    None => Ok(Value::String(lua.create_string("")?)),
+                    Some(d) => Ok(Value::String(lua.create_string(&d)?)),
+                    None => Ok(Value::String(lua.create_string(&default_dir)?)),
                 }
             }
             204 => {
@@ -2799,6 +2812,7 @@ impl LuaEngine {
     }
 
     /// 执行 Lua 代码并返回字符串结果
+    #[allow(dead_code)]
     pub fn eval_to_string(&self, code: &str) -> Result<String, String> {
         self.lua
             .load(code)
@@ -3151,9 +3165,8 @@ impl LuaEngine {
                 .timers
                 .iter()
                 .position(|t| t.name == name);
-            match index {
-                Some(i) => self.fire_timer_inner(i),
-                None => {} // 定时器可能已被回调删除，忽略
+            if let Some(i) = index {
+                self.fire_timer_inner(i);
             }
         }));
         if result.is_err() {
@@ -3239,7 +3252,7 @@ impl LuaEngine {
                     && send_text
                         .chars()
                         .next()
-                        .map_or(false, |c| c.is_alphabetic() || c == '_');
+                        .is_some_and(|c| c.is_alphabetic() || c == '_');
 
                 let result: Result<(), String> = if is_function_name {
                     let code = format!("{}('{}')", send_text, timer_name.replace('\'', "\\'"));
@@ -3340,6 +3353,7 @@ impl LuaEngine {
     }
 
     /// 设置端口（本引擎扩展，非 MushClient 标准 GetInfo）
+    #[allow(dead_code)]
     pub fn set_port(&self, port: u16) {
         self.state.borrow_mut().port = port;
     }
@@ -3447,6 +3461,7 @@ impl LuaEngine {
     }
 
     /// 获取定时器列表（interval_millis）
+    #[allow(dead_code)]
     pub fn timer_intervals(&self) -> Vec<u64> {
         self.state
             .borrow()
@@ -5034,11 +5049,14 @@ mod tests {
     #[test]
     fn test_get_info_58() {
         with_engine(|engine| {
-            engine.set_script_path("/home/user/scripts/main.lua");
+            // 未设置 log_dir 时返回默认值
             let dir: String = eval(engine, "return GetInfo(58)").unwrap();
-            assert!(dir.contains("scripts"));
-            assert!(dir.contains('\\'));
-            assert!(!dir.contains('/'));
+            assert_eq!(dir, "logs/");
+
+            // 设置 log_dir 后返回配置的路径
+            engine.set_log_dir("logs");
+            let dir: String = eval(engine, "return GetInfo(58)").unwrap();
+            assert_eq!(dir, "logs/");
         });
     }
 

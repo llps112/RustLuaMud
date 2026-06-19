@@ -19,7 +19,7 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 - **SQLite3 集成** — Lua 脚本可直接操作 SQLite3 数据库，支持 GBK 文本解码
 - **触发器 w[0] 兼容** — 触发器回调的 `wildcards` 表包含 `w[0]`（完整匹配文本），与 MUSHclient 行为完全一致
 - **自动重连** — 断线自动重连，可配置延迟
-- **日志系统** — 按连接分文件记录，带时间戳
+- **日志系统** — 按连接分文件记录，按小时分割，24 小时滚动覆盖，保留数量可单独配置
 - **Profile 管理** — 从 `profiles/` 目录加载角色配置（TOML），自动注入登录凭证
 - **终端设置持久化** — `keep_command` 等终端选项自动保存到 JSON 文件
 - **状态栏** — 实时显示角色名、连接状态、版本号等信息（SetStatus API）
@@ -32,6 +32,24 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 ---
 
 ## 快速开始
+
+### 安装 Rust
+
+```bash
+# 国内服务器（推荐，使用中科大镜像）
+export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
+export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
+curl --proto '=https' --tlsv1.2 -sSf https://mirrors.ustc.edu.cn/rust-static/rustup/rustup-init.sh | sh -s -- -y
+
+# 海外服务器（使用官方源）
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+```
+
+安装完成后刷新环境变量：
+
+```bash
+source $HOME/.cargo/env
+```
 
 ### 编译
 
@@ -73,6 +91,9 @@ socks5_host = "127.0.0.1"
 socks5_port = 1080
 socks5_username = "user"   # 可选，留空或不设置表示无认证
 socks5_password = "pass"   # 可选
+
+# 日志保留数量（可选，默认 24，即保留最近 24 小时日志文件）
+# log_rotation_count = 168
 ```
 
 > `profiles/example.toml` 为示例文件，程序启动时自动跳过，不会加载。如需临时禁用某个角色配置，可将文件后缀改为非 `.toml`（如 `.bak`），恢复时改回即可。
@@ -111,6 +132,9 @@ socks5_password = "pass"   # 可选
 |--------|------|
 | `Alt+1~9` | 切换到对应编号的连接 |
 | `Alt+0` | 切换到第 10 个连接 |
+| `Alt+Left` | 切换到前一个连接（循环） |
+| `Alt+Right` | 切换到后一个连接（循环） |
+| 鼠标点击状态栏标签 | 切换到对应连接 |
 | `Ctrl+C` / `Ctrl+D` | 退出程序 |
 | `↑` / `↓` | 浏览命令历史 |
 | `PageUp` / `PageDown` | 向上/向下滚动查看历史输出（每次滚动半屏） |
@@ -129,8 +153,22 @@ socks5_password = "pass"   # 可选
 | `/list` | 列出所有连接及状态 |
 | `/load <脚本路径>` | 为前台连接加载 Lua 脚本 |
 | `/load reload` | 重新加载前台连接的 Lua 脚本（保留变量状态） |
+| `/switch <角色名\|编号>` `/sw <角色名\|编号>` | 切换到指定连接 |
 | `/lua <Lua 代码>` | 直接执行 Lua 代码 |
 | `/set keep_command on\|off` | 设置 Enter 后是否保留命令栏输入内容 |
+
+---
+
+## 文本复制
+
+由于启用了鼠标点击追踪（状态栏点击切换连接），鼠标处于"应用模式"。
+需要**按住 Shift 键**的同时用鼠标拖拽来选择文本：
+
+- **Shift + 鼠标拖拽**选中文本
+- 选中后按 `Ctrl+Shift+C` 复制（Windows Terminal / GNOME Terminal 等）
+- 或**鼠标右键**复制（Windows Terminal 默认行为）
+- Linux 下选中文本会自动复制到选择缓冲区，按**鼠标中键**粘贴
+- **注意**: `Ctrl+C` 会退出客户端，请勿用于复制
 
 ---
 
@@ -326,7 +364,7 @@ socks5_password = "pass"   # 可选
 ├── scripts/               # Lua 脚本
 │   ├── example.lua        # 示例脚本
 │   └── lua/               # Lua 依赖库（wait.lua 等）
-├── logs/                  # 日志文件（按连接分文件）
+├── logs/                  # 日志文件（按连接分文件，按小时分割）
 ├── help/                  # 客户端文档
 │   ├── api/               # Lua API 接口文档
 │   └── commands/          # 命令和 CLUI 操作指南

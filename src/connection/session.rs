@@ -593,6 +593,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(1, &config);
         assert_eq!(session.name, "test");
@@ -620,6 +621,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(1, &config);
         assert!(session.send("hello").is_err());
@@ -643,6 +645,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let mut session = Session::new(1, &config);
         session.disconnect();
@@ -667,6 +670,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(2, &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -690,6 +694,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(3, &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -713,6 +718,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(5, &config);
         assert_eq!(session.script_path, Some("/path/to/script.lua".to_string()));
@@ -736,6 +742,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(6, &config);
         assert_eq!(session.username, Some("player".to_string()));
@@ -760,6 +767,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(7, &config);
         assert!(session.auto_connect);
@@ -785,6 +793,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(8, &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -808,6 +817,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(9, &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -879,6 +889,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(1, &config);
         assert!(session.output_lines.is_empty());
@@ -902,6 +913,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(1, &config);
         assert!(session.lua_engine.is_none());
@@ -925,6 +937,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let mut session = Session::new(1, &config);
         session.disconnect();
@@ -957,6 +970,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(1, &config);
         assert!(!session.socks5_enable);
@@ -982,6 +996,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(1, &config);
         assert!(session.socks5_enable);
@@ -1007,6 +1022,7 @@ mod tests {
             socks5_port: 1081,
             socks5_username: Some("user".to_string()),
             socks5_password: Some("pass".to_string()),
+            log_rotation_count: None,
         };
         let session = Session::new(1, &config);
         assert!(session.socks5_enable);
@@ -1035,6 +1051,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(1, &config);
         assert!(session.socks5_enable);
@@ -1060,6 +1077,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         };
         let session = Session::new(1, &config);
         assert!(session.socks5_enable);
@@ -1085,6 +1103,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         }
     }
 
@@ -1105,6 +1124,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         }
     }
 

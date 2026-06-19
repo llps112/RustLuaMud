@@ -2,7 +2,9 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyModifiers};
+use crossterm::event::{
+    Event as CrosstermEvent, EventStream, KeyCode, KeyModifiers, MouseButton, MouseEventKind,
+};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -73,6 +75,8 @@ enum BuiltinCommand {
     Lua { code: String },
     /// /set <选项> <值>
     Set { option: String, value: String },
+    /// /switch <角色名或编号>
+    Switch { target: String },
     /// 未知命令
     Unknown,
 }
@@ -132,8 +136,60 @@ fn parse_builtin_command(cmd: &str) -> BuiltinCommand {
                 }
             }
         }
+        "/switch" | "/sw" => {
+            if parts.len() < 2 {
+                BuiltinCommand::Unknown
+            } else {
+                BuiltinCommand::Switch {
+                    target: parts[1].to_string(),
+                }
+            }
+        }
         _ => BuiltinCommand::Unknown,
     }
+}
+
+/// 解析分号分隔的命令，支持转义（\; 表示字面量分号）
+fn split_commands(cmd: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut chars = cmd.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // 转义字符：检查下一个字符
+            if let Some(&next) = chars.peek() {
+                if next == ';' {
+                    // \; 表示字面量分号
+                    current.push(';');
+                    chars.next();
+                } else {
+                    // 其他情况保留反斜杠
+                    current.push('\\');
+                }
+            } else {
+                // 字符串末尾的反斜杠
+                current.push('\\');
+            }
+        } else if c == ';' {
+            // 分号：结束当前命令
+            let trimmed = current.trim();
+            if !trimmed.is_empty() {
+                result.push(trimmed.to_string());
+            }
+            current.clear();
+        } else {
+            current.push(c);
+        }
+    }
+
+    // 处理最后一个命令
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        result.push(trimmed.to_string());
+    }
+
+    result
 }
 
 /// 重连请求
@@ -177,10 +233,6 @@ fn format_lua_error(err: &str) -> Vec<String> {
         let trimmed = line.trim();
         if trimmed.starts_with("stack traceback:") {
             lines.push("stack traceback:".to_string());
-        } else if trimmed.starts_with('\t') || trimmed.starts_with("[string") {
-            lines.push(trimmed.to_string());
-        } else if trimmed.contains("err '") {
-            lines.push(trimmed.to_string());
         } else if !trimmed.is_empty() {
             lines.push(trimmed.to_string());
         }
@@ -210,10 +262,19 @@ impl App {
     pub fn new(config: AppConfig) -> io::Result<Self> {
         let mut manager = ConnectionManager::new();
 
-        // 加载配置文件中的连接（load_default 已从 profiles 目录加载）
+        let logger = Logger::new(
+            &config.general.log_dir,
+            config.general.log_rotation_size_mb,
+            config.general.log_rotation_count,
+        );
+
+        // 加载配置文件中的连接，并设置各角色的日志保留数量
         for conn_config in &config.connections {
             if let Err(e) = manager.add_connection(conn_config) {
                 eprintln!("警告: {}", e);
+            }
+            if let Some(count) = conn_config.log_rotation_count {
+                logger.set_session_max_files(&conn_config.name, count);
             }
         }
 
@@ -222,11 +283,7 @@ impl App {
         // 加载并应用终端设置
         let ts = TermSettings::load();
         terminal.state_mut().keep_command = ts.keep_command;
-        let logger = Logger::new(
-            &config.general.log_dir,
-            config.general.log_rotation_size_mb,
-            config.general.log_rotation_count,
-        );
+
         let (reconnect_tx, reconnect_rx) = mpsc::channel(32);
         let (connect_tx, connect_rx) = mpsc::channel(16);
         let (timer_tx, timer_rx) = mpsc::channel(64);
@@ -285,11 +342,18 @@ impl App {
             tokio::select! {
                 // 处理终端键盘事件
                 Some(Ok(event)) = term_events.next() => {
-                    if let CrosstermEvent::Key(key) = event {
-                        self.handle_key_event(key)?;
-                    } else if let CrosstermEvent::Resize(w, h) = event {
-                        self.terminal.resize(w, h);
-                        self.update_status_bar()?;
+                    match event {
+                        CrosstermEvent::Key(key) => {
+                            self.handle_key_event(key)?;
+                        }
+                        CrosstermEvent::Mouse(mouse) => {
+                            self.handle_mouse_event(mouse)?;
+                        }
+                        CrosstermEvent::Resize(w, h) => {
+                            self.terminal.resize(w, h);
+                            self.update_status_bar()?;
+                        }
+                        _ => {}
                     }
                 }
 
@@ -421,6 +485,8 @@ impl App {
                 engine.set_host(&host);
                 // 注入世界名称（供 GetInfo(2) 返回）
                 engine.set_world_name(&self.manager.sessions[id].name);
+                // 注入日志目录（供 GetInfo(58) 返回）
+                engine.set_log_dir(&self.config.general.log_dir);
 
                 // 注入登录凭证到 Lua 变量和全局变量
                 if let Some(ref name) = username {
@@ -444,8 +510,7 @@ impl App {
                             // 排空脚本加载期间 Execute 等压入的命令（如 "/set_dl()"、"score" 等）
                             let queued_cmds = engine.drain_commands();
                             for cmd in &queued_cmds {
-                                if cmd.starts_with('/') {
-                                    let lua_code = &cmd[1..];
+                                if let Some(lua_code) = cmd.strip_prefix('/') {
                                     if let Err(e) = engine.eval_code(lua_code) {
                                         self.terminal.append_output(&format!(
                                             "[Lua] 执行排队命令失败: {}",
@@ -569,9 +634,9 @@ impl App {
         let max_depth = 10;
 
         while let Some(cmd) = queue.pop_front() {
-            if cmd.starts_with('/') {
+            if let Some(lua_code) = cmd.strip_prefix('/') {
                 // / 开头的命令作为 Lua 代码执行
-                let lua_code = &cmd[1..]; // 去掉前导 /
+                // 去掉前导 /
                 self.logger.log_lua(&name, lua_code);
                 if let Some(ref engine) = self.manager.sessions[session_id].lua_engine {
                     match engine.eval_code(lua_code) {
@@ -720,6 +785,23 @@ impl App {
         Ok(())
     }
 
+    /// 处理鼠标事件
+    fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) -> io::Result<()> {
+        // 只在状态栏行（y=0）响应鼠标点击
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && mouse.row == 0 {
+            let x = mouse.column;
+            for region in self.terminal.click_regions() {
+                if x >= region.start_x && x < region.end_x {
+                    if region.session_id < self.manager.sessions.len() {
+                        self.switch_foreground(region.session_id)?;
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// 处理键盘事件
     fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> io::Result<()> {
         // Ctrl+C / Ctrl+D: 退出
@@ -731,6 +813,9 @@ impl App {
         }
 
         // Alt+1~9: 切换到第 1~9 个连接, Alt+0: 切换到第 10 个连接
+        // 支持两种模式：
+        // 1. 标准模式：带 ALT 修饰符的数字键
+        // 2. xterm 8-bit 模式：Alt+数字 发送高位字符 (U+00B0~U+00B9)
         if key.modifiers.contains(KeyModifiers::ALT) {
             if let KeyCode::Char(c) = key.code {
                 if let Some(digit) = c.to_digit(10) {
@@ -740,6 +825,33 @@ impl App {
                     }
                     return Ok(());
                 }
+            }
+        }
+
+        // xterm 8-bit 模式：Alt+数字 发送高位字符 (0x30 | 0x80 = 0xB0)
+        // U+00B0 (°) = Alt+0, U+00B1 (±) = Alt+1, ..., U+00B9 (¹) = Alt+9
+        if let KeyCode::Char(c) = key.code {
+            if let Some(digit) = Self::parse_xterm_alt_digit(c) {
+                let id = if digit == 0 { 9 } else { (digit as usize) - 1 };
+                if id < self.manager.sessions.len() {
+                    self.switch_foreground(id)?;
+                }
+                return Ok(());
+            }
+        }
+
+        // Alt+Left: 切换到前一个连接 (循环), Alt+Right: 切换到后一个连接 (循环)
+        let total = self.manager.sessions.len();
+        if total > 0 {
+            if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Left {
+                let new_id = (self.manager.foreground_id + total - 1) % total;
+                self.switch_foreground(new_id)?;
+                return Ok(());
+            }
+            if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Right {
+                let new_id = (self.manager.foreground_id + 1) % total;
+                self.switch_foreground(new_id)?;
+                return Ok(());
             }
         }
 
@@ -753,33 +865,44 @@ impl App {
                 if cmd.starts_with('/') {
                     self.handle_builtin_command(&cmd)?;
                 } else {
-                    // 先尝试别名匹配
-                    let fg = self.manager.foreground_id;
-                    let alias_handled = if fg < self.manager.sessions.len() {
-                        if let Some(ref engine) = self.manager.sessions[fg].lua_engine {
-                            let handled = engine.process_input(&cmd);
-                            if handled {
-                                let commands = engine.drain_commands();
-                                self.send_lua_commands(fg, commands)?;
-                                self.drain_lua_logs(fg)?;
-                            } else {
-                                self.drain_lua_logs(fg)?;
-                            }
-                            handled
-                        } else {
-                            false
-                        }
+                    // 检查是否包含分号，如果有则拆分处理
+                    let commands = if cmd.contains(';') {
+                        split_commands(&cmd)
                     } else {
-                        false
+                        vec![cmd]
                     };
 
-                    if !alias_handled {
-                        // 无别名匹配，发送到前台连接
-                        if let Some(fg) = self.manager.sessions.get(self.manager.foreground_id) {
-                            self.logger.log_command(&fg.name, &cmd);
-                        }
-                        if let Err(e) = self.manager.send_to_foreground(&cmd) {
-                            self.terminal.append_output(&format!("[错误] {}", e))?;
+                    // 逐条处理命令
+                    for single_cmd in commands {
+                        // 先尝试别名匹配
+                        let fg = self.manager.foreground_id;
+                        let alias_handled = if fg < self.manager.sessions.len() {
+                            if let Some(ref engine) = self.manager.sessions[fg].lua_engine {
+                                let handled = engine.process_input(&single_cmd);
+                                if handled {
+                                    let commands = engine.drain_commands();
+                                    self.send_lua_commands(fg, commands)?;
+                                    self.drain_lua_logs(fg)?;
+                                } else {
+                                    self.drain_lua_logs(fg)?;
+                                }
+                                handled
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                        if !alias_handled {
+                            // 无别名匹配，发送到前台连接
+                            if let Some(fg) = self.manager.sessions.get(self.manager.foreground_id)
+                            {
+                                self.logger.log_command(&fg.name, &single_cmd);
+                            }
+                            if let Err(e) = self.manager.send_to_foreground(&single_cmd) {
+                                self.terminal.append_output(&format!("[错误] {}", e))?;
+                            }
                         }
                     }
                 }
@@ -787,6 +910,18 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// 解析 xterm 8-bit 模式的 Alt+数字
+    /// xterm 在 8-bit 模式下，Alt+数字 会发送 U+00B0~U+00B9 范围的字符
+    /// 例如：Alt+1 → U+00B1 (±), Alt+2 → U+00B2 (²)
+    fn parse_xterm_alt_digit(c: char) -> Option<u8> {
+        let code = c as u32;
+        if (0x00B0..=0x00B9).contains(&code) {
+            Some((code - 0x00B0) as u8)
+        } else {
+            None
+        }
     }
 
     /// 处理内置命令（基于 parse_builtin_command 分发）
@@ -809,6 +944,7 @@ impl App {
                     socks5_port: 1080,
                     socks5_username: None,
                     socks5_password: None,
+                    log_rotation_count: None,
                 };
 
                 let id = match self.manager.add_connection_dynamic(&conn_config) {
@@ -1077,6 +1213,43 @@ impl App {
                 }
             },
 
+            BuiltinCommand::Switch { target } => {
+                // 尝试解析为数字
+                if let Ok(id) = target.parse::<usize>() {
+                    if id > 0 && id <= self.manager.sessions.len() {
+                        let target_id = id - 1;
+                        self.switch_foreground(target_id)?;
+                        self.terminal.append_output(&format!(
+                            "[系统] 已切换到连接 {} ({})",
+                            id, self.manager.sessions[target_id].name
+                        ))?;
+                    } else {
+                        self.terminal
+                            .append_output(&format!("[错误] 连接 {} 不存在", id))?;
+                    }
+                } else {
+                    // 按名称查找
+                    let target_name = target.to_lowercase();
+                    if let Some((id, _)) = self
+                        .manager
+                        .sessions
+                        .iter()
+                        .enumerate()
+                        .find(|(_, s)| s.name.to_lowercase() == target_name)
+                    {
+                        self.switch_foreground(id)?;
+                        self.terminal.append_output(&format!(
+                            "[系统] 已切换到连接 {} ({})",
+                            id + 1,
+                            self.manager.sessions[id].name
+                        ))?;
+                    } else {
+                        self.terminal
+                            .append_output(&format!("[错误] 未找到角色 '{}'", target))?;
+                    }
+                }
+            }
+
             BuiltinCommand::Unknown => {
                 self.terminal.append_output("内置命令:")?;
                 self.terminal
@@ -1098,7 +1271,13 @@ impl App {
                 self.terminal
                     .append_output("  /set keep_command on|off     执行后保留命令栏输入")?;
                 self.terminal
+                    .append_output("  /switch <编号或名称>        切换到指定连接")?;
+                self.terminal
+                    .append_output("  /sw <编号或名称>            切换到指定连接 (简写)")?;
+                self.terminal
                     .append_output("  Alt+0~9                     切换前台连接 (最多10个)")?;
+                self.terminal
+                    .append_output("  Alt+←/→                     循环切换前台连接")?;
             }
         }
         Ok(())
@@ -1544,5 +1723,77 @@ mod tests {
     #[test]
     fn test_term_settings_path() {
         assert_eq!(TermSettings::path(), "profiles/terminal.json");
+    }
+
+    #[test]
+    fn test_split_commands_basic() {
+        let result = split_commands("east;east;look");
+        assert_eq!(result, vec!["east", "east", "look"]);
+    }
+
+    #[test]
+    fn test_split_commands_single() {
+        let result = split_commands("look");
+        assert_eq!(result, vec!["look"]);
+    }
+
+    #[test]
+    fn test_split_commands_empty() {
+        let result = split_commands("");
+        assert_eq!(result, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_split_commands_escape_semicolon() {
+        let result = split_commands("say hello\\;world");
+        assert_eq!(result, vec!["say hello;world"]);
+    }
+
+    #[test]
+    fn test_split_commands_mixed_escape() {
+        let result = split_commands("east;say hi\\;there;west");
+        assert_eq!(result, vec!["east", "say hi;there", "west"]);
+    }
+
+    #[test]
+    fn test_split_commands_empty_parts() {
+        let result = split_commands("east;;west");
+        assert_eq!(result, vec!["east", "west"]);
+    }
+
+    #[test]
+    fn test_split_commands_whitespace() {
+        let result = split_commands("  east  ;  west  ");
+        assert_eq!(result, vec!["east", "west"]);
+    }
+
+    #[test]
+    fn test_split_commands_trailing_semicolon() {
+        let result = split_commands("east;");
+        assert_eq!(result, vec!["east"]);
+    }
+
+    #[test]
+    fn test_split_commands_leading_semicolon() {
+        let result = split_commands(";east");
+        assert_eq!(result, vec!["east"]);
+    }
+
+    #[test]
+    fn test_split_commands_backslash_not_before_semicolon() {
+        let result = split_commands("east\\;west");
+        assert_eq!(result, vec!["east;west"]);
+    }
+
+    #[test]
+    fn test_split_commands_trailing_backslash() {
+        let result = split_commands("east\\");
+        assert_eq!(result, vec!["east\\"]);
+    }
+
+    #[test]
+    fn test_split_commands_backslash_at_end() {
+        let result = split_commands("say test\\");
+        assert_eq!(result, vec!["say test\\"]);
     }
 }
