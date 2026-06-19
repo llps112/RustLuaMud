@@ -1796,4 +1796,82 @@ mod tests {
         let result = split_commands("say test\\");
         assert_eq!(result, vec!["say test\\"]);
     }
+
+    #[test]
+    fn test_format_lua_error_basic() {
+        let result = format_lua_error("error: syntax error");
+        assert_eq!(result, vec!["error: syntax error"]);
+    }
+
+    #[test]
+    fn test_format_lua_error_stack_traceback() {
+        let err = "stack traceback:\n\t[string \"line\"]:1: in main chunk";
+        let result = format_lua_error(err);
+        assert_eq!(result, vec!["stack traceback:", "[string \"line\"]:1: in main chunk"]);
+    }
+
+    #[test]
+    fn test_format_lua_error_empty_lines() {
+        let err = "line1\n\n\nline2";
+        let result = format_lua_error(err);
+        assert_eq!(result, vec!["line1", "line2"]);
+    }
+
+    #[test]
+    fn test_format_lua_error_all_whitespace() {
+        let result = format_lua_error("   \n  \n  ");
+        assert_eq!(result, vec!["   \n  \n  "]);
+    }
+
+    #[test]
+    fn test_format_lua_error_empty_string() {
+        let result = format_lua_error("");
+        assert_eq!(result, vec![""]);
+    }
+
+    #[test]
+    fn test_format_lua_error_single_line() {
+        let result = format_lua_error("just one line");
+        assert_eq!(result, vec!["just one line"]);
+    }
+
+    #[test]
+    fn test_parse_builtin_switch_by_name() {
+        let result = parse_builtin_command("/switch char2");
+        assert_eq!(result, BuiltinCommand::Switch { target: "char2".to_string() });
+    }
+
+    #[test]
+    fn test_parse_builtin_switch_alias() {
+        let result = parse_builtin_command("/sw char2");
+        assert_eq!(result, BuiltinCommand::Switch { target: "char2".to_string() });
+    }
+
+    #[test]
+    fn test_parse_builtin_switch_no_target() {
+        let result = parse_builtin_command("/switch");
+        assert_eq!(result, BuiltinCommand::Unknown);
+    }
+
+    #[test]
+    fn test_parse_builtin_switch_alias_no_target() {
+        let result = parse_builtin_command("/sw");
+        assert_eq!(result, BuiltinCommand::Unknown);
+    }
+
+    #[test]
+    fn test_parse_builtin_switch_by_number() {
+        let result = parse_builtin_command("/switch 3");
+        assert_eq!(result, BuiltinCommand::Switch { target: "3".to_string() });
+    }
+
+    #[test]
+    fn test_parse_builtin_connect_host_port_separate() {
+        let result = parse_builtin_command("/connect char2 mud.example.com 6666");
+        assert_eq!(result, BuiltinCommand::Connect {
+            name: "char2".to_string(),
+            host: "mud.example.com".to_string(),
+            port: 6666,
+        });
+    }
 }
