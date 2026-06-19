@@ -551,11 +551,7 @@ impl TerminalState {
             total_lines
         };
 
-        let start = if end > output_height {
-            end - output_height
-        } else {
-            0
-        };
+        let start = end.saturating_sub(output_height);
 
         &self.output_lines[start..end]
     }
@@ -593,12 +589,17 @@ impl TerminalState {
         // 计算显示结束字符索引
         let mut display_col = 0;
         let mut display_end = total_chars;
-        for i in display_start..total_chars {
-            if display_col + char_widths[i] > avail_width {
+        for (i, &w) in char_widths
+            .iter()
+            .enumerate()
+            .skip(display_start)
+            .take(total_chars - display_start)
+        {
+            if display_col + w > avail_width {
                 display_end = i;
                 break;
             }
-            display_col += char_widths[i];
+            display_col += w;
         }
 
         let display_str: String = chars[display_start..display_end].iter().collect();

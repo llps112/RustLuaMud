@@ -95,7 +95,7 @@ impl Logger {
         };
 
         // 按文件名（即时间）排序，最新的排前面
-        entries.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
 
         // 删除超出 max_files 的旧文件
         for entry in entries.iter().skip(max_files) {

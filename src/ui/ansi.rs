@@ -34,9 +34,9 @@
 /// - SGR 49:  默认背景色
 /// - SGR 90-97:  亮色前景
 /// - SGR 100-107: 亮色背景
-
+///
 /// ANSI 颜色/属性状态快照
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AnsiState {
     /// 前景色代码: None=默认, Some(0-255)=ANSI 4-bit/8-bit
     pub foreground: Option<u8>,
@@ -58,23 +58,6 @@ pub struct AnsiState {
     pub conceal: bool,
     /// 删除线 (SGR 9)
     pub strikethrough: bool,
-}
-
-impl Default for AnsiState {
-    fn default() -> Self {
-        Self {
-            foreground: None,
-            background: None,
-            bold: false,
-            dim: false,
-            italic: false,
-            underline: false,
-            blink: false,
-            reverse: false,
-            conceal: false,
-            strikethrough: false,
-        }
-    }
 }
 
 impl AnsiState {
@@ -228,15 +211,13 @@ impl AnsiParser {
         let mut chars = line.chars().peekable();
 
         while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                if chars.peek() == Some(&'[') {
-                    chars.next(); // 消费 '['
-                    let params_str = self::consume_csi_params(&mut chars);
-                    if let Some(final_byte) = chars.next() {
-                        if final_byte == 'm' {
-                            // SGR 序列：解析参数并更新状态
-                            apply_sgr(&params_str, &mut state);
-                        }
+            if c == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next(); // 消费 '['
+                let params_str = self::consume_csi_params(&mut chars);
+                if let Some(final_byte) = chars.next() {
+                    if final_byte == 'm' {
+                        // SGR 序列：解析参数并更新状态
+                        apply_sgr(&params_str, &mut state);
                     }
                 }
             }
@@ -252,14 +233,12 @@ impl AnsiParser {
         let mut chars = line.chars().peekable();
 
         while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                if chars.peek() == Some(&'[') {
-                    chars.next(); // 消费 '['
-                    let params_str = self::consume_csi_params(&mut chars);
-                    if let Some(final_byte) = chars.next() {
-                        if final_byte == 'm' {
-                            apply_sgr(&params_str, state);
-                        }
+            if c == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next(); // 消费 '['
+                let params_str = self::consume_csi_params(&mut chars);
+                if let Some(final_byte) = chars.next() {
+                    if final_byte == 'm' {
+                        apply_sgr(&params_str, state);
                     }
                 }
             }
@@ -398,21 +377,20 @@ fn apply_sgr(params_str: &str, state: &mut AnsiState) {
             }
         };
         match p {
-            38 => {
+            38
                 // 扩展前景色
-                if i + 1 < params.len() {
+                if i + 1 < params.len() => {
                     match params[i + 1] {
-                        "5" => {
+                        "5"
                             // 256 色
-                            if i + 2 < params.len() {
+                            if i + 2 < params.len() => {
                                 if let Ok(color) = params[i + 2].parse::<u8>() {
                                     state.foreground = Some(color);
                                 }
                             }
-                        }
-                        "2" => {
+                        "2"
                             // RGB: 有损转换为最近的 8-bit 色
-                            if i + 4 < params.len() {
+                            if i + 4 < params.len() => {
                                 let r = params[i + 2].parse::<u8>().unwrap_or(0);
                                 let g = params[i + 3].parse::<u8>().unwrap_or(0);
                                 let b = params[i + 4].parse::<u8>().unwrap_or(0);
@@ -426,35 +404,30 @@ fn apply_sgr(params_str: &str, state: &mut AnsiState) {
                                     232 + (gray / 11) as u8
                                 });
                             }
-                        }
                         _ => {}
                     }
                 }
-            }
-            48 => {
+            48
                 // 扩展背景色
-                if i + 1 < params.len() {
+                if i + 1 < params.len() => {
                     match params[i + 1] {
-                        "5" => {
-                            if i + 2 < params.len() {
+                        "5"
+                            if i + 2 < params.len() => {
                                 if let Ok(color) = params[i + 2].parse::<u8>() {
                                     state.background = Some(color);
                                 }
                             }
-                        }
-                        "2" => {
-                            if i + 4 < params.len() {
+                        "2"
+                            if i + 4 < params.len() => {
                                 let r = params[i + 2].parse::<u8>().unwrap_or(0);
                                 let g = params[i + 3].parse::<u8>().unwrap_or(0);
                                 let b = params[i + 4].parse::<u8>().unwrap_or(0);
                                 let gray = (r as u16 + g as u16 + b as u16) / 3;
                                 state.background = Some(232 + (gray / 11) as u8);
                             }
-                        }
                         _ => {}
                     }
                 }
-            }
             _ => {}
         }
         i += 1;

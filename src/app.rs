@@ -233,10 +233,6 @@ fn format_lua_error(err: &str) -> Vec<String> {
         let trimmed = line.trim();
         if trimmed.starts_with("stack traceback:") {
             lines.push("stack traceback:".to_string());
-        } else if trimmed.starts_with('\t') || trimmed.starts_with("[string") {
-            lines.push(trimmed.to_string());
-        } else if trimmed.contains("err '") {
-            lines.push(trimmed.to_string());
         } else if !trimmed.is_empty() {
             lines.push(trimmed.to_string());
         }
@@ -514,8 +510,7 @@ impl App {
                             // 排空脚本加载期间 Execute 等压入的命令（如 "/set_dl()"、"score" 等）
                             let queued_cmds = engine.drain_commands();
                             for cmd in &queued_cmds {
-                                if cmd.starts_with('/') {
-                                    let lua_code = &cmd[1..];
+                                if let Some(lua_code) = cmd.strip_prefix('/') {
                                     if let Err(e) = engine.eval_code(lua_code) {
                                         self.terminal.append_output(&format!(
                                             "[Lua] 执行排队命令失败: {}",
@@ -639,9 +634,9 @@ impl App {
         let max_depth = 10;
 
         while let Some(cmd) = queue.pop_front() {
-            if cmd.starts_with('/') {
+            if let Some(lua_code) = cmd.strip_prefix('/') {
                 // / 开头的命令作为 Lua 代码执行
-                let lua_code = &cmd[1..]; // 去掉前导 /
+                // 去掉前导 /
                 self.logger.log_lua(&name, lua_code);
                 if let Some(ref engine) = self.manager.sessions[session_id].lua_engine {
                     match engine.eval_code(lua_code) {

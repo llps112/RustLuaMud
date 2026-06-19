@@ -658,26 +658,22 @@ fn lua_value_to_json(val: &mlua::Value) -> serde_json::Value {
             if is_array && i > 1 {
                 // 数组
                 let mut arr = Vec::new();
-                for pair in t.clone().pairs::<i64, mlua::Value>() {
-                    if let Ok((_, v)) = pair {
-                        arr.push(lua_value_to_json(&v));
-                    }
+                for (_, v) in t.clone().pairs::<i64, mlua::Value>().flatten() {
+                    arr.push(lua_value_to_json(&v));
                 }
                 serde_json::Value::Array(arr)
             } else {
                 // 对象
                 let mut map = serde_json::Map::new();
-                for pair in t.clone().pairs::<mlua::Value, mlua::Value>() {
-                    if let Ok((k, v)) = pair {
-                        let key = match &k {
-                            mlua::Value::String(s) => {
-                                let owned: Vec<u8> = s.as_bytes().to_vec();
-                                String::from_utf8_lossy(&owned).to_string()
-                            }
-                            _ => format!("{:?}", k),
-                        };
-                        map.insert(key, lua_value_to_json(&v));
-                    }
+                for (k, v) in t.clone().pairs::<mlua::Value, mlua::Value>().flatten() {
+                    let key = match &k {
+                        mlua::Value::String(s) => {
+                            let owned: Vec<u8> = s.as_bytes().to_vec();
+                            String::from_utf8_lossy(&owned).to_string()
+                        }
+                        _ => format!("{:?}", k),
+                    };
+                    map.insert(key, lua_value_to_json(&v));
                 }
                 serde_json::Value::Object(map)
             }
@@ -765,7 +761,7 @@ impl LuaEngine {
     /// 设置脚本路径（同时提取目录）
     pub fn set_script_path(&mut self, path: &str) {
         // 同时支持 / 和 \ 分隔符，兼容 Linux 和 Windows
-        let pos = path.rfind(|c| c == '/' || c == '\\');
+        let pos = path.rfind(['/', '\\']);
         if let Some(p) = pos {
             *self.script_dir.borrow_mut() = Some(path[..p + 1].to_string());
         } else {
@@ -1182,7 +1178,7 @@ impl LuaEngine {
         let json_decode_fn = lua.create_function_mut(move |lua, json_str: String| {
             let json_val: serde_json::Value = serde_json::from_str(&json_str)
                 .map_err(|e| mlua::Error::external(format!("json_decode 失败: {}", e)))?;
-            let lua_val = json_to_lua_value(&lua, &json_val)?;
+            let lua_val = json_to_lua_value(lua, &json_val)?;
             Ok(lua_val)
         })?;
         globals.set("json_decode", json_decode_fn)?;
@@ -1757,7 +1753,7 @@ impl LuaEngine {
         // DoAfter(seconds, text) — 一次性临时定时器，发送文本到 MUD (send_to=0)
         let state_rc_da = state_rc.clone();
         let doafter_fn = lua.create_function_mut(move |lua, (seconds, text): (f64, String)| {
-            if seconds < 0.1 || seconds > 86399.0 {
+            if !(0.1..=86399.0).contains(&seconds) {
                 return Ok(Value::Integer(1)); // eTimeInvalid
             }
             let mut state = state_rc_da.borrow_mut();
@@ -1787,7 +1783,7 @@ impl LuaEngine {
         let state_rc_dn = state_rc.clone();
         let doafter_note_fn =
             lua.create_function_mut(move |lua, (seconds, text): (f64, String)| {
-                if seconds < 0.1 || seconds > 86399.0 {
+                if !(0.1..=86399.0).contains(&seconds) {
                     return Ok(Value::Integer(1)); // eTimeInvalid
                 }
                 let mut state = state_rc_dn.borrow_mut();
@@ -1817,10 +1813,10 @@ impl LuaEngine {
         let state_rc_ds = state_rc.clone();
         let doafter_special_fn =
             lua.create_function_mut(move |lua, (seconds, text, send_to): (f64, String, i64)| {
-                if seconds < 0.1 || seconds > 86399.0 {
+                if !(0.1..=86399.0).contains(&seconds) {
                     return Ok(Value::Integer(1)); // eTimeInvalid
                 }
-                if send_to < 0 || send_to > 14 {
+                if !(0..=14).contains(&send_to) {
                     return Ok(Value::Integer(2)); // eOptionOutOfRange
                 }
                 let mut state = state_rc_ds.borrow_mut();
@@ -1857,7 +1853,7 @@ impl LuaEngine {
         let state_rc_dw = state_rc.clone();
         let doafter_sw_fn =
             lua.create_function_mut(move |lua, (seconds, text): (f64, String)| {
-                if seconds < 0.1 || seconds > 86399.0 {
+                if !(0.1..=86399.0).contains(&seconds) {
                     return Ok(Value::Integer(1)); // eTimeInvalid
                 }
                 let mut state = state_rc_dw.borrow_mut();
@@ -3169,9 +3165,8 @@ impl LuaEngine {
                 .timers
                 .iter()
                 .position(|t| t.name == name);
-            match index {
-                Some(i) => self.fire_timer_inner(i),
-                None => {} // 定时器可能已被回调删除，忽略
+            if let Some(i) = index {
+                self.fire_timer_inner(i);
             }
         }));
         if result.is_err() {
@@ -3257,7 +3252,7 @@ impl LuaEngine {
                     && send_text
                         .chars()
                         .next()
-                        .map_or(false, |c| c.is_alphabetic() || c == '_');
+                        .is_some_and(|c| c.is_alphabetic() || c == '_');
 
                 let result: Result<(), String> = if is_function_name {
                     let code = format!("{}('{}')", send_text, timer_name.replace('\'', "\\'"));
