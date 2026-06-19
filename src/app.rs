@@ -266,10 +266,19 @@ impl App {
     pub fn new(config: AppConfig) -> io::Result<Self> {
         let mut manager = ConnectionManager::new();
 
-        // 加载配置文件中的连接（load_default 已从 profiles 目录加载）
+        let logger = Logger::new(
+            &config.general.log_dir,
+            config.general.log_rotation_size_mb,
+            config.general.log_rotation_count,
+        );
+
+        // 加载配置文件中的连接，并设置各角色的日志保留数量
         for conn_config in &config.connections {
             if let Err(e) = manager.add_connection(conn_config) {
                 eprintln!("警告: {}", e);
+            }
+            if let Some(count) = conn_config.log_rotation_count {
+                logger.set_session_max_files(&conn_config.name, count);
             }
         }
 
@@ -278,11 +287,7 @@ impl App {
         // 加载并应用终端设置
         let ts = TermSettings::load();
         terminal.state_mut().keep_command = ts.keep_command;
-        let logger = Logger::new(
-            &config.general.log_dir,
-            config.general.log_rotation_size_mb,
-            config.general.log_rotation_count,
-        );
+
         let (reconnect_tx, reconnect_rx) = mpsc::channel(32);
         let (connect_tx, connect_rx) = mpsc::channel(16);
         let (timer_tx, timer_rx) = mpsc::channel(64);
@@ -944,6 +949,7 @@ impl App {
                     socks5_port: 1080,
                     socks5_username: None,
                     socks5_password: None,
+                    log_rotation_count: None,
                 };
 
                 let id = match self.manager.add_connection_dynamic(&conn_config) {

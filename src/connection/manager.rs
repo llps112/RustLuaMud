@@ -194,6 +194,7 @@ mod tests {
             socks5_port: 1080,
             socks5_username: None,
             socks5_password: None,
+            log_rotation_count: None,
         }
     }
 

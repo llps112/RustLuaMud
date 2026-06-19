@@ -30,7 +30,7 @@ fn default_log_rotation_size_mb() -> u64 {
     10
 }
 fn default_log_rotation_count() -> usize {
-    5
+    24
 }
 
 #[allow(clippy::derivable_impls)]
@@ -80,6 +80,9 @@ pub struct ConnectionConfig {
     /// SOCKS5 代理密码（可选）
     #[serde(default)]
     pub socks5_password: Option<String>,
+    /// 日志文件保留数量（可选，不设置则使用全局默认值 24）
+    #[serde(default)]
+    pub log_rotation_count: Option<usize>,
 }
 
 fn default_true() -> bool {
@@ -191,7 +194,7 @@ mod tests {
         assert_eq!(config.log_dir, "logs");
         assert_eq!(config.profile_dir, "profiles");
         assert_eq!(config.log_rotation_size_mb, 10);
-        assert_eq!(config.log_rotation_count, 5);
+        assert_eq!(config.log_rotation_count, 24);
     }
 
     #[test]
@@ -428,5 +431,27 @@ port = 6000"#
         // 目录不存在时应该返回默认配置
         let config = AppConfig::load_default("/nonexistent/path/that/does/not/exist");
         assert!(config.connections.is_empty());
+    }
+
+    #[test]
+    fn test_connection_config_log_rotation_count() {
+        // 不设置 log_rotation_count 时默认为 None
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.log_rotation_count, None);
+
+        // 显式设置
+        let toml_str2 = r#"
+            name = "test2"
+            host = "example.com"
+            port = 4000
+            log_rotation_count = 48
+        "#;
+        let config2: ConnectionConfig = toml::from_str(toml_str2).unwrap();
+        assert_eq!(config2.log_rotation_count, Some(48));
     }
 }
