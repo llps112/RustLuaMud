@@ -178,6 +178,8 @@ pub struct TerminalState {
     pub keep_command: bool,
     /// Enter 后下次按键先清空输入（模拟"全选替换"行为）
     pub clear_on_next_key: bool,
+    /// Enter 后文本处于全选高亮状态，光标在文本末尾
+    pub text_selected: bool,
     /// 最近一次看到的 ANSI SGR 颜色序列，用于跨行颜色继承
     pub last_ansi_sgr: String,
     /// 输出区滚动偏移（0 = 底部，即最新输出）
@@ -207,6 +209,7 @@ impl TerminalState {
             lua_status_cache: None,
             keep_command: true,
             clear_on_next_key: false,
+            text_selected: false,
             last_ansi_sgr: String::new(),
             scroll_offset: 0,
             status_bar_regions: Vec::new(),
@@ -311,9 +314,10 @@ impl TerminalState {
                     self.history_browsing = false;
                 }
                 if self.keep_command {
-                    // 保留文本，光标回到行首，下次按键替换旧内容
-                    self.input_cursor = 0;
+                    // 保留文本，全选高亮，光标移到末尾，下次按键替换旧内容
+                    self.input_cursor = self.input_buffer.chars().count();
                     self.clear_on_next_key = true;
+                    self.text_selected = !self.input_buffer.is_empty();
                 } else {
                     self.input_buffer.clear();
                     self.input_cursor = 0;
@@ -325,6 +329,12 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::Backspace) => {
                 self.clear_on_next_key = false;
+                if self.text_selected {
+                    self.input_buffer.clear();
+                    self.input_cursor = 0;
+                    self.text_selected = false;
+                    return None;
+                }
                 self.history_prefix.clear();
                 self.history_browsing = false;
                 if self.input_cursor > 0 {
@@ -337,6 +347,12 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::Delete) => {
                 self.clear_on_next_key = false;
+                if self.text_selected {
+                    self.input_buffer.clear();
+                    self.input_cursor = 0;
+                    self.text_selected = false;
+                    return None;
+                }
                 self.history_prefix.clear();
                 self.history_browsing = false;
                 if self.input_cursor < self.input_buffer.chars().count() {
@@ -348,6 +364,7 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::Left) => {
                 self.clear_on_next_key = false;
+                self.text_selected = false;
                 if self.input_cursor > 0 {
                     self.input_cursor -= 1;
                 }
@@ -356,6 +373,7 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::Right) => {
                 self.clear_on_next_key = false;
+                self.text_selected = false;
                 if self.input_cursor < self.input_buffer.chars().count() {
                     self.input_cursor += 1;
                 }
@@ -364,6 +382,7 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::Up) => {
                 self.clear_on_next_key = false;
+                self.text_selected = false;
                 if !self.input_buffer.is_empty() && !self.history_browsing {
                     // 用户手动输入文本 → 进入前缀搜索模式
                     self.history_prefix.clone_from(&self.input_buffer);
@@ -401,6 +420,7 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::Down) => {
                 self.clear_on_next_key = false;
+                self.text_selected = false;
                 if !self.history_prefix.is_empty() {
                     // 前缀搜索模式：向下找
                     let mut found = false;
@@ -436,12 +456,14 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::Home) => {
                 self.clear_on_next_key = false;
+                self.text_selected = false;
                 self.input_cursor = 0;
                 None
             }
 
             (KeyModifiers::NONE, KeyCode::End) => {
                 self.clear_on_next_key = false;
+                self.text_selected = false;
                 if self.input_buffer.is_empty() {
                     // 输入框为空时，End 键回到底部
                     self.scroll_offset = 0;
@@ -454,6 +476,7 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::PageUp) => {
                 self.clear_on_next_key = false;
+                self.text_selected = false;
                 // 向上滚动半屏
                 let scroll_amount = (self.output_height() / 2) as usize;
                 let max_offset = if self.output_lines.len() > self.output_height() as usize {
@@ -467,6 +490,7 @@ impl TerminalState {
 
             (KeyModifiers::NONE, KeyCode::PageDown) => {
                 self.clear_on_next_key = false;
+                self.text_selected = false;
                 // 向下滚动半屏
                 let scroll_amount = (self.output_height() / 2) as usize;
                 self.scroll_offset = self.scroll_offset.saturating_sub(scroll_amount);
@@ -479,6 +503,7 @@ impl TerminalState {
                     self.input_buffer.clear();
                     self.input_cursor = 0;
                     self.clear_on_next_key = false;
+                    self.text_selected = false;
                     self.history_prefix.clear();
                     self.history_browsing = false;
                 }
@@ -746,7 +771,12 @@ impl Terminal {
         queue!(stdout, style::ResetColor)?;
 
         let (display_str, cursor_x) = self.state.input_display();
-        queue!(stdout, Print(&display_str))?;
+        if self.state.text_selected && !display_str.is_empty() {
+            // 反选效果（\x1b[7m）：高亮显示被选中的文本
+            queue!(stdout, Print("\x1b[7m"), Print(&display_str), Print("\x1b[27m"))?;
+        } else {
+            queue!(stdout, Print(&display_str))?;
+        }
         queue!(stdout, cursor::MoveTo(cursor_x as u16, input_y))?;
         Ok(())
     }
@@ -1122,9 +1152,10 @@ mod tests {
         assert_eq!(result, Some("hello".to_string()));
         // 缓冲区应被保留
         assert_eq!(state.input_buffer, "hello");
-        // 光标回到行首
-        assert_eq!(state.input_cursor, 0);
+        // 光标移到末尾，全选高亮
+        assert_eq!(state.input_cursor, 5);
         assert!(state.clear_on_next_key);
+        assert!(state.text_selected);
         assert_eq!(state.history, vec!["hello"]);
     }
 
@@ -1153,19 +1184,22 @@ mod tests {
         let mut state = TerminalState::new(80, 24);
         state.keep_command = true;
         state.input_buffer = "hello".to_string();
+        state.input_cursor = 5;
         let _ = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(state.clear_on_next_key);
-        // 按方向键取消全选状态
-        let _ = state.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(state.text_selected);
+        // 按方向键取消全选状态（光标在末尾，Left 移到 "o" 之前）
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert!(!state.clear_on_next_key);
-        // clear_on_next_key 已取消，正常插入（光标此时在位置 1，即 "e" 之前）
+        assert!(!state.text_selected);
+        // clear_on_next_key 已取消，光标在末尾前，正常插入
         let _ = state.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
-        assert_eq!(state.input_buffer, "hXello");
+        assert_eq!(state.input_buffer, "hellXo");
         // End 再到末尾
         let _ = state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         // 清除 clear_on_next_key
         let _ = state.handle_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
-        assert_eq!(state.input_buffer, "hXello!");
+        assert_eq!(state.input_buffer, "hellXo!");
     }
 
     #[test]
@@ -1451,6 +1485,7 @@ mod tests {
         assert!(state.history.is_empty());
         // input_buffer 仍为空，clear_on_next_key 已置位（不影响）
         assert!(state.clear_on_next_key);
+        assert!(!state.text_selected);
         assert!(state.input_buffer.is_empty());
     }
 
@@ -1511,13 +1546,91 @@ mod tests {
         state.input_buffer = "hello".to_string();
         state.input_cursor = 3;
         state.clear_on_next_key = true;
+        state.text_selected = true;
         // Home 取消标志并回到开头
         let _ = state.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         assert!(!state.clear_on_next_key);
+        assert!(!state.text_selected);
         assert_eq!(state.input_cursor, 0);
         // End 到末尾
         let _ = state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         assert_eq!(state.input_cursor, 5);
+    }
+
+    #[test]
+    fn test_text_selected_backspace_clears_buffer() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 5;
+        state.text_selected = true;
+        // Backspace 清空缓冲区
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(state.input_buffer.is_empty());
+        assert_eq!(state.input_cursor, 0);
+        assert!(!state.text_selected);
+    }
+
+    #[test]
+    fn test_text_selected_delete_clears_buffer() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 5;
+        state.text_selected = true;
+        // Delete 清空缓冲区
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert!(state.input_buffer.is_empty());
+        assert_eq!(state.input_cursor, 0);
+        assert!(!state.text_selected);
+    }
+
+    #[test]
+    fn test_text_selected_cancelled_by_nav_keys() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.text_selected = true;
+        state.input_cursor = 5;
+
+        // Right 取消
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(!state.text_selected);
+        state.text_selected = true;
+
+        // Down 取消
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(!state.text_selected);
+        state.text_selected = true;
+
+        // Up 取消
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert!(!state.text_selected);
+        state.text_selected = true;
+
+        // End 取消
+        let _ = state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert!(!state.text_selected);
+        state.text_selected = true;
+
+        // PgUp 取消
+        let _ = state.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(!state.text_selected);
+        state.text_selected = true;
+
+        // PgDn 取消
+        let _ = state.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert!(!state.text_selected);
+    }
+
+    #[test]
+    fn test_text_selected_not_set_when_keep_command_false() {
+        let mut state = TerminalState::new(80, 24);
+        state.keep_command = false;
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 5;
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // 缓冲区应清空，text_selected 应为 false
+        assert!(state.input_buffer.is_empty());
+        assert_eq!(state.input_cursor, 0);
+        assert!(!state.text_selected);
     }
 
     #[test]
