@@ -1,6 +1,5 @@
 use crossterm::{
     cursor,
-    event::{DisableMouseCapture, EnableMouseCapture},
     event::{KeyCode, KeyEvent, KeyModifiers},
     execute, queue,
     style::{self, Color, Print, SetForegroundColor},
@@ -225,6 +224,8 @@ impl TerminalState {
     /// 自动补上颜色前缀，实现行间颜色继承（如服务器在 ">" 行设置红色，
     /// 下一行"面色凝重"无 ANSI，自动继承红色）
     pub fn push_output(&mut self, line: &str) {
+        let old_len = self.output_lines.len();
+
         for part in line.split_inclusive('\n') {
             let trimmed = part.trim_end_matches('\n').trim_end_matches('\r');
             if !trimmed.is_empty() {
@@ -263,11 +264,31 @@ impl TerminalState {
                 }
             }
         }
+
+        let new_lines = self.output_lines.len() - old_len;
+
         // 限制缓冲区大小
         let max_lines = 5000;
-        if self.output_lines.len() > max_lines {
+        let drained = if self.output_lines.len() > max_lines {
             let drain_count = self.output_lines.len() - max_lines;
             self.output_lines.drain(..drain_count);
+            drain_count
+        } else {
+            0
+        };
+
+        // 历史浏览模式（scroll_offset > 0）：调整偏移量保持视口稳定
+        // 新行追加到底部 → scroll_offset 增加；旧行从顶部移除 → scroll_offset 减少
+        if self.scroll_offset > 0 && (new_lines > 0 || drained > 0) {
+            self.scroll_offset = self
+                .scroll_offset
+                .saturating_add(new_lines)
+                .saturating_sub(drained);
+            let max_offset = self
+                .output_lines
+                .len()
+                .saturating_sub(self.output_height() as usize);
+            self.scroll_offset = self.scroll_offset.min(max_offset);
         }
     }
 
@@ -278,6 +299,7 @@ impl TerminalState {
             | (KeyModifiers::CONTROL, KeyCode::Char('d')) => None,
 
             (KeyModifiers::NONE, KeyCode::Enter) => {
+                self.scroll_offset = 0;
                 let cmd = self.input_buffer.clone();
                 if !cmd.is_empty() {
                     self.history.push(cmd.clone());
@@ -576,8 +598,10 @@ impl Terminal {
     pub fn new() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
         let (width, height) = terminal::size()?;
-        // 启用鼠标事件捕获
-        execute!(io::stdout(), EnableMouseCapture)?;
+        // 启用鼠标点击追踪（仅 ?1000h，不含 ?1002h 拖拽追踪）
+        // 终端处于鼠标应用模式时，按住 Shift 拖拽可绕过应用模式进行原生文本选中
+        write!(io::stdout(), "\x1b[?1000h\x1b[?1006h")?;
+        io::stdout().flush()?;
         Ok(Self {
             state: TerminalState::new(width, height),
         })
@@ -770,7 +794,8 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), DisableMouseCapture);
+        let _ = write!(io::stdout(), "\x1b[?1000l\x1b[?1006l");
+        let _ = io::stdout().flush();
         let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
     }
@@ -1047,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_output_does_not_reset_scroll_offset() {
+    fn test_new_output_preserves_scroll_viewport() {
         let mut state = TerminalState::new(80, 24);
         let output_height = state.output_height() as usize;
         // 添加足够多的输出行
@@ -1060,11 +1085,26 @@ mod tests {
         let offset_before = state.scroll_offset;
         assert!(offset_before > 0);
 
+        // 记录当前可见行
+        let visible_before: Vec<String> = state
+            .visible_output_lines()
+            .iter()
+            .cloned()
+            .collect();
+
         // 添加新输出
         state.push_output("new line");
 
-        // scroll_offset 不应该改变
-        assert_eq!(state.scroll_offset, offset_before);
+        // scroll_offset 应增加，保持视口内容不变
+        assert_eq!(state.scroll_offset, offset_before + 1);
+
+        // 视口内容应保持相同
+        let visible_after: Vec<String> = state
+            .visible_output_lines()
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(visible_before, visible_after);
     }
 
     #[test]
@@ -1376,6 +1416,10 @@ mod tests {
         assert!(state.status_bar_cache.is_some());
         let bar = state.status_bar_cache.as_ref().unwrap();
         assert!(bar.contains("test"));
+        // 验证可点击区域
+        assert_eq!(state.status_bar_regions.len(), 1);
+        assert_eq!(state.status_bar_regions[0].session_id, 0);
+        assert!(state.status_bar_regions[0].end_x > state.status_bar_regions[0].start_x);
     }
 
     // ---- 新增覆盖测试 ----

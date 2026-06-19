@@ -136,7 +136,7 @@ fn parse_builtin_command(cmd: &str) -> BuiltinCommand {
                 }
             }
         }
-        "/switch" => {
+        "/switch" | "/sw" => {
             if parts.len() < 2 {
                 BuiltinCommand::Unknown
             } else {
@@ -1271,6 +1271,8 @@ impl App {
                     .append_output("  /set keep_command on|off     执行后保留命令栏输入")?;
                 self.terminal
                     .append_output("  /switch <编号或名称>        切换到指定连接")?;
+                self.terminal
+                    .append_output("  /sw <编号或名称>            切换到指定连接 (简写)")?;
                 self.terminal
                     .append_output("  Alt+0~9                     切换前台连接 (最多10个)")?;
                 self.terminal

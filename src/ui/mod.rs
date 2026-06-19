@@ -3,5 +3,4 @@ pub mod input;
 pub mod terminal;
 
 pub use ansi::{ensure_ansi_reset, AnsiParser};
-#[allow(unused_imports)]
-pub use terminal::{ClickRegion, Terminal, TerminalState};
+pub use terminal::Terminal;
