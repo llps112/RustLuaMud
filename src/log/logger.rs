@@ -111,11 +111,7 @@ impl Logger {
     /// 写入分类日志
     pub fn log_cat(&self, session_name: &str, category: LogCategory, line: &str) {
         let path = self.log_path(session_name);
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
             let timestamp = Local::now().format("%H:%M:%S%.3f");
             let _ = writeln!(
                 file,
