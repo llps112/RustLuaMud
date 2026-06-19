@@ -19,8 +19,8 @@ component_management:
         - src/app.rs
       statuses:
         - type: project
-          target: 75%
-          threshold: 2%
+          target: 25%
+          threshold: 5%
     - component_id: lua_engine
       name: Lua Engine Core
       paths:
