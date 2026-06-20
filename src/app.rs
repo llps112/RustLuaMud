@@ -1296,11 +1296,7 @@ impl App {
                         (profiles, _) => {
                             self.terminal.append_output("[系统] 可用角色配置:")?;
                             for p in &profiles {
-                                let loaded = self
-                                    .manager
-                                    .sessions
-                                    .iter()
-                                    .any(|s| s.name == p.name);
+                                let loaded = self.manager.sessions.iter().any(|s| s.name == p.name);
                                 let marker = if loaded { " (已加载)" } else { "" };
                                 self.terminal.append_output(&format!(
                                     "  {} — {}:{}{}",
@@ -1313,9 +1309,8 @@ impl App {
                 ProfileSubcommand::Load { name } => {
                     // /profile load 与 load_profiles 一致，拒绝加载示例配置
                     if name.eq_ignore_ascii_case("example") {
-                        self.terminal.append_output(
-                            "[错误] 不能加载示例配置文件 (example.toml)"
-                        )?;
+                        self.terminal
+                            .append_output("[错误] 不能加载示例配置文件 (example.toml)")?;
                         return Ok(());
                     }
                     let profile_dir = &self.config.general.profile_dir;
@@ -1338,24 +1333,20 @@ impl App {
                             return Ok(());
                         }
                     };
-                    let conn_config = match toml::from_str::<crate::config::ConnectionConfig>(
-                        &content,
-                    ) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            self.terminal.append_output(&format!(
-                                "[错误] 配置文件格式错误: {}",
-                                e
-                            ))?;
-                            return Ok(());
-                        }
-                    };
+                    let conn_config =
+                        match toml::from_str::<crate::config::ConnectionConfig>(&content) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                self.terminal
+                                    .append_output(&format!("[错误] 配置文件格式错误: {}", e))?;
+                                return Ok(());
+                            }
+                        };
 
                     let id = match self.manager.add_connection_dynamic(&conn_config) {
                         Ok(id) => id,
                         Err(e) => {
-                            self.terminal
-                                .append_output(&format!("[错误] {}", e))?;
+                            self.terminal.append_output(&format!("[错误] {}", e))?;
                             return Ok(());
                         }
                     };
@@ -1400,8 +1391,9 @@ impl App {
                     .append_output("  /sw <编号或名称>            切换到指定连接 (简写)")?;
                 self.terminal
                     .append_output("  /profile list               列出 profiles/ 下可用角色")?;
-                self.terminal
-                    .append_output("  /profile load <角色名>      从 profiles/ 加载角色配置并连接")?;
+                self.terminal.append_output(
+                    "  /profile load <角色名>      从 profiles/ 加载角色配置并连接",
+                )?;
                 self.terminal
                     .append_output("  Alt+0~9                     切换前台连接 (最多10个)")?;
                 self.terminal
