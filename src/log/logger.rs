@@ -62,9 +62,9 @@ impl Logger {
     }
 
     /// 获取当前小时对应的日志文件路径
-    /// 格式: `<session>_<YYYYMMDD>-<HH>.log`，例如 `mud_20260619-14.log`
+    /// 格式: `<session>_<HH>.log`，例如 `mud_14.log`，每小时滚动
     fn log_path(&self, session_name: &str) -> PathBuf {
-        let hour = Local::now().format("%Y%m%d-%H");
+        let hour = Local::now().format("%H");
         let filename = format!("{}_{}.log", session_name, hour);
         self.log_dir.join(filename)
     }
@@ -147,7 +147,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn hour() -> String {
-        Local::now().format("%Y%m%d-%H").to_string()
+        Local::now().format("%H").to_string()
     }
 
     #[test]
@@ -265,11 +265,11 @@ mod tests {
 
         // 创建一些旧文件模拟不同小时
         let names = [
-            "sess_20260619-10.log",
-            "sess_20260619-11.log",
-            "sess_20260619-12.log",
-            "sess_20260619-13.log",
-            "sess_20260619-14.log",
+            "sess_10.log",
+            "sess_11.log",
+            "sess_12.log",
+            "sess_13.log",
+            "sess_14.log",
         ];
         for name in &names {
             let path = dir.path().join(name);
@@ -290,8 +290,8 @@ mod tests {
 
         assert_eq!(remaining.len(), 3);
         // 最早的两个（10, 11）已被删除
-        assert!(remaining.iter().any(|n| n.contains("20260619-13")));
-        assert!(remaining.iter().any(|n| n.contains("20260619-14")));
+        assert!(remaining.iter().any(|n| n == "sess_13.log"));
+        assert!(remaining.iter().any(|n| n == "sess_14.log"));
         // 当前小时的文件存在
         assert!(remaining.iter().any(|n| n.contains(&hour())));
     }
@@ -303,12 +303,12 @@ mod tests {
 
         // session_a 有 3 个旧文件
         for h in 10..=12 {
-            let path = dir.path().join(format!("session_a_20260619-{}.log", h));
+            let path = dir.path().join(format!("session_a_{}.log", h));
             fs::write(&path, "dummy").unwrap();
         }
         // session_b 有 2 个旧文件
         for h in 10..=11 {
-            let path = dir.path().join(format!("session_b_20260619-{}.log", h));
+            let path = dir.path().join(format!("session_b_{}.log", h));
             fs::write(&path, "dummy").unwrap();
         }
 

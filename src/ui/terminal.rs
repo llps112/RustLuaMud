@@ -271,22 +271,22 @@ impl TerminalState {
         let new_lines = self.output_lines.len() - old_len;
 
         // 限制缓冲区大小
-        let max_lines = 5000;
-        let drained = if self.output_lines.len() > max_lines {
-            let drain_count = self.output_lines.len() - max_lines;
+        const MAX_OUTPUT_LINES: usize = 5000;
+        let drained = if self.output_lines.len() > MAX_OUTPUT_LINES {
+            let drain_count = self.output_lines.len() - MAX_OUTPUT_LINES;
             self.output_lines.drain(..drain_count);
             drain_count
         } else {
             0
         };
 
-        // 历史浏览模式（scroll_offset > 0）：调整偏移量保持视口稳定
-        // 新行追加到底部 → scroll_offset 增加；旧行从顶部移除 → scroll_offset 减少
+        // 历史浏览模式（scroll_offset > 0）：调整偏移量保持视口内容稳定
+        // - 新行追加到底部 → 内容向下增长，scroll_offset 需等量增加以保持视口指向同一批内容
+        // - drain 从顶部移除旧行 → 每行索引前移 drained，但视口中索引对应的内容已自然前移，
+        //   因此 scroll_offset 不应减去 drained（减了会额外上推 drained 行）
+        // 综合公式：scroll_offset += new_lines（不减去 drained）
         if self.scroll_offset > 0 && (new_lines > 0 || drained > 0) {
-            self.scroll_offset = self
-                .scroll_offset
-                .saturating_add(new_lines)
-                .saturating_sub(drained);
+            self.scroll_offset = self.scroll_offset.saturating_add(new_lines);
             let max_offset = self
                 .output_lines
                 .len()
@@ -822,6 +822,7 @@ impl Terminal {
     pub fn replace_output(&mut self, lines: &[String]) -> io::Result<()> {
         self.state.output_lines = lines.to_vec();
         self.state.last_ansi_sgr.clear(); // 切换连接时清除累积的颜色前缀
+        self.state.scroll_offset = 0; // 切换时回到最新输出
         let mut stdout = io::stdout();
         self.refresh_all(&mut stdout)?;
         Ok(())
