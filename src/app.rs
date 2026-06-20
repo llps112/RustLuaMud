@@ -1289,9 +1289,8 @@ impl App {
                     let profile_dir = &self.config.general.profile_dir;
                     match AppConfig::load_profiles(profile_dir) {
                         (profiles, _) if profiles.is_empty() => {
-                            self.terminal.append_output(
-                                "[系统] profiles/ 目录下没有可用角色配置",
-                            )?;
+                            self.terminal
+                                .append_output("[系统] profiles/ 目录下没有可用角色配置")?;
                         }
                         (profiles, _) => {
                             self.terminal.append_output("[系统] 可用角色配置:")?;
