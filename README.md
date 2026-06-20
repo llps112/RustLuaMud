@@ -154,6 +154,8 @@ socks5_password = "pass"   # 可选
 | `/load <脚本路径>` | 为前台连接加载 Lua 脚本 |
 | `/load reload` | 重新加载前台连接的 Lua 脚本（保留变量状态） |
 | `/switch <角色名\|编号>` `/sw <角色名\|编号>` | 切换到指定连接 |
+| `/profile list` | 列出 `profiles/` 目录下所有可用角色配置 |
+| `/profile load <角色名>` | 从 `profiles/<角色名>.toml` 加载配置并连接（无需重启） |
 | `/lua <Lua 代码>` | 直接执行 Lua 代码 |
 | `/set keep_command on\|off` | 设置 Enter 后是否保留命令栏输入内容 |
 

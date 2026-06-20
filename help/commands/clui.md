@@ -108,6 +108,28 @@ eat apple
 
 ---
 
+## Profile 管理（运行时加载角色）
+
+客户端启动时自动加载 `profiles/` 目录下的所有 TOML 配置文件。如果在运行中新增了角色配置，可以通过以下命令在不重启客户端的情况下加载：
+
+| 命令 | 说明 |
+|------|------|
+| `/profile list` | 列出 `profiles/` 目录下所有可用角色配置及连接状态 |
+| `/profile load <角色名>` | 从 `profiles/<角色名>.toml` 加载配置并自动连接 |
+
+`/profile load` 会完整读取 TOML 文件中的配置，包括：
+- 连接地址与编码
+- Lua 脚本路径（自动加载）
+- 登录凭证（注入 `char_name` / `char_password` Lua 变量）
+- SOCKS5 代理设置
+- 日志保留数量
+
+加载完成后客户端会自动连接并切换到该连接。
+
+> **注意**: `profiles/example.toml` 为示例文件，`/profile load example` 会被拒绝加载，与启动时的行为一致。
+
+---
+
 ## 日志文件
 
 所有游戏输出和脚本日志会自动记录到 `logs/` 目录：

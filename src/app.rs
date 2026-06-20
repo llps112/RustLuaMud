@@ -77,8 +77,19 @@ enum BuiltinCommand {
     Set { option: String, value: String },
     /// /switch <角色名或编号>
     Switch { target: String },
+    /// /profile load <角色名> | /profile list
+    Profile { sub: ProfileSubcommand },
     /// 未知命令
     Unknown,
+}
+
+/// /profile 子命令
+#[derive(Debug, PartialEq)]
+enum ProfileSubcommand {
+    /// /profile load <角色名> — 从 profiles/ 加载角色配置并连接
+    Load { name: String },
+    /// /profile list — 列出 profiles/ 下可用角色
+    List,
 }
 
 /// 解析内置命令（纯逻辑，无 IO 依赖）
@@ -142,6 +153,29 @@ fn parse_builtin_command(cmd: &str) -> BuiltinCommand {
             } else {
                 BuiltinCommand::Switch {
                     target: parts[1].to_string(),
+                }
+            }
+        }
+        "/profile" => {
+            if parts.len() < 2 {
+                BuiltinCommand::Unknown
+            } else {
+                match parts[1] {
+                    "load" => {
+                        if parts.len() < 3 {
+                            BuiltinCommand::Unknown
+                        } else {
+                            BuiltinCommand::Profile {
+                                sub: ProfileSubcommand::Load {
+                                    name: parts[2].to_string(),
+                                },
+                            }
+                        }
+                    }
+                    "list" => BuiltinCommand::Profile {
+                        sub: ProfileSubcommand::List,
+                    },
+                    _ => BuiltinCommand::Unknown,
                 }
             }
         }
@@ -1250,6 +1284,96 @@ impl App {
                 }
             }
 
+            BuiltinCommand::Profile { sub } => match sub {
+                ProfileSubcommand::List => {
+                    let profile_dir = &self.config.general.profile_dir;
+                    match AppConfig::load_profiles(profile_dir) {
+                        (profiles, _) if profiles.is_empty() => {
+                            self.terminal.append_output(&format!(
+                                "[系统] profiles/ 目录下没有可用角色配置"
+                            ))?;
+                        }
+                        (profiles, _) => {
+                            self.terminal.append_output("[系统] 可用角色配置:")?;
+                            for p in &profiles {
+                                let loaded = self
+                                    .manager
+                                    .sessions
+                                    .iter()
+                                    .any(|s| s.name == p.name);
+                                let marker = if loaded { " (已加载)" } else { "" };
+                                self.terminal.append_output(&format!(
+                                    "  {} — {}:{}{}",
+                                    p.name, p.host, p.port, marker
+                                ))?;
+                            }
+                        }
+                    }
+                }
+                ProfileSubcommand::Load { name } => {
+                    // /profile load 与 load_profiles 一致，拒绝加载示例配置
+                    if name.eq_ignore_ascii_case("example") {
+                        self.terminal.append_output(
+                            "[错误] 不能加载示例配置文件 (example.toml)"
+                        )?;
+                        return Ok(());
+                    }
+                    let profile_dir = &self.config.general.profile_dir;
+                    let profile_path = Path::new(profile_dir).join(format!("{}.toml", name));
+                    if !profile_path.exists() {
+                        self.terminal.append_output(&format!(
+                            "[错误] 角色配置不存在: {}",
+                            profile_path.display()
+                        ))?;
+                        return Ok(());
+                    }
+                    let content = match fs::read_to_string(&profile_path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            self.terminal.append_output(&format!(
+                                "[错误] 无法读取配置文件 {}: {}",
+                                profile_path.display(),
+                                e
+                            ))?;
+                            return Ok(());
+                        }
+                    };
+                    let conn_config = match toml::from_str::<crate::config::ConnectionConfig>(
+                        &content,
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            self.terminal.append_output(&format!(
+                                "[错误] 配置文件格式错误: {}",
+                                e
+                            ))?;
+                            return Ok(());
+                        }
+                    };
+
+                    let id = match self.manager.add_connection_dynamic(&conn_config) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            self.terminal
+                                .append_output(&format!("[错误] {}", e))?;
+                            return Ok(());
+                        }
+                    };
+
+                    // 设置日志保留数量
+                    if let Some(count) = conn_config.log_rotation_count {
+                        self.logger.set_session_max_files(&conn_config.name, count);
+                    }
+
+                    self.update_status_bar()?;
+                    let _ = self.connect_tx.try_send(ConnectRequest { session_id: id });
+                    self.terminal.append_output(&format!(
+                        "[系统] 正在从配置文件加载角色 '{}' 并连接 ({}:{})",
+                        conn_config.name, conn_config.host, conn_config.port
+                    ))?;
+                }
+            },
+
             BuiltinCommand::Unknown => {
                 self.terminal.append_output("内置命令:")?;
                 self.terminal
@@ -1274,6 +1398,10 @@ impl App {
                     .append_output("  /switch <编号或名称>        切换到指定连接")?;
                 self.terminal
                     .append_output("  /sw <编号或名称>            切换到指定连接 (简写)")?;
+                self.terminal
+                    .append_output("  /profile list               列出 profiles/ 下可用角色")?;
+                self.terminal
+                    .append_output("  /profile load <角色名>      从 profiles/ 加载角色配置并连接")?;
                 self.terminal
                     .append_output("  Alt+0~9                     切换前台连接 (最多10个)")?;
                 self.terminal
@@ -1674,6 +1802,51 @@ mod tests {
         assert_eq!(parse_builtin_command("/unknown"), BuiltinCommand::Unknown);
         assert_eq!(parse_builtin_command(""), BuiltinCommand::Unknown);
         assert_eq!(parse_builtin_command("hello"), BuiltinCommand::Unknown);
+    }
+
+    #[test]
+    fn test_parse_builtin_profile_load() {
+        let result = parse_builtin_command("/profile load mychar");
+        assert_eq!(
+            result,
+            BuiltinCommand::Profile {
+                sub: ProfileSubcommand::Load {
+                    name: "mychar".to_string()
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_builtin_profile_list() {
+        let result = parse_builtin_command("/profile list");
+        assert_eq!(
+            result,
+            BuiltinCommand::Profile {
+                sub: ProfileSubcommand::List
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_builtin_profile_no_subcommand() {
+        assert_eq!(parse_builtin_command("/profile"), BuiltinCommand::Unknown);
+    }
+
+    #[test]
+    fn test_parse_builtin_profile_unknown_subcommand() {
+        assert_eq!(
+            parse_builtin_command("/profile foo bar"),
+            BuiltinCommand::Unknown
+        );
+    }
+
+    #[test]
+    fn test_parse_builtin_profile_load_no_name() {
+        assert_eq!(
+            parse_builtin_command("/profile load"),
+            BuiltinCommand::Unknown
+        );
     }
 
     #[test]

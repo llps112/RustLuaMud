@@ -9,7 +9,6 @@ pub struct GeneralConfig {
     #[serde(default = "default_log_dir")]
     pub log_dir: String,
     #[serde(default = "default_profile_dir")]
-    #[allow(dead_code)]
     pub profile_dir: String,
     #[serde(default = "default_log_rotation_size_mb")]
     pub log_rotation_size_mb: u64,
@@ -107,18 +106,24 @@ impl AppConfig {
     pub fn load_default(profiles_dir: &str) -> Self {
         // 从 profiles 目录加载所有角色配置作为默认连接
         let (profiles, skipped) = Self::load_profiles(profiles_dir);
+        let mut general = GeneralConfig::default();
+        general.profile_dir = profiles_dir.to_string();
+
         if !profiles.is_empty() {
             if skipped > 0 {
                 eprintln!("警告: {} 个角色配置加载失败", skipped);
             }
             return Self {
-                general: GeneralConfig::default(),
+                general,
                 connections: profiles,
             };
         }
 
         eprintln!("警告: {} 目录未找到角色配置，使用默认配置", profiles_dir);
-        Self::default()
+        Self {
+            general,
+            connections: Vec::new(),
+        }
     }
 
     /// 从 profile 目录加载所有角色配置
@@ -419,17 +424,33 @@ port = 6000"#
         )
         .unwrap();
 
-        let config = AppConfig::load_default(dir.path().to_str().unwrap());
+        let dir_str = dir.path().to_str().unwrap();
+        let config = AppConfig::load_default(dir_str);
         assert_eq!(config.connections.len(), 1);
         assert_eq!(config.connections[0].name, "custom");
         assert_eq!(config.connections[0].host, "custom.com");
         assert_eq!(config.connections[0].port, 6000);
+        // profile_dir 应追踪传入的目录
+        assert_eq!(config.general.profile_dir, dir_str);
     }
 
     #[test]
     fn test_load_default_with_nonexistent_dir() {
-        // 目录不存在时应该返回默认配置
-        let config = AppConfig::load_default("/nonexistent/path/that/does/not/exist");
+        // 目录不存在时应该返回默认配置，但 profile_dir 仍追踪参数
+        let path = "/nonexistent/path/that/does/not/exist";
+        let config = AppConfig::load_default(path);
+        assert!(config.connections.is_empty());
+        assert_eq!(config.general.profile_dir, path);
+    }
+
+    #[test]
+    fn test_load_default_preserves_profiles_dir() {
+        // 无 --profiles 参数时 profile_dir 保持默认值 "profiles"
+        let dir = TempDir::new().unwrap();
+        // 目录为空，不会有任何连接
+        let dir_str = dir.path().to_str().unwrap();
+        let config = AppConfig::load_default(dir_str);
+        assert_eq!(config.general.profile_dir, dir_str);
         assert!(config.connections.is_empty());
     }
 
