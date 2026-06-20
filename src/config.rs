@@ -106,8 +106,10 @@ impl AppConfig {
     pub fn load_default(profiles_dir: &str) -> Self {
         // 从 profiles 目录加载所有角色配置作为默认连接
         let (profiles, skipped) = Self::load_profiles(profiles_dir);
-        let mut general = GeneralConfig::default();
-        general.profile_dir = profiles_dir.to_string();
+        let general = GeneralConfig {
+            profile_dir: profiles_dir.to_string(),
+            ..Default::default()
+        };
 
         if !profiles.is_empty() {
             if skipped > 0 {
