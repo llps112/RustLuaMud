@@ -1697,13 +1697,20 @@ impl LuaEngine {
             } else {
                 total_secs * 1000.0
             };
-            // 第5个参数 response_text：MushClient 中是字符串，忽略
+            // 第5个参数 response_text：send_to=0 时作为 MUD 命令发送
+            let response_text = coerce_to_string(args[4].clone()).unwrap_or_default();
             let flags: i64 = coerce_to_i64(args[5].clone()).unwrap_or(0);
             // 第7个参数 script_name（可选）
             let script_name = if args.len() > 6 {
                 coerce_to_string(args[6].clone()).unwrap_or_default()
             } else {
                 String::new()
+            };
+            // 第8个参数 send_to（可选，默认 0=发送到 MUD）
+            let send_to: i64 = if args.len() > 7 {
+                coerce_to_i64(args[7].clone()).unwrap_or(0)
+            } else {
+                0
             };
 
             let interval_millis_u64 = interval_millis as u64;
@@ -1712,6 +1719,18 @@ impl LuaEngine {
 
             // 将脚本作为 send_text 存储，在 fire_timer 时执行
             let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
+
+            // 决定 send_text 内容（按优先级）：
+            // 1. script_name 非空 → 作为 Lua 代码执行
+            // 2. response_text 非空且 send_to=0 → 作为 MUD 命令发送
+            // 3. 否则 → 空（什么都不做）
+            let send_text = if !script_name.is_empty() {
+                script_name
+            } else if !response_text.is_empty() && send_to == 0 {
+                format!("Execute([[\n{}\n]])", response_text)
+            } else {
+                script_name // 空串
+            };
 
             // Replace flag (1024): 替换同名定时器，保留旧定时器的启用状态
             // 防止 closeclass 禁用定时器后被 AddTimer(Replace) 重新启用
@@ -1743,7 +1762,7 @@ impl LuaEngine {
                 group: String::new(),
                 one_shot,
                 at_time,
-                send_text: script_name,
+                send_text,
                 last_fired: std::time::Instant::now(),
             });
             Ok(Value::Integer(0))

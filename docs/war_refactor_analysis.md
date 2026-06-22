@@ -348,3 +348,298 @@ michen_alias.lua (外部依赖)
 always.lua (外部依赖)
   └── mj_need_yudi() ← war_refactor 中误写为 haveyd()
 ```
+
+---
+
+## 八、复盘新发现（N1-N15）
+
+> 复盘日期：2026-06-22  
+> 基于完整代码审查发现的遗漏问题，含修复方案与确认事项
+
+### 🔴 严重（阻塞级）
+
+#### N1. 玩家自身经验值未计入队伍计算
+
+**位置**：`war_refactor.lua` `create_optimal_team()` → `try_build()` 内部
+
+**问题描述**：  
+`create_optimal_team()` 将 `my_id` 从所有池中排除，`try_build()` 构建队伍时从不包含玩家自身。但 `run("teamwith "..result)` 执行后，服务器上的队伍 = 当前角色 + 被邀请者，服务器校验条件时**包含玩家自身 exp**。
+
+**影响**：
+- 计算认为"有效"的队伍，加上玩家自身 exp 后可能变得"无效"（溢出后条件不再满足）
+- 计算认为"无效"的队伍，加上玩家自身 exp 后可能实际"有效"（错失组队机会）
+
+**修复方案**（已实施）：
+1. 在 `create_optimal_team()` 顶部构建 `my_member` 结构体
+2. 在 `try_build()` 中将 `my_member` 作为队伍第一个成员
+3. `used_ips` 初始化时标记 `my_ip` 为已使用
+4. 构建 `team_str` 时跳过 `my_id`（teamwith 命令不含自身）
+
+---
+
+#### N2. `war.teamwith` 和 `war.realteam` 未被新代码赋值
+
+**位置**：`war_refactor.lua` `form_war_team()` 第 547-580 行
+
+**问题描述**：  
+太守府 trigger 设置 `war.teamwith = {}`，公告牌 trigger 设置 `war.realteam = {}`，但 `form_war_team()` 从不更新这两个变量，只设置了 `war.current_team` 和 `war.team_ids`（新字段）。
+
+**影响**：以下依赖 `war.teamwith` 的 trigger 全部失效：
+1. "懦夫"移除逻辑（第 660 行）：检查 `war.teamwith` 并从中移除懦夫玩家 → 永远不执行
+2. 打坐完毕判断（第 710 行）：`if type(war.teamwith)=="table" and #war.teamwith>3` → 永远为 false
+3. `warteam()` 函数（第 195 行）：依赖 `war.realteam` → 永远报"条件不足"
+
+**修复方案**（已实施）：  
+在 `form_war_team()` 成功后同步设置：
+```lua
+war.teamwith = {}  -- 拆分ID字符串为表
+for id in string.gmatch(result, "%S+") do
+    table.insert(war.teamwith, id)
+end
+war.realteam = deepCopy(war.teamwith)
+```
+
+---
+
+#### N3. `reload_war_member()` 文件名拼写错误
+
+**位置**：`war_refactor.lua` 第 108-113 行
+
+**问题描述**：  
+实际文件名是 `war_members.lua`（带 s），但代码中写为 `loadmod("war_member.lua")` 和 `package.loaded["war_member"]`。
+
+**影响**：热重载功能完全失效。
+
+**修复方案**（已实施）：  
+改为 `loadmod("war_members.lua")` 和 `package.loaded["war_members"]`。
+
+---
+
+#### N4. `tonumber(war.waring>0)` 恒为 nil（Lua 5.1）
+
+**位置**：`war_refactor.lua` 第 1009 行（原）
+
+**问题描述**：  
+在 Lua 5.1（MushClient 使用）中，`war.waring>0` 求值为 boolean `true`/`false`。`tonumber(true)` 返回 `nil`，`tonumber(false)` 也返回 `nil`。因此此条件**永远为 false**，整个 if 块是死代码。
+
+**影响**：当 `war.waring>0` 且玩家在城外遇到"城外太危险了"时，不会执行 `alias.close_war()` + `alias.startworkflow()` 清理逻辑。
+
+**修复方案**（已实施）：  
+改为 `if war.waring>0 then`。
+
+---
+
+### 🟡 中等（功能/逻辑）
+
+#### N5. `string.trim()` 不存在，`import_csv()` 会崩溃
+
+**位置**：`war_members.lua` 第 165-170 行（`import_csv` 函数内）
+
+**问题描述**：  
+Lua 标准库没有 `string.trim()`。全局搜索 `scripts/class-utf8/` 未找到任何 `string.trim` 的定义。调用此方法会抛出 `attempt to call method 'trim' (a nil value)`。
+
+**影响**：`WarMember.import_csv()` 完全不可用。
+
+**修复方案**（已实施）：  
+在 `war_members.lua` 顶部添加 `string.trim` 定义：
+```lua
+if not string.trim then
+    function string.trim(s)
+        return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+    end
+end
+```
+
+---
+
+#### N6. `try_build` 不尝试不同 P5 组合
+
+**位置**：`war_refactor.lua` `try_build()` 第 425-465 行
+
+**问题描述**：  
+`try_build` 对每个队伍规模只尝试一种 P5 组合——始终取 `p5_avail[1..fill]`。如果 10 个 P5 在场需要选 3 个，只尝试前 3 个，不尝试其他组合。
+
+**影响**：在场 P5 较多时，成功率远低于理论最优。
+
+**修复方案**（已实施）：  
+在 `try_build` 中实现双策略尝试：
+1. 策略 `low_exp`：按 exp 升序取前 N 个 P5
+2. 策略 `high_exp`：按 exp 降序取前 N 个 P5（反向遍历）
+
+两种策略覆盖不同的 exp 分布场景，显著提升组队成功率。
+
+---
+
+#### N7. P5 池顺序不确定（`pairs` 迭代）
+
+**位置**：`war_refactor.lua` 第 405-420 行
+
+**问题描述**：  
+`for eng_id, data in pairs(CURRENT_PRESENT_MEMBERS)` 的迭代顺序在 Lua 中不确定。P5 池的填充顺序每次运行可能不同，导致：
+- 同一组在场玩家，不同次运行组出不同队伍
+- 调试时难以复现问题
+
+**修复方案**（已实施）：  
+在分池完成后对 P5 池按 exp 升序排序：
+```lua
+table.sort(p5_pool, function(a, b) return a.exp < b.exp end)
+```
+
+---
+
+#### N8. `war_start.timer()` 和 `war_restart.timer()` 仍调用旧逻辑
+
+**位置**：`war_refactor.lua` 第 980-995 行
+
+**问题描述**：  
+两个 timer callback 仍调用 `run("war")`（服务器端 war 命令），不调用 `form_war_team()`。
+
+**处理意见**：维持现有实现逻辑。  
+`run("war")` 继续调用 `warteam()` 函数处理组队指令发送，`form_war_team()` 函数仅保留组队结果显示和历史记录功能，以避免 print flood 和频繁数据库操作。
+
+**状态**：已确认，无需修改。`form_war_team()` 已改为不发送 `teamwith` 命令，仅设置 `war.teamwith`/`war.realteam` 供 `warteam()` 使用。
+
+---
+
+#### N9. 服务器平均值计算方式可能与模拟不一致
+
+**位置**：`war_refactor.lua` `calculate_team_exp()` 第 280 行
+
+**问题描述**：  
+当前模拟的计算顺序是 `floor(sum / count) × 10`。服务器可能用 `sum × 10 / count`（先乘后除），两者在溢出场景下结果可能不同。
+
+**处理意见**：已确认服务器 LPC 代码中 `max_exp > (avg_exp = total/war->query("total_players"))*10` 的逻辑正确性，与模拟一致。
+
+**状态**：已确认，无需修改。
+
+---
+
+#### N10. `\\Z` 正则可能不被 Rust regex crate 支持
+
+**位置**：`war_refactor.lua` 第 841 行
+
+**问题描述**：`\\Z` 在 PCRE 中匹配字符串末尾，但 Rust `regex` crate 用 `\z`。
+
+**处理意见**：已确认 Rust regex crate 到 PCRE 正则的移植适配已完成且功能正常。
+
+**状态**：已确认，无需修改。
+
+---
+
+#### N11. 魔术数字 `9` 和 `4` 硬编码
+
+**位置**：`war_refactor.lua` `try_build()` 内 `math.min(9, ...)` 和 `math.max(4, ...)`
+
+**问题描述**：硬编码了最大/最小队伍人数，应使用 `war.max_partner` 和配置的最小人数。
+
+**处理意见**：维持队伍人数硬编码实现，考虑到游戏长期未进行版本更新。
+
+**状态**：已确认，无需修改。
+
+---
+
+#### N12. `WarMember.last_updated` 日期过时
+
+**位置**：`war_members.lua` 第 79 行
+
+**问题描述**：日期硬编码为 `"2023-11-15"`，实际已是 2026 年。
+
+**修复方案**（已实施）：  
+更新为 `"2026-06-22"`。
+
+---
+
+#### N13. `find_member()` 模糊匹配有 Lua 模式注入风险
+
+**位置**：`war_members.lua` `find_member()` 函数
+
+**问题描述**：  
+```lua
+if string.lower(id) == eng_id or string.find(id, eng_id) then
+```
+`string.find` 的第二参数是 Lua 模式。如果 `eng_id` 含 `(`、`.`、`%` 等特殊字符，会报错或误匹配。
+
+**修复方案**（已实施）：  
+改为 `string.find(id, eng_id, 1, true)`（第四参数 `plain=true` 表示纯文本匹配）。
+
+---
+
+### 🔵 轻微（代码质量）
+
+#### N14. `war.team_history` 无限增长
+
+**位置**：`war_refactor.lua` `form_war_team()` 第 577 行
+
+**问题描述**：`form_war_team()` 每次成功都 `table.insert(war.team_history, ...)`，从不清理。
+
+**处理意见**：暂时保留当前历史记录功能。
+
+**修复方案**（已实施）：  
+添加注释标记：`-- N14: 代码调试结束后可以考虑移除历史记录功能`
+
+---
+
+#### N15. `actual_min10` 变量未赋值问题
+
+**位置**：`war_refactor.lua` `calculate_team_exp()` 第 268 行
+
+**问题描述**：  
+`actual_min10` 在 result 表中声明为 0，但从未被赋值。`team_meets_conditions()` 条件3需要此值，却自己重新计算了一遍 `min_exp10`，导致：
+1. result 表中的 `actual_min10` 字段是误导性的（始终为 0）
+2. 计算逻辑重复，违反 DRY 原则
+
+**作用域与使用场景分析**：
+- `actual_min10` 是 `calculate_team_exp()` 返回的 result 表中的字段
+- 使用场景：`team_meets_conditions()` 条件3判断 `min_exp10 < average_exp`
+- 当前 `team_meets_conditions()` 不引用此字段，自行重新计算
+
+**两种修改方案**：
+
+| 方案 | 描述 | 优点 | 缺点 |
+|------|------|------|------|
+| **方案A** | 移除 `actual_min10` 字段，`team_meets_conditions()` 保持自行计算 | 简洁，避免未使用字段 | 计算逻辑重复，result 表不完整 |
+| **方案B（推荐）** | 在 `calculate_team_exp()` 中正确计算 `actual_min10`，`team_meets_conditions()` 直接引用 | result 表完整，消除重复计算，单一数据源 | 需同时修改两个函数 |
+
+**推荐理由**：方案B 消除了 `calculate_team_exp()` 和 `team_meets_conditions()` 之间的重复计算逻辑，保证 result 表作为唯一数据源，符合函数封装原则。
+
+**修复方案**（已实施，方案B）：
+1. 在 `calculate_team_exp()` 末尾添加 `actual_min10` 计算：
+   ```lua
+   local min_exp = math.huge
+   for i, member in ipairs(selected_members) do
+       if member.exp < min_exp then
+           min_exp = member.exp
+       end
+   end
+   if min_exp ~= math.huge then
+       result.actual_min10 = multi10_with_overflow(min_exp)
+   end
+   ```
+2. `team_meets_conditions()` 条件3改为直接引用：
+   ```lua
+   if team_result.actual_min10 < team_result.average_exp then
+       return false, "条件3未满足: ..."
+   end
+   ```
+
+---
+
+## 九、修复记录汇总
+
+| 编号 | 严重度 | 修复状态 | 修改文件 |
+|------|--------|----------|----------|
+| N1 | 🔴 | ✅ 已修复 | war_refactor.lua |
+| N2 | 🔴 | ✅ 已修复 | war_refactor.lua |
+| N3 | 🔴 | ✅ 已修复 | war_refactor.lua |
+| N4 | 🔴 | ✅ 已修复 | war_refactor.lua |
+| N5 | 🟡 | ✅ 已修复 | war_members.lua |
+| N6 | 🟡 | ✅ 已修复 | war_refactor.lua |
+| N7 | 🟡 | ✅ 已修复 | war_refactor.lua |
+| N8 | 🟡 | ⏳ 已确认维持 | — |
+| N9 | 🟡 | ⏳ 已确认无需修改 | — |
+| N10 | 🟡 | ⏳ 已确认无需修改 | — |
+| N11 | 🔵 | ⏳ 已确认维持 | — |
+| N12 | 🔵 | ✅ 已修复 | war_members.lua |
+| N13 | 🔵 | ✅ 已修复 | war_members.lua |
+| N14 | 🔵 | ✅ 已添加注释 | war_refactor.lua |
+| N15 | 🔵 | ✅ 已修复（方案B） | war_refactor.lua |

@@ -462,6 +462,7 @@ impl Session {
     /// 断开连接
     pub fn disconnect(&mut self) {
         self.send_tx = None;
+        self.send_raw_tx = None;
         self.state = SessionState::Disconnected;
     }
 }

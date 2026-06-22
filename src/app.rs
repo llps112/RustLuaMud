@@ -662,7 +662,17 @@ impl App {
             return Ok(());
         };
         // 使用队列处理命令，别名匹配可能产生新命令需要继续处理
-        let mut queue: std::collections::VecDeque<String> = commands.into_iter().collect();
+        // 先按 ; 拆分，保证带多个分号分隔的命令被逐条处理
+        let mut queue: std::collections::VecDeque<String> = commands
+            .into_iter()
+            .flat_map(|cmd| {
+                if cmd.contains(';') {
+                    split_commands(&cmd)
+                } else {
+                    vec![cmd]
+                }
+            })
+            .collect();
         // 防止无限递归：限制别名匹配的嵌套深度
         let mut depth = 0;
         let max_depth = 10;
