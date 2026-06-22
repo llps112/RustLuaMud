@@ -485,7 +485,7 @@ war_members.lua (数据管理函数, 256行)
   ├── mark_dirty() / flush_exp() / dirty_count() (EXP 持久化)
   └── return WarMember
 
-war_refactor.lua (主逻辑, 1313行, 试图替代 war.lua)
+war_refactor.lua (主逻辑, 1291行, 试图替代 war.lua)
   ├── [新] 站点配置层
   │   ├── get_current_site_info()
   │   └── configure_war_settings()
