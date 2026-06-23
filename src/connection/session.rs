@@ -52,6 +52,9 @@ pub struct Session {
     /// 该连接的输出缓冲区（前台切换时恢复用）
     pub output_lines: Vec<String>,
 
+    /// 该连接的输入状态（前台切换时保存/恢复）
+    pub input_state: crate::ui::terminal::InputState,
+
     /// Lua 脚本引擎
     pub lua_engine: Option<crate::lua::LuaEngine>,
 
@@ -156,6 +159,7 @@ impl Session {
             reconnect_delay_secs: config.reconnect_delay_secs,
             state: SessionState::Disconnected,
             output_lines: Vec::new(),
+            input_state: crate::ui::terminal::InputState::default(),
             lua_engine: None,
             script_path: config.script.clone(),
             username: config.username.clone(),

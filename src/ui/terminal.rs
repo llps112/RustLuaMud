@@ -142,6 +142,42 @@ fn build_lua_status_text(
     String::new()
 }
 
+/// 每个 session 独立的输入状态（切换 session 时保存/恢复）
+#[derive(Debug, Clone)]
+pub struct InputState {
+    /// 当前输入行内容
+    pub input_buffer: String,
+    /// 输入光标位置（字符偏移）
+    pub input_cursor: usize,
+    /// 命令历史
+    pub history: Vec<String>,
+    /// 历史浏览位置
+    pub history_pos: usize,
+    /// 前缀搜索的当前前缀
+    pub history_prefix: String,
+    /// 是否处于普通历史浏览模式
+    pub history_browsing: bool,
+    /// Enter 后下次按键先清空输入（模拟"全选替换"行为）
+    pub clear_on_next_key: bool,
+    /// Enter 后文本处于全选高亮状态
+    pub text_selected: bool,
+}
+
+impl Default for InputState {
+    fn default() -> Self {
+        Self {
+            input_buffer: String::new(),
+            input_cursor: 0,
+            history: Vec::new(),
+            history_pos: 0,
+            history_prefix: String::new(),
+            history_browsing: false,
+            clear_on_next_key: false,
+            text_selected: false,
+        }
+    }
+}
+
 /// 终端状态（纯数据，可脱离 IO 测试）
 pub struct TerminalState {
     /// 输出缓冲区（滚动回看用）
@@ -220,6 +256,32 @@ impl TerminalState {
     pub fn output_height(&self) -> u16 {
         self.height
             .saturating_sub(self.status_height + self.lua_status_height + self.input_height)
+    }
+
+    /// 将当前输入相关状态保存到 InputState（切换 session 前调用）
+    pub fn save_input_state(&self) -> InputState {
+        InputState {
+            input_buffer: self.input_buffer.clone(),
+            input_cursor: self.input_cursor,
+            history: self.history.clone(),
+            history_pos: self.history_pos,
+            history_prefix: self.history_prefix.clone(),
+            history_browsing: self.history_browsing,
+            clear_on_next_key: self.clear_on_next_key,
+            text_selected: self.text_selected,
+        }
+    }
+
+    /// 从 InputState 恢复输入相关状态（切换 session 后调用）
+    pub fn restore_input_state(&mut self, state: &InputState) {
+        self.input_buffer = state.input_buffer.clone();
+        self.input_cursor = state.input_cursor;
+        self.history = state.history.clone();
+        self.history_pos = state.history_pos;
+        self.history_prefix = state.history_prefix.clone();
+        self.history_browsing = state.history_browsing;
+        self.clear_on_next_key = state.clear_on_next_key;
+        self.text_selected = state.text_selected;
     }
 
     /// 追加输出行到缓冲区（纯逻辑，不涉及 IO）
@@ -826,6 +888,19 @@ impl Terminal {
         let mut stdout = io::stdout();
         self.refresh_all(&mut stdout)?;
         Ok(())
+    }
+
+    /// 保存当前输入状态（切换 session 前调用）
+    pub fn save_input_state(&self) -> InputState {
+        self.state.save_input_state()
+    }
+
+    /// 恢复输入状态（切换 session 后调用）
+    pub fn restore_input_state(&mut self, state: &InputState) {
+        self.state.restore_input_state(state);
+        let mut stdout = io::stdout();
+        let _ = self.draw_input_line(&mut stdout);
+        let _ = stdout.flush();
     }
 }
 
@@ -1832,5 +1907,195 @@ mod tests {
         state.push_output("面色凝重");
         assert_eq!(state.output_lines[0], "\x1b[1;31m> \x1b[0m");
         assert_eq!(state.output_lines[1], "\x1b[1;31m面色凝重\x1b[0m");
+    }
+
+    // === InputState save/restore 测试 ===
+
+    #[test]
+    fn test_input_state_default() {
+        let state = InputState::default();
+        assert!(state.input_buffer.is_empty());
+        assert_eq!(state.input_cursor, 0);
+        assert!(state.history.is_empty());
+        assert_eq!(state.history_pos, 0);
+        assert!(state.history_prefix.is_empty());
+        assert!(!state.history_browsing);
+        assert!(!state.clear_on_next_key);
+        assert!(!state.text_selected);
+    }
+
+    #[test]
+    fn test_save_input_state_captures_all_fields() {
+        let mut ts = TerminalState::new(80, 24);
+        ts.input_buffer = "kill npc".to_string();
+        ts.input_cursor = 5;
+        ts.history = vec!["look".to_string(), "kill npc".to_string()];
+        ts.history_pos = 1;
+        ts.history_prefix = "ki".to_string();
+        ts.history_browsing = true;
+        ts.clear_on_next_key = true;
+        ts.text_selected = true;
+
+        let saved = ts.save_input_state();
+        assert_eq!(saved.input_buffer, "kill npc");
+        assert_eq!(saved.input_cursor, 5);
+        assert_eq!(saved.history, vec!["look", "kill npc"]);
+        assert_eq!(saved.history_pos, 1);
+        assert_eq!(saved.history_prefix, "ki");
+        assert!(saved.history_browsing);
+        assert!(saved.clear_on_next_key);
+        assert!(saved.text_selected);
+    }
+
+    #[test]
+    fn test_restore_input_state_restores_all_fields() {
+        let mut ts = TerminalState::new(80, 24);
+        // 设置一些初始状态
+        ts.input_buffer = "old".to_string();
+        ts.input_cursor = 3;
+
+        let saved = InputState {
+            input_buffer: "new command".to_string(),
+            input_cursor: 7,
+            history: vec!["cmd1".to_string(), "cmd2".to_string()],
+            history_pos: 2,
+            history_prefix: "cmd".to_string(),
+            history_browsing: true,
+            clear_on_next_key: true,
+            text_selected: true,
+        };
+        ts.restore_input_state(&saved);
+
+        assert_eq!(ts.input_buffer, "new command");
+        assert_eq!(ts.input_cursor, 7);
+        assert_eq!(ts.history, vec!["cmd1", "cmd2"]);
+        assert_eq!(ts.history_pos, 2);
+        assert_eq!(ts.history_prefix, "cmd");
+        assert!(ts.history_browsing);
+        assert!(ts.clear_on_next_key);
+        assert!(ts.text_selected);
+    }
+
+    #[test]
+    fn test_save_restore_roundtrip() {
+        let mut ts1 = TerminalState::new(80, 24);
+        ts1.input_buffer = "test cmd".to_string();
+        ts1.input_cursor = 4;
+        ts1.history = vec!["hist1".to_string()];
+        ts1.history_pos = 1;
+        ts1.history_prefix = "te".to_string();
+        ts1.history_browsing = true;
+        ts1.clear_on_next_key = true;
+        ts1.text_selected = true;
+
+        // 保存
+        let saved = ts1.save_input_state();
+
+        // 创建新的 TerminalState，恢复
+        let mut ts2 = TerminalState::new(80, 24);
+        ts2.restore_input_state(&saved);
+
+        // 验证所有字段一致
+        assert_eq!(ts2.input_buffer, ts1.input_buffer);
+        assert_eq!(ts2.input_cursor, ts1.input_cursor);
+        assert_eq!(ts2.history, ts1.history);
+        assert_eq!(ts2.history_pos, ts1.history_pos);
+        assert_eq!(ts2.history_prefix, ts1.history_prefix);
+        assert_eq!(ts2.history_browsing, ts1.history_browsing);
+        assert_eq!(ts2.clear_on_next_key, ts1.clear_on_next_key);
+        assert_eq!(ts2.text_selected, ts1.text_selected);
+    }
+
+    #[test]
+    fn test_restore_default_clears_state() {
+        let mut ts = TerminalState::new(80, 24);
+        // 先设置非默认状态
+        ts.input_buffer = "something".to_string();
+        ts.input_cursor = 9;
+        ts.history = vec!["cmd".to_string()];
+        ts.history_pos = 1;
+        ts.history_browsing = true;
+        ts.clear_on_next_key = true;
+        ts.text_selected = true;
+
+        // 恢复默认状态（新 session 的初始状态）
+        ts.restore_input_state(&InputState::default());
+
+        assert!(ts.input_buffer.is_empty());
+        assert_eq!(ts.input_cursor, 0);
+        assert!(ts.history.is_empty());
+        assert_eq!(ts.history_pos, 0);
+        assert!(!ts.history_browsing);
+        assert!(!ts.clear_on_next_key);
+        assert!(!ts.text_selected);
+    }
+
+    #[test]
+    fn test_save_restore_does_not_affect_output() {
+        let mut ts = TerminalState::new(80, 24);
+        ts.push_output("output line 1");
+        ts.push_output("output line 2");
+        ts.scroll_offset = 1;
+
+        let saved = ts.save_input_state();
+        assert_eq!(ts.output_lines.len(), 2);
+        assert_eq!(ts.scroll_offset, 1);
+
+        // 恢复输入状态不应影响输出
+        let mut ts2 = TerminalState::new(80, 24);
+        ts2.push_output("different output");
+        ts2.restore_input_state(&saved);
+        assert_eq!(ts2.output_lines.len(), 1);
+        assert_eq!(ts2.output_lines[0], "different output");
+    }
+
+    #[test]
+    fn test_two_sessions_independent_input_states() {
+        // 模拟两个 session 各自的输入状态
+        let mut session_a = InputState::default();
+        session_a.input_buffer = "kill guard".to_string();
+        session_a.input_cursor = 10;
+        session_a.history = vec!["look".to_string(), "kill guard".to_string()];
+
+        let mut session_b = InputState::default();
+        session_b.input_buffer = "say hello".to_string();
+        session_b.input_cursor = 9;
+        session_b.history = vec!["wave".to_string(), "say hello".to_string()];
+
+        // 模拟切换：保存 A 的状态到 TerminalState，恢复 B 的状态
+        let mut ts = TerminalState::new(80, 24);
+        ts.restore_input_state(&session_a);
+        assert_eq!(ts.input_buffer, "kill guard");
+        assert_eq!(ts.history.len(), 2);
+
+        // 切换到 B
+        let saved_a = ts.save_input_state();
+        ts.restore_input_state(&session_b);
+        assert_eq!(ts.input_buffer, "say hello");
+        assert_eq!(ts.history.len(), 2);
+        assert_eq!(ts.history[0], "wave");
+
+        // 切换回 A
+        let _saved_b = ts.save_input_state();
+        ts.restore_input_state(&saved_a);
+        assert_eq!(ts.input_buffer, "kill guard");
+        assert_eq!(ts.history[0], "look");
+    }
+
+    #[test]
+    fn test_save_restore_with_empty_input() {
+        let ts = TerminalState::new(80, 24);
+        // 空输入状态
+        let saved = ts.save_input_state();
+        assert!(saved.input_buffer.is_empty());
+        assert_eq!(saved.input_cursor, 0);
+
+        // 恢复空状态不应出错
+        let mut ts2 = TerminalState::new(80, 24);
+        ts2.input_buffer = "to be cleared".to_string();
+        ts2.input_cursor = 14;
+        ts2.restore_input_state(&saved);
+        assert!(ts2.input_buffer.is_empty());
+        assert_eq!(ts2.input_cursor, 0);
     }
 }

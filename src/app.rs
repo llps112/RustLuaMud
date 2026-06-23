@@ -1569,8 +1569,22 @@ impl App {
 
     /// 切换前台连接，恢复目标连接的输出缓冲区
     fn switch_foreground(&mut self, id: usize) -> io::Result<()> {
+        // 保存当前前台 session 的输入状态
+        let old_id = self.manager.foreground_id;
+        if old_id < self.manager.sessions.len() {
+            let saved = self.terminal.save_input_state();
+            self.manager.sessions[old_id].input_state = saved;
+        }
+
         self.manager.switch_foreground(id).ok();
         self.update_status_bar()?;
+
+        // 恢复目标 session 的输入状态
+        if id < self.manager.sessions.len() {
+            let saved = self.manager.sessions[id].input_state.clone();
+            self.terminal.restore_input_state(&saved);
+        }
+
         // 恢复目标连接的输出缓冲区到终端
         let output = if id < self.manager.sessions.len() {
             &self.manager.sessions[id].output_lines

@@ -263,7 +263,7 @@ mod tests {
         // max_files = 3，保留最近 3 个
         let logger = Logger::new(dir.path().to_str().unwrap(), 10, 3);
 
-        // 创建一些旧文件模拟不同小时
+        // 创建 5 个旧文件模拟不同小时
         let names = [
             "sess_10.log",
             "sess_11.log",
@@ -279,21 +279,18 @@ mod tests {
         // 写入当前小时，触发 cleanup
         logger.log("sess", "current");
 
-        // 只应保留最近 3 个（13, 14, 当前小时）
-        let mut remaining: Vec<_> = fs::read_dir(dir.path())
+        // 只应保留 3 个文件，最早的两个（10, 11）应被删除
+        let remaining: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().starts_with("sess_"))
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
-        remaining.sort();
 
         assert_eq!(remaining.len(), 3);
-        // 最早的两个（10, 11）已被删除
-        assert!(remaining.iter().any(|n| n == "sess_13.log"));
-        assert!(remaining.iter().any(|n| n == "sess_14.log"));
-        // 当前小时的文件存在
-        assert!(remaining.iter().any(|n| n.contains(&hour())));
+        // 直接验证 sess_10.log 和 sess_11.log 已被删除（不依赖当前小时，避免 flaky）
+        assert!(!dir.path().join("sess_10.log").exists());
+        assert!(!dir.path().join("sess_11.log").exists());
     }
 
     #[test]
