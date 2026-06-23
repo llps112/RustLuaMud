@@ -127,7 +127,9 @@ impl ConnectionManager {
             return Err(format!("连接 {} 不存在", id + 1));
         }
         let name = self.sessions[id].name.clone();
-        self.sessions[id].disconnect();
+        // 使用 shutdown() 而非 disconnect()：发送取消信号让读任务静默退出，
+        // 避免 remove 后索引移位导致旧转发任务的 StateChange(Disconnected) 误触其他 session 重连
+        self.sessions[id].shutdown();
         self.sessions.remove(id);
         // 如果移除的是前台连接或前台连接在它之后，调整 foreground_id
         if self.foreground_id >= self.sessions.len() && !self.sessions.is_empty() {

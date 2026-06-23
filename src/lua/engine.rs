@@ -2411,9 +2411,11 @@ impl LuaEngine {
         // ============================================================
 
         // 覆盖 dofile — 支持 GBK 自动转码和路径分隔符兼容
+        // 必须使用 create_function（不可变回调），因为 war_members.lua 内部会递归
+        // 调用 dofile（加载 war_members_data.lua），create_function_mut 会阻止递归。
         let _script_path_rc = self.script_path.clone();
         let state_rc_dofile = state_rc.clone();
-        let dofile_fn = lua.create_function_mut(move |lua, path: String| {
+        let dofile_fn = lua.create_function(move |lua, path: String| {
             // 将 \ 替换为 /
             let path = path.replace('\\', "/");
 

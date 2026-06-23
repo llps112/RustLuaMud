@@ -13,6 +13,9 @@ profiles/*
 # profiles2: 忽略所有内容
 profiles2/
 
+# profiles3: 忽略所有内容
+profiles3/
+
 # scripts: 只保留 example.lua 和 lua/ 目录
 scripts/*
 !scripts/example.lua

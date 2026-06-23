@@ -1,6 +1,7 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_socks::tcp::Socks5Stream;
 
 use crate::config::ConnectionConfig;
@@ -81,6 +82,8 @@ pub struct Session {
     send_tx: Option<mpsc::Sender<String>>,
     /// 发送原始数据包的通道
     send_raw_tx: Option<mpsc::Sender<Vec<u8>>>,
+    /// 取消信号发送端：shutdown() 时发送信号让读任务静默退出
+    cancel_tx: Option<oneshot::Sender<()>>,
 }
 
 /// 将 GBK 字节解码为 UTF-8 字符串
@@ -172,6 +175,7 @@ impl Session {
             socks5_password: config.socks5_password.clone(),
             send_tx: None,
             send_raw_tx: None,
+            cancel_tx: None,
         }
     }
 
@@ -302,6 +306,10 @@ impl Session {
         let (send_raw_tx, mut send_raw_rx) = mpsc::channel::<Vec<u8>>(256);
         self.send_raw_tx = Some(send_raw_tx);
 
+        // 创建取消通道：shutdown() 时发送信号让读任务静默退出
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        self.cancel_tx = Some(cancel_tx);
+
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
@@ -312,6 +320,9 @@ impl Session {
         // 读取任务：从服务器接收数据，按行读取并转码
         let event_tx_read = event_tx.clone();
         tokio::spawn(async move {
+            // pin cancel_rx 以便在 select! 中使用 &mut 引用
+            tokio::pin!(cancel_rx);
+
             // 按字节读取行，避免 UTF-8 解码问题
             let mut byte_buf: Vec<u8> = Vec::with_capacity(4096);
 
@@ -320,48 +331,56 @@ impl Session {
                 // 逐字节读取直到遇到 \n（或 \r 作为部分行交付）
                 loop {
                     let mut one_byte = [0u8; 1];
-                    match reader.read(&mut one_byte).await {
-                        Ok(0) => {
-                            // 连接关闭
-                            let _ = event_tx_read
-                                .send(SessionEvent::StateChange(SessionState::Disconnected))
-                                .await;
+                    tokio::select! {
+                        // cancel 信号优先：shutdown() 时静默退出，不发送 StateChange
+                        _ = &mut cancel_rx => {
                             return;
                         }
-                        Ok(_) => {
-                            byte_buf.push(one_byte[0]);
-                            if one_byte[0] == b'\n' {
-                                break;
-                            }
-                            if one_byte[0] == b'\r' && !byte_buf.is_empty() {
-                                // \r 作为部分行交付（MUD 常用 \r 覆盖当前行，无 \n）
-                                // 去掉 \r 本身，交付当前缓冲区内容
-                                byte_buf.pop(); // 移除 \r
-                                if !byte_buf.is_empty() {
-                                    // 先过滤 telnet IAC 协议字节
-                                    let cleaned = strip_telnet_iac(&byte_buf);
-                                    if !cleaned.is_empty() {
-                                        let line_str = match encoding {
-                                            Encoding::Gbk => decode_gbk(&cleaned),
-                                            Encoding::Utf8 => {
-                                                String::from_utf8_lossy(&cleaned).into_owned()
+                        result = reader.read(&mut one_byte) => {
+                            match result {
+                                Ok(0) => {
+                                    // 连接关闭
+                                    let _ = event_tx_read
+                                        .send(SessionEvent::StateChange(SessionState::Disconnected))
+                                        .await;
+                                    return;
+                                }
+                                Ok(_) => {
+                                    byte_buf.push(one_byte[0]);
+                                    if one_byte[0] == b'\n' {
+                                        break;
+                                    }
+                                    if one_byte[0] == b'\r' && !byte_buf.is_empty() {
+                                        // \r 作为部分行交付（MUD 常用 \r 覆盖当前行，无 \n）
+                                        // 去掉 \r 本身，交付当前缓冲区内容
+                                        byte_buf.pop(); // 移除 \r
+                                        if !byte_buf.is_empty() {
+                                            // 先过滤 telnet IAC 协议字节
+                                            let cleaned = strip_telnet_iac(&byte_buf);
+                                            if !cleaned.is_empty() {
+                                                let line_str = match encoding {
+                                                    Encoding::Gbk => decode_gbk(&cleaned),
+                                                    Encoding::Utf8 => {
+                                                        String::from_utf8_lossy(&cleaned).into_owned()
+                                                    }
+                                                };
+                                                let _ =
+                                                    event_tx_read.send(SessionEvent::Data(line_str)).await;
                                             }
-                                        };
-                                        let _ =
-                                            event_tx_read.send(SessionEvent::Data(line_str)).await;
+                                        }
+                                        byte_buf.clear();
                                     }
                                 }
-                                byte_buf.clear();
+                                Err(e) => {
+                                    let _ = event_tx_read
+                                        .send(SessionEvent::Error(format!("读取错误: {}", e)))
+                                        .await;
+                                    let _ = event_tx_read
+                                        .send(SessionEvent::StateChange(SessionState::Disconnected))
+                                        .await;
+                                    return;
+                                }
                             }
-                        }
-                        Err(e) => {
-                            let _ = event_tx_read
-                                .send(SessionEvent::Error(format!("读取错误: {}", e)))
-                                .await;
-                            let _ = event_tx_read
-                                .send(SessionEvent::StateChange(SessionState::Disconnected))
-                                .await;
-                            return;
                         }
                     }
                 }
@@ -463,8 +482,22 @@ impl Session {
         }
     }
 
-    /// 断开连接
+    /// 断开连接（用于 /disconnect 命令）
+    /// 丢弃发送通道，读任务将在检测到 EOF 后自然退出并发送 StateChange(Disconnected)，
+    /// 从而触发自动重连逻辑。
     pub fn disconnect(&mut self) {
+        self.send_tx = None;
+        self.send_raw_tx = None;
+        self.state = SessionState::Disconnected;
+    }
+
+    /// 彻底关闭连接（用于 /close 命令）
+    /// 发送取消信号让读任务静默退出（不发送 StateChange(Disconnected)），
+    /// 防止 remove_session 后索引移位导致雪崩级联重连。
+    pub fn shutdown(&mut self) {
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
         self.send_tx = None;
         self.send_raw_tx = None;
         self.state = SessionState::Disconnected;
