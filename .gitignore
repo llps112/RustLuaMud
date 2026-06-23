@@ -17,6 +17,7 @@ profiles2/
 scripts/*
 !scripts/example.lua
 !scripts/lua/
+!scripts/michen_xkx.lua
 !scripts/private
 !scripts/class
 !scripts/class-utf8
