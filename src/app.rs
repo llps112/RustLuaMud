@@ -1715,14 +1715,18 @@ impl App {
                         .append_output("[错误] /all /lua 需要 Lua 代码参数")?;
                     return Ok(());
                 }
+                let mut executed = 0usize;
+                let mut skipped = 0usize;
                 for i in 0..session_count {
                     let name = self.manager.sessions[i].name.clone();
                     if let Some(ref engine) = self.manager.sessions[i].lua_engine {
+                        self.logger.log_lua(&name, code);
                         match engine.eval_code(code) {
                             Ok(_) => {
                                 let _ = self.send_lua_commands(i, engine.drain_commands());
                                 let _ = self.send_lua_raw(i);
                                 let _ = self.drain_lua_logs(i);
+                                executed += 1;
                             }
                             Err(e) => {
                                 self.terminal.append_output(&format!(
@@ -1731,11 +1735,23 @@ impl App {
                                 ))?;
                             }
                         }
+                    } else {
+                        self.terminal.append_output(&format!(
+                            "[错误] /all /lua [{}]: 未加载脚本",
+                            name
+                        ))?;
+                        skipped += 1;
                     }
                 }
+                self.update_status_bar()?;
+                let extra = if skipped > 0 {
+                    format!("，{} 个未加载脚本被跳过", skipped)
+                } else {
+                    String::new()
+                };
                 self.terminal.append_output(&format!(
-                    "[系统] /all /lua: 在 {} 个连接上执行",
-                    session_count
+                    "[系统] /all /lua: 在 {}/{} 个连接上执行{}",
+                    executed, session_count, extra
                 ))?;
             }
             "reload" | "load" => {
@@ -1771,6 +1787,13 @@ impl App {
                                     }
                                     match engine.load_script(&path) {
                                         Ok(()) => {
+                                            // 排空脚本加载期间的 Lua 日志
+                                            let logs = engine.drain_logs();
+                                            for msg in logs {
+                                                let clean = crate::ui::AnsiParser::strip_ansi(&msg);
+                                                self.logger.log(&name, &clean);
+                                                self.terminal.append_output(&format!("\x1b[36m{}\x1b[0m", msg))?;
+                                            }
                                             self.manager.sessions[i].lua_engine = Some(engine);
                                             executed += 1;
                                         }
