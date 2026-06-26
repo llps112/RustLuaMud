@@ -1080,9 +1080,9 @@ impl App {
                         name
                     ))?;
                     self.update_status_bar()?;
-                    let _ = self.reconnect_tx.try_send(ReconnectRequest {
-                        session_id: target,
-                    });
+                    let _ = self
+                        .reconnect_tx
+                        .try_send(ReconnectRequest { session_id: target });
                 } else {
                     let display = id.unwrap_or(0);
                     self.terminal
@@ -1837,8 +1837,7 @@ impl App {
             "disconnect" => {
                 for i in 0..session_count {
                     self.manager.sessions[i].disconnect();
-                    self.manager.sessions[i].state =
-                        crate::connection::SessionState::Disconnected;
+                    self.manager.sessions[i].state = crate::connection::SessionState::Disconnected;
                 }
                 self.update_status_bar()?;
                 self.terminal.append_output(&format!(
@@ -1850,16 +1849,15 @@ impl App {
                 for i in 0..session_count {
                     let name = self.manager.sessions[i].name.clone();
                     self.manager.sessions[i].disconnect();
-                    self.manager.sessions[i].state =
-                        crate::connection::SessionState::Disconnected;
+                    self.manager.sessions[i].state = crate::connection::SessionState::Disconnected;
                     self.terminal.append_output(&format!(
                         "[系统] 正在重连 {} ({})...",
                         i + 1,
                         name
                     ))?;
-                    let _ = self.reconnect_tx.try_send(ReconnectRequest {
-                        session_id: i,
-                    });
+                    let _ = self
+                        .reconnect_tx
+                        .try_send(ReconnectRequest { session_id: i });
                 }
                 self.update_status_bar()?;
             }
