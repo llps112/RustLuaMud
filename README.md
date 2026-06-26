@@ -13,7 +13,7 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 - **SOCKS5 代理** — 每个角色可独立配置 SOCKS5 代理，支持认证，方便多开挂机规避同 IP 限制
 - **输出历史滚动** — PageUp/PageDown 翻页查看历史输出，End 键回到底部，新输出不影响当前浏览位置
 - **仅前台渲染** — 仅前台连接渲染终端输出，后台连接静默记录日志
-- **ANSI 颜色** — 完整解析 ANSI SGR 转义序列，终端彩色显示
+- **ANSI 颜色** — 完整解析 ANSI SGR 转义序列，终端彩色显示；触发器回调可获取颜色样式信息（GetStyle API）
 - **LuaJIT 脚本引擎** — 触发器、别名、定时器、变量管理、协程支持
 - **GBK 编码兼容** — 自动检测并转码 GBK 编码的脚本文件和服务器输出；触发器同时支持 GBK 字节模式和 UTF-8 正则匹配
 - **SQLite3 集成** — Lua 脚本可直接操作 SQLite3 数据库，支持 GBK 文本解码
@@ -130,10 +130,10 @@ socks5_password = "pass"   # 可选
 
 | 快捷键 | 功能 |
 |--------|------|
-| `Alt+1~9` | 切换到对应编号的连接 |
-| `Alt+0` | 切换到第 10 个连接 |
-| `Alt+Left` | 切换到前一个连接（循环） |
-| `Alt+Right` | 切换到后一个连接（循环） |
+| `Alt+1~9` | 切换到对应编号的连接（部分终端/SSH 客户端中 Alt 键被占用，此时无法使用；请使用 `/sw <编号>` 或鼠标点击状态栏标签）|
+| `Alt+0` | 切换到第 10 个连接（同上注意事项）|
+| `Alt+Left` | 切换到前一个连接（循环，同上）|
+| `Alt+Right` | 切换到后一个连接（循环，同上）|
 | 鼠标点击状态栏标签 | 切换到对应连接 |
 | `Ctrl+C` / `Ctrl+D` | 退出程序 |
 | `↑` / `↓` | 浏览命令历史 |
@@ -189,9 +189,10 @@ socks5_password = "pass"   # 可选
 | `GetTriggerInfo(name, code)` | 获取触发器信息 |
 | `SetTriggerOption(name, option, value)` | 设置触发器选项 |
 
-**回调签名**: `function(name, line, wildcards)`
+**回调签名**: `function(name, line, wildcards, styles)`
 - `wildcards[0]` = 完整匹配文本（MUSHclient 兼容）
 - `wildcards[1]` = 第一个捕获组，依此类推
+- `styles` = 样式运行片段表（模拟输出时不传），可通过 `GetStyle(styles, pos)` 查询指定位置的文本颜色
 - 支持 `omit_from_output` 选项（匹配行不显示到终端）
 
 ### 别名
@@ -285,6 +286,13 @@ socks5_password = "pass"   # 可选
 | `conn:close()` | 关闭数据库 |
 | `conn:set_gbk(enable)` | 设置数据库文本字段为 GBK 解码 |
 | `DatabaseClose()` | 兼容 MUSHclient 的关闭接口 |
+
+### 样式与颜色
+
+| API | 说明 |
+|-----|------|
+| `GetStyle(styles_table, position)` | 从样式表中查询指定位置的颜色样式（返回 textcolour / backcolour / bold 等字段） |
+| `RGBColourToName(colour)` | 将 ANSI 色号（0-15）映射为颜色名称（如 `0` → `"black"`） |
 
 ### 工具函数
 
@@ -467,6 +475,20 @@ export RUST_BACKTRACE=1
 ---
 
 ## 版本历史
+
+### v0.1.4 (2026-06-22)
+
+- 实现 GetStyle / RGBColourToName API，触发器回调新增第 4 参数 `styles`（颜色样式信息）
+- 修复 session 输入缓冲区独立性问题
+- 修复 `/close` 命令导致的级联重连 bug
+- 为 `dofile` 添加递归深度限制，防止意外死循环
+- 修复 `AddTimer` 的 `response_text` 处理逻辑
+- 修复 `channel-closed` 错误日志泛滥问题
+
+### v0.1.3 (2026-06-20)
+
+- 实现独立 session 输入缓冲区，各连接输入互不干扰
+- 修复 logger 测试 flaky 问题
 
 ### v0.1.2 (2026-06-15)
 

@@ -1,6 +1,6 @@
 # RustLuaMud 客户端文档
 
-基于 Rust 的 MUSHclient 兼容 MUD 客户端，集成 Lua 5.4 脚本引擎。
+基于 Rust 的 MUSHclient 兼容 MUD 客户端，集成 LuaJIT 脚本引擎。
 
 ## 目录结构
 
