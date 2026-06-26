@@ -9282,25 +9282,36 @@ mod tests {
     #[test]
     fn test_get_style_basic() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 -- 先触发一个带 ANSI 的行，让引擎解析样式
                 test_styles = nil
                 AddTrigger('style_trig', 'hello', '', 33, 0, 0, '',
                     'function(n,l,w,s) test_styles = s end', 0, 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.process_output("\x1b[31mhello\x1b[0m");
 
             let styles: mlua::Value = eval(engine, "return test_styles").unwrap();
-            assert!(matches!(styles, mlua::Value::Table(_)), "styles should be a table");
+            assert!(
+                matches!(styles, mlua::Value::Table(_)),
+                "styles should be a table"
+            );
 
             // 用 GetStyle 按位置查询
-            let result: mlua::Value = eval(engine, "
+            let result: mlua::Value = eval(
+                engine,
+                "
                 if test_styles then
                     local s = GetStyle(test_styles, 1)
                     return s.textcolour
                 end
                 return -1
-            ").unwrap();
+            ",
+            )
+            .unwrap();
             assert_eq!(result, mlua::Value::Integer(1)); // red
         });
     }
@@ -9308,20 +9319,28 @@ mod tests {
     #[test]
     fn test_get_style_out_of_bounds() {
         with_engine(|engine| {
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 test_styles = nil
                 AddTrigger('style_ob', 'hello', '', 33, 0, 0, '',
                     'function(n,l,w,s) test_styles = s end', 0, 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.process_output("\x1b[31mhello\x1b[0m");
 
             // 查询超出范围的位置 → nil
-            let result: mlua::Value = eval(engine, "
+            let result: mlua::Value = eval(
+                engine,
+                "
                 if test_styles then
                     return GetStyle(test_styles, 999)
                 end
                 return nil
-            ").unwrap();
+            ",
+            )
+            .unwrap();
             assert!(matches!(result, mlua::Value::Nil));
         });
     }
@@ -9370,15 +9389,23 @@ mod tests {
     fn test_styles_passed_as_fourth_parameter() {
         with_engine(|engine| {
             // 验证 styles 确实作为第 4 个参数传入
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 style_count = nil
                 AddTrigger('style4', 'hello', '', 33, 0, 0, '',
                     'function(n,l,w,s) style_count = s and #s or -1 end', 0, 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.process_output("\x1b[32mhello\x1b[0m");
 
             let count: i64 = eval(engine, "return style_count").unwrap();
-            assert!(count > 0, "styles should be non-nil for ANSI text, got count={}", count);
+            assert!(
+                count > 0,
+                "styles should be non-nil for ANSI text, got count={}",
+                count
+            );
         });
     }
 
@@ -9386,15 +9413,23 @@ mod tests {
     fn test_no_styles_for_plain_text() {
         with_engine(|engine| {
             // 无 ANSI 的行 → styles 为包含 1 个默认运行的表
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 style_count = -1
                 AddTrigger('plain', 'hello', '', 33, 0, 0, '',
                     'function(n,l,w,s) style_count = s and #s or -1 end', 0, 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             engine.process_output("hello world");
 
             let count: i64 = eval(engine, "return style_count").unwrap();
-            assert_eq!(count, 1, "plain text should have 1 default style run, got {}", count);
+            assert_eq!(
+                count, 1,
+                "plain text should have 1 default style run, got {}",
+                count
+            );
         });
     }
 
@@ -9402,11 +9437,15 @@ mod tests {
     fn test_simulate_passes_nil_styles() {
         with_engine(|engine| {
             // Simulate 传 nil 作为第 4 参数
-            exec(engine, r#"
+            exec(
+                engine,
+                r#"
                 sim_style = 'unknown'
                 AddTrigger('sim_style_trig', 'hello', '', 33, 0, 0, '',
                     'function(n,l,w,s) sim_style = (s == nil) and "nil" or "table" end', 0, 0)
-            "#).unwrap();
+            "#,
+            )
+            .unwrap();
             exec(engine, r#"Simulate("hello\n")"#).unwrap();
 
             let result: String = eval(engine, "return sim_style").unwrap();
