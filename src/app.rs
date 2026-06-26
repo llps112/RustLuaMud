@@ -1698,7 +1698,8 @@ impl App {
                 ))?;
             }
             "reload" | "load" => {
-                let is_reload = parts[0] == "reload" || parts.get(1).map_or(false, |&p| p == "reload");
+                let is_reload =
+                    parts[0] == "reload" || parts.get(1).map_or(false, |&p| p == "reload");
                 let mut executed = 0usize;
                 for i in 0..session_count {
                     let name = self.manager.sessions[i].name.clone();
@@ -1708,46 +1709,49 @@ impl App {
                             .as_ref()
                             .and_then(|e| e.script_path());
                         if let Some(path) = path {
-                             let saved_vars = self.manager.sessions[i]
-                                 .lua_engine
-                                 .as_ref()
-                                 .map(|e| e.get_variables());
-                             let saved_conn = self.manager.sessions[i]
-                                 .lua_engine
-                                 .as_ref()
-                                 .map(|e| e.get_connection_state());
-                             match crate::lua::LuaEngine::new() {
-                                 Ok(mut engine) => {
-                                     if let Some(ref vars) = saved_vars {
-                                         for (k, v) in vars {
-                                             engine.set_variable(k, v);
-                                             engine.set_global(k, v);
-                                         }
-                                     }
-                                     if let Some(ref conn) = saved_conn {
-                                         engine.restore_connection_state(conn);
-                                     }
-                                     match engine.load_script(&path) {
-                                         Ok(()) => {
-                                             self.manager.sessions[i].lua_engine = Some(engine);
-                                             executed += 1;
-                                         }
-                                         Err(e) => {
-                                             self.terminal.append_output(&format!(
-                                                 "[错误] /all /reload [{}]: {}", name, e
-                                             ))?;
-                                         }
-                                     }
-                                 }
+                            let saved_vars = self.manager.sessions[i]
+                                .lua_engine
+                                .as_ref()
+                                .map(|e| e.get_variables());
+                            let saved_conn = self.manager.sessions[i]
+                                .lua_engine
+                                .as_ref()
+                                .map(|e| e.get_connection_state());
+                            match crate::lua::LuaEngine::new() {
+                                Ok(mut engine) => {
+                                    if let Some(ref vars) = saved_vars {
+                                        for (k, v) in vars {
+                                            engine.set_variable(k, v);
+                                            engine.set_global(k, v);
+                                        }
+                                    }
+                                    if let Some(ref conn) = saved_conn {
+                                        engine.restore_connection_state(conn);
+                                    }
+                                    match engine.load_script(&path) {
+                                        Ok(()) => {
+                                            self.manager.sessions[i].lua_engine = Some(engine);
+                                            executed += 1;
+                                        }
+                                        Err(e) => {
+                                            self.terminal.append_output(&format!(
+                                                "[错误] /all /reload [{}]: {}",
+                                                name, e
+                                            ))?;
+                                        }
+                                    }
+                                }
                                 Err(e) => {
                                     self.terminal.append_output(&format!(
-                                        "[错误] /all /reload [{}]: {}", name, e
+                                        "[错误] /all /reload [{}]: {}",
+                                        name, e
                                     ))?;
                                 }
                             }
                         } else {
                             self.terminal.append_output(&format!(
-                                "[错误] /all /reload [{}]: 无已加载脚本", name
+                                "[错误] /all /reload [{}]: 无已加载脚本",
+                                name
                             ))?;
                         }
                     } else {
@@ -1761,23 +1765,25 @@ impl App {
                                 }
                                 Err(e) => {
                                     self.terminal.append_output(&format!(
-                                        "[错误] /all /load [{}]: {}", name, e
+                                        "[错误] /all /load [{}]: {}",
+                                        name, e
                                     ))?;
                                 }
                             },
                             Err(e) => {
                                 self.terminal.append_output(&format!(
-                                    "[错误] /all /load [{}]: {}", name, e
+                                    "[错误] /all /load [{}]: {}",
+                                    name, e
                                 ))?;
                             }
                         }
                     }
                 }
                 if is_reload && executed > 0 {
-                     for i in 0..session_count {
-                         self.start_timers_for_session(i);
-                     }
-                 }
+                    for i in 0..session_count {
+                        self.start_timers_for_session(i);
+                    }
+                }
                 self.terminal.append_output(&format!(
                     "[系统] /all /{}: 在 {}/{} 个连接上执行",
                     parts[0], executed, session_count
