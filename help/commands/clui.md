@@ -87,6 +87,18 @@ eat apple
 
 当前前台连接在状态栏中以 ★ 标记。
 
+### 广播命令
+
+`/all` 可以将一条命令同时发送到所有连接：
+
+```
+/all look                   所有角色同时 look
+/all /reload                所有角色重载脚本
+/all /lua print(have.gold)  查看所有角色的金币
+```
+
+详见 [命令参考](README.md#广播命令-all)。
+
 ---
 
 ## 文本复制
