@@ -63,6 +63,8 @@ enum BuiltinCommand {
     },
     /// /disconnect [编号]
     Disconnect { id: Option<usize> },
+    /// /reconnect [编号] — 断开并重新连接
+    Reconnect { id: Option<usize> },
     /// /close [编号]
     Close { id: Option<usize> },
     /// /list
@@ -113,6 +115,10 @@ fn parse_builtin_command(cmd: &str) -> BuiltinCommand {
         "/disconnect" => {
             let id = parts.get(1).and_then(|s| s.parse::<usize>().ok());
             BuiltinCommand::Disconnect { id }
+        }
+        "/reconnect" => {
+            let id = parts.get(1).and_then(|s| s.parse::<usize>().ok());
+            BuiltinCommand::Reconnect { id }
         }
         "/close" => {
             let id = parts.get(1).and_then(|s| s.parse::<usize>().ok());
@@ -1051,6 +1057,39 @@ impl App {
                 }
             }
 
+            BuiltinCommand::Reconnect { id } => {
+                let target = if let Some(id) = id {
+                    match id.checked_sub(1) {
+                        Some(t) => t,
+                        None => {
+                            self.terminal.append_output("[错误] 无效的编号")?;
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    self.manager.foreground_id
+                };
+                if target < self.manager.sessions.len() {
+                    let name = self.manager.sessions[target].name.clone();
+                    self.manager.sessions[target].disconnect();
+                    self.manager.sessions[target].state =
+                        crate::connection::SessionState::Disconnected;
+                    self.terminal.append_output(&format!(
+                        "[系统] 正在重连 {} ({})...",
+                        target + 1,
+                        name
+                    ))?;
+                    self.update_status_bar()?;
+                    let _ = self.reconnect_tx.try_send(ReconnectRequest {
+                        session_id: target,
+                    });
+                } else {
+                    let display = id.unwrap_or(0);
+                    self.terminal
+                        .append_output(&format!("[错误] 连接 {} 不存在", display))?;
+                }
+            }
+
             BuiltinCommand::Close { id } => {
                 let target = if let Some(id) = id {
                     match id.checked_sub(1) {
@@ -1422,6 +1461,8 @@ impl App {
                 self.terminal
                     .append_output("  /disconnect [编号]           断开连接（保留 session）")?;
                 self.terminal
+                    .append_output("  /reconnect [编号]           断开并重新连接")?;
+                self.terminal
                     .append_output("  /close [编号]               彻底关闭并移除 session")?;
                 self.terminal
                     .append_output("  /list                       列出所有连接")?;
@@ -1650,7 +1691,7 @@ impl App {
         }
 
         let safe = match parts[0] {
-            "lua" | "reload" => true,
+            "lua" | "reload" | "disconnect" | "reconnect" => true,
             "load" if parts.len() >= 2 => true,
             "list" => true,
             _ => false,
@@ -1658,7 +1699,7 @@ impl App {
 
         if !safe {
             self.terminal.append_output(&format!(
-                "[错误] /all 不允许广播客户端命令 /{}。允许: /lua, /reload, /load, /list",
+                "[错误] /all 不允许广播客户端命令 /{}。允许: /lua, /reload, /load, /list, /disconnect, /reconnect",
                 parts[0]
             ))?;
             return Ok(());
@@ -1793,6 +1834,35 @@ impl App {
             "list" => {
                 return self.handle_builtin_command("/list");
             }
+            "disconnect" => {
+                for i in 0..session_count {
+                    self.manager.sessions[i].disconnect();
+                    self.manager.sessions[i].state =
+                        crate::connection::SessionState::Disconnected;
+                }
+                self.update_status_bar()?;
+                self.terminal.append_output(&format!(
+                    "[系统] /all /disconnect: 已断开 {} 个连接",
+                    session_count
+                ))?;
+            }
+            "reconnect" => {
+                for i in 0..session_count {
+                    let name = self.manager.sessions[i].name.clone();
+                    self.manager.sessions[i].disconnect();
+                    self.manager.sessions[i].state =
+                        crate::connection::SessionState::Disconnected;
+                    self.terminal.append_output(&format!(
+                        "[系统] 正在重连 {} ({})...",
+                        i + 1,
+                        name
+                    ))?;
+                    let _ = self.reconnect_tx.try_send(ReconnectRequest {
+                        session_id: i,
+                    });
+                }
+                self.update_status_bar()?;
+            }
             _ => unreachable!(),
         }
         Ok(())
@@ -1920,6 +1990,24 @@ mod tests {
     fn test_parse_builtin_disconnect_invalid_id() {
         let cmd = parse_builtin_command("/disconnect abc");
         assert_eq!(cmd, BuiltinCommand::Disconnect { id: None });
+    }
+
+    #[test]
+    fn test_parse_builtin_reconnect_with_id() {
+        let cmd = parse_builtin_command("/reconnect 2");
+        assert_eq!(cmd, BuiltinCommand::Reconnect { id: Some(2) });
+    }
+
+    #[test]
+    fn test_parse_builtin_reconnect_no_id() {
+        let cmd = parse_builtin_command("/reconnect");
+        assert_eq!(cmd, BuiltinCommand::Reconnect { id: None });
+    }
+
+    #[test]
+    fn test_parse_builtin_reconnect_invalid_id() {
+        let cmd = parse_builtin_command("/reconnect abc");
+        assert_eq!(cmd, BuiltinCommand::Reconnect { id: None });
     }
 
     #[test]

@@ -149,6 +149,7 @@ socks5_password = "pass"   # 可选
 | `/connect <名> <主机:端口>` | 添加并连接新角色 |
 | `/connect <名> <主机> <端口>` | 同上 |
 | `/disconnect [编号]` | 断开连接（保留 session） |
+| `/reconnect [编号]` | 断开并重新连接 |
 | `/close [编号]` | 彻底关闭并移除 session |
 | `/list` | 列出所有连接及状态 |
 | `/load <脚本路径>` | 为前台连接加载 Lua 脚本 |
@@ -157,7 +158,7 @@ socks5_password = "pass"   # 可选
 | `/switch <角色名\|编号>` `/sw <角色名\|编号>` | 切换到指定连接 |
 | `/profile list` | 列出 `profiles/` 目录下所有可用角色配置 |
 | `/profile load <角色名>` | 从 `profiles/<角色名>.toml` 加载配置并连接（无需重启） |
-| `/all <命令>` | 向所有连接发送指令。支持 MUD 命令广播（如 `/all look`）与客户端命令广播（如 `/all /reload`），客户端命令仅允许 `/lua`、`/reload`、`/load`、`/list` |
+| `/all <命令>` | 向所有连接发送指令。支持 MUD 命令广播（如 `/all look`）与客户端命令广播（如 `/all /reload`），客户端命令仅允许 `/lua`、`/reload`、`/load`、`/list`、`/disconnect`、`/reconnect` |
 | `/lua <Lua 代码>` | 直接执行 Lua 代码 |
 | `/set keep_command on\|off` | 设置 Enter 后是否保留命令栏输入内容 |
 

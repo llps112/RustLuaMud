@@ -116,7 +116,15 @@ eat apple
 
 ## 脚本重载
 
-输入 `/load reload` 可以重新加载 Lua 脚本，适用于修改脚本后快速生效。
+输入 `/load reload` 或 `/reload` 可以重新加载 Lua 脚本，适用于修改脚本后快速生效。
+
+## 重连
+
+```
+/reconnect             重连当前前台连接
+/reconnect 3           重连编号 3 的连接
+/all /reconnect        重连所有连接
+```
 
 ---
 
