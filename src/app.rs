@@ -1386,25 +1386,31 @@ impl App {
             },
 
             BuiltinCommand::All { cmd } => {
-                let results = self.manager.send_to_all(&cmd);
-                let count = results.len();
-                let mut ok_count = 0;
-                for (name, result) in &results {
-                    match result {
-                        Ok(()) => ok_count += 1,
-                        Err(e) => {
-                            self.terminal.append_output(&format!(
-                                "[错误] 向 {} 发送命令失败: {}",
-                                name, e
-                            ))?;
+                // 判断是否为客户端命令（以 / 开头）
+                if cmd.starts_with('/') {
+                    self.handle_all_client_command(&cmd)?;
+                } else {
+                    // 普通命令，直接发送到所有连接的服务器
+                    let results = self.manager.send_to_all(&cmd);
+                    let count = results.len();
+                    let mut ok_count = 0;
+                    for (name, result) in &results {
+                        match result {
+                            Ok(()) => ok_count += 1,
+                            Err(e) => {
+                                self.terminal.append_output(&format!(
+                                    "[错误] 向 {} 发送命令失败: {}",
+                                    name, e
+                                ))?;
+                            }
                         }
                     }
+                    self.terminal.append_output(&format!(
+                        "[系统] /all: 已向 {}/{} 个连接发送指令",
+                        ok_count, count
+                    ))?;
+                    self.logger.log_command("all", &cmd);
                 }
-                self.terminal.append_output(&format!(
-                    "[系统] /all: 已向 {}/{} 个连接发送指令",
-                    ok_count, count
-                ))?;
-                self.logger.log_command("all", &cmd);
             }
 
             BuiltinCommand::Unknown => {
@@ -1632,6 +1638,157 @@ impl App {
             id + 1,
             self.manager.foreground_name()
         ))?;
+        Ok(())
+    }
+
+    /// 处理 /all 后的客户端命令（以 / 开头），逐 session 执行
+    fn handle_all_client_command(&mut self, cmd: &str) -> io::Result<()> {
+        let inner = cmd.strip_prefix('/').unwrap_or("");
+        let parts: Vec<&str> = inner.split_whitespace().collect();
+        if parts.is_empty() {
+            return Ok(());
+        }
+
+        let safe = match parts[0] {
+            "lua" | "reload" => true,
+            "load" if parts.len() >= 2 => true,
+            "list" => true,
+            _ => false,
+        };
+
+        if !safe {
+            self.terminal.append_output(&format!(
+                "[错误] /all 不允许广播客户端命令 /{}。允许: /lua, /reload, /load, /list",
+                parts[0]
+            ))?;
+            return Ok(());
+        }
+
+        let session_count = self.manager.sessions.len();
+
+        match parts[0] {
+            "lua" => {
+                let code = inner.strip_prefix("lua").map(|s| s.trim()).unwrap_or("");
+                if code.is_empty() {
+                    self.terminal
+                        .append_output("[错误] /all /lua 需要 Lua 代码参数")?;
+                    return Ok(());
+                }
+                for i in 0..session_count {
+                    let name = self.manager.sessions[i].name.clone();
+                    if let Some(ref engine) = self.manager.sessions[i].lua_engine {
+                        match engine.eval_code(code) {
+                            Ok(_) => {
+                                let _ = self.send_lua_commands(i, engine.drain_commands());
+                                let _ = self.send_lua_raw(i);
+                                let _ = self.drain_lua_logs(i);
+                            }
+                            Err(e) => {
+                                self.terminal.append_output(&format!(
+                                    "[错误] /all /lua [{}]: {}",
+                                    name, e
+                                ))?;
+                            }
+                        }
+                    }
+                }
+                self.terminal.append_output(&format!(
+                    "[系统] /all /lua: 在 {} 个连接上执行",
+                    session_count
+                ))?;
+            }
+            "reload" | "load" => {
+                let is_reload = parts[0] == "reload" || parts.get(1).map_or(false, |&p| p == "reload");
+                let mut executed = 0usize;
+                for i in 0..session_count {
+                    let name = self.manager.sessions[i].name.clone();
+                    if is_reload {
+                        let path = self.manager.sessions[i]
+                            .lua_engine
+                            .as_ref()
+                            .and_then(|e| e.script_path());
+                        if let Some(path) = path {
+                             let saved_vars = self.manager.sessions[i]
+                                 .lua_engine
+                                 .as_ref()
+                                 .map(|e| e.get_variables());
+                             let saved_conn = self.manager.sessions[i]
+                                 .lua_engine
+                                 .as_ref()
+                                 .map(|e| e.get_connection_state());
+                             match crate::lua::LuaEngine::new() {
+                                 Ok(mut engine) => {
+                                     if let Some(ref vars) = saved_vars {
+                                         for (k, v) in vars {
+                                             engine.set_variable(k, v);
+                                             engine.set_global(k, v);
+                                         }
+                                     }
+                                     if let Some(ref conn) = saved_conn {
+                                         engine.restore_connection_state(conn);
+                                     }
+                                     match engine.load_script(&path) {
+                                         Ok(()) => {
+                                             self.manager.sessions[i].lua_engine = Some(engine);
+                                             executed += 1;
+                                         }
+                                         Err(e) => {
+                                             self.terminal.append_output(&format!(
+                                                 "[错误] /all /reload [{}]: {}", name, e
+                                             ))?;
+                                         }
+                                     }
+                                 }
+                                Err(e) => {
+                                    self.terminal.append_output(&format!(
+                                        "[错误] /all /reload [{}]: {}", name, e
+                                    ))?;
+                                }
+                            }
+                        } else {
+                            self.terminal.append_output(&format!(
+                                "[错误] /all /reload [{}]: 无已加载脚本", name
+                            ))?;
+                        }
+                    } else {
+                        let path = parts[1].to_string();
+                        match crate::lua::LuaEngine::new() {
+                            Ok(mut engine) => match engine.load_script(&path) {
+                                Ok(()) => {
+                                    self.manager.sessions[i].lua_engine = Some(engine);
+                                    self.start_timers_for_session(i);
+                                    executed += 1;
+                                }
+                                Err(e) => {
+                                    self.terminal.append_output(&format!(
+                                        "[错误] /all /load [{}]: {}", name, e
+                                    ))?;
+                                }
+                            },
+                            Err(e) => {
+                                self.terminal.append_output(&format!(
+                                    "[错误] /all /load [{}]: {}", name, e
+                                ))?;
+                            }
+                        }
+                    }
+                }
+                if is_reload && executed > 0 {
+                     for i in 0..session_count {
+                         self.start_timers_for_session(i);
+                     }
+                 }
+                self.terminal.append_output(&format!(
+                    "[系统] /all /{}: 在 {}/{} 个连接上执行",
+                    parts[0], executed, session_count
+                ))?;
+                self.update_status_bar()?;
+            }
+            "list" => {
+                return self.handle_builtin_command("/list");
+            }
+            _ => unreachable!(),
+        }
         Ok(())
     }
 }
