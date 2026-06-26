@@ -3957,6 +3957,7 @@ fn regex_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::approx_constant)]
     use super::*;
 
     // ================================================================
@@ -6010,18 +6011,18 @@ mod tests {
 
     #[test]
     fn test_trigger_count_alias_count_timer_count() {
-        let mut engine = LuaEngine::new().unwrap();
+        let engine = LuaEngine::new().unwrap();
         assert_eq!(engine.trigger_count(), 0);
         assert_eq!(engine.alias_count(), 0);
         assert_eq!(engine.timer_count(), 0);
 
         exec(
-            &mut engine,
+            &engine,
             "AddTrigger('t1', 'test', '', 33, 0, 0, '', '', 0, 0)",
         )
         .unwrap();
-        exec(&mut engine, "AddAlias('a1', 'go', '', 33)").unwrap();
-        exec(&mut engine, "AddTimer('tm1', 0, 0, 10, '', 1)").unwrap();
+        exec(&engine, "AddAlias('a1', 'go', '', 33)").unwrap();
+        exec(&engine, "AddTimer('tm1', 0, 0, 10, '', 1)").unwrap();
 
         assert_eq!(engine.trigger_count(), 1);
         assert_eq!(engine.alias_count(), 1);

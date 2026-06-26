@@ -1754,7 +1754,7 @@ impl App {
             }
             "reload" | "load" => {
                 let is_reload =
-                    parts[0] == "reload" || parts.get(1).map_or(false, |&p| p == "reload");
+                    parts[0] == "reload" || parts.get(1).is_some_and(|&p| p == "reload");
                 let mut executed = 0usize;
                 for i in 0..session_count {
                     let name = self.manager.sessions[i].name.clone();

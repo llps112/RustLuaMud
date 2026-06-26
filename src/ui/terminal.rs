@@ -163,6 +163,7 @@ pub struct InputState {
     pub text_selected: bool,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for InputState {
     fn default() -> Self {
         Self {
@@ -922,6 +923,7 @@ impl Terminal {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
     use super::*;
 
     #[test]
@@ -1198,7 +1200,7 @@ mod tests {
         assert!(offset_before > 0);
 
         // 记录当前可见行
-        let visible_before: Vec<String> = state.visible_output_lines().iter().cloned().collect();
+        let visible_before: Vec<String> = state.visible_output_lines().to_vec();
 
         // 添加新输出
         state.push_output("new line");
@@ -1207,7 +1209,7 @@ mod tests {
         assert_eq!(state.scroll_offset, offset_before + 1);
 
         // 视口内容应保持相同
-        let visible_after: Vec<String> = state.visible_output_lines().iter().cloned().collect();
+        let visible_after: Vec<String> = state.visible_output_lines().to_vec();
         assert_eq!(visible_before, visible_after);
     }
 
