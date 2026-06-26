@@ -79,6 +79,8 @@ enum BuiltinCommand {
     Switch { target: String },
     /// /profile load <角色名> | /profile list
     Profile { sub: ProfileSubcommand },
+    /// /all <命令> — 发送命令到所有连接
+    All { cmd: String },
     /// 未知命令
     Unknown,
 }
@@ -155,6 +157,14 @@ fn parse_builtin_command(cmd: &str) -> BuiltinCommand {
                 BuiltinCommand::Switch {
                     target: parts[1].to_string(),
                 }
+            }
+        }
+        "/all" => {
+            let rest = cmd.strip_prefix("/all ").unwrap_or("").to_string();
+            if rest.is_empty() {
+                BuiltinCommand::Unknown
+            } else {
+                BuiltinCommand::All { cmd: rest }
             }
         }
         "/profile" => {
@@ -1375,6 +1385,28 @@ impl App {
                 }
             },
 
+            BuiltinCommand::All { cmd } => {
+                let results = self.manager.send_to_all(&cmd);
+                let count = results.len();
+                let mut ok_count = 0;
+                for (name, result) in &results {
+                    match result {
+                        Ok(()) => ok_count += 1,
+                        Err(e) => {
+                            self.terminal.append_output(&format!(
+                                "[错误] 向 {} 发送命令失败: {}",
+                                name, e
+                            ))?;
+                        }
+                    }
+                }
+                self.terminal.append_output(&format!(
+                    "[系统] /all: 已向 {}/{} 个连接发送指令",
+                    ok_count, count
+                ))?;
+                self.logger.log_command("all", &cmd);
+            }
+
             BuiltinCommand::Unknown => {
                 self.terminal.append_output("内置命令:")?;
                 self.terminal
@@ -1404,6 +1436,8 @@ impl App {
                 self.terminal.append_output(
                     "  /profile load <角色名>      从 profiles/ 加载角色配置并连接",
                 )?;
+                self.terminal
+                    .append_output("  /all <命令>                  向所有连接发送指令")?;
                 self.terminal
                     .append_output("  Alt+0~9                     切换前台连接 (最多10个)")?;
                 self.terminal

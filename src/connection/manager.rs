@@ -97,6 +97,14 @@ impl ConnectionManager {
         }
     }
 
+    /// 发送命令到所有连接
+    pub fn send_to_all(&self, cmd: &str) -> Vec<(String, Result<(), String>)> {
+        self.sessions
+            .iter()
+            .map(|s| (s.name.clone(), s.send(cmd)))
+            .collect()
+    }
+
     /// 发送原始数据包到指定连接
     pub fn send_raw(&self, id: usize, data: Vec<u8>) -> Result<(), String> {
         if id < self.sessions.len() {
