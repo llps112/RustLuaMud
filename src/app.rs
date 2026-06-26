@@ -1736,10 +1736,8 @@ impl App {
                             }
                         }
                     } else {
-                        self.terminal.append_output(&format!(
-                            "[错误] /all /lua [{}]: 未加载脚本",
-                            name
-                        ))?;
+                        self.terminal
+                            .append_output(&format!("[错误] /all /lua [{}]: 未加载脚本", name))?;
                         skipped += 1;
                     }
                 }
@@ -1792,7 +1790,10 @@ impl App {
                                             for msg in logs {
                                                 let clean = crate::ui::AnsiParser::strip_ansi(&msg);
                                                 self.logger.log(&name, &clean);
-                                                self.terminal.append_output(&format!("\x1b[36m{}\x1b[0m", msg))?;
+                                                self.terminal.append_output(&format!(
+                                                    "\x1b[36m{}\x1b[0m",
+                                                    msg
+                                                ))?;
                                             }
                                             self.manager.sessions[i].lua_engine = Some(engine);
                                             executed += 1;
