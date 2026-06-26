@@ -117,6 +117,7 @@ fn parse_builtin_command(cmd: &str) -> BuiltinCommand {
             BuiltinCommand::Close { id }
         }
         "/list" => BuiltinCommand::List,
+        "/reload" => BuiltinCommand::LoadReload,
         "/load" => {
             if parts.len() < 2 {
                 return BuiltinCommand::Unknown;
