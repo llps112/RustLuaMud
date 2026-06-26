@@ -270,6 +270,23 @@ pub struct Trigger {
     pub send_text: String,
 }
 
+/// 样式运行片段（MUSHclient GetStyle 兼容）
+/// 记录 ANSI 颜色/属性在 clean_line 中的字节区间
+#[derive(Debug, Clone)]
+pub(crate) struct StyleRun {
+    /// 在 clean_line 中的起始字节偏移（0-based）
+    pub start: usize,
+    /// 区间长度（字节数）
+    pub length: usize,
+    /// 前景色（ANSI 0-15 标准色号）
+    pub textcolour: u32,
+    /// 背景色（ANSI 色号）
+    pub backcolour: u32,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+}
+
 /// 别名定义
 pub struct Alias {
     pub name: String,
@@ -875,7 +892,7 @@ impl LuaEngine {
                 let gbk_line = encoding_rs::GBK.encode(&clean_line).0.into_owned();
 
                 // 收集匹配结果（与 process_output 相同的逻辑，但不清空 pending_commands）
-                let matches: Vec<(usize, String, Vec<String>)> = {
+                let matches: Vec<(usize, String, Vec<String>, Vec<StyleRun>)> = {
                     let state = state_rc_sim.borrow();
                     let mut result = Vec::new();
                     for (i, trigger) in state.triggers.iter().enumerate() {
@@ -915,7 +932,7 @@ impl LuaEngine {
                                                     cow.into_owned()
                                                 })
                                                 .collect();
-                                            result.push((i, full_match, caps_list));
+                                            result.push((i, full_match, caps_list, Vec::new()));
                                         }
                                     }
                                 } else if let Some(caps) = gbk_re.captures(&gbk_line) {
@@ -933,7 +950,7 @@ impl LuaEngine {
                                             cow.into_owned()
                                         })
                                         .collect();
-                                    result.push((i, full_match, caps_list));
+                                    result.push((i, full_match, caps_list, Vec::new()));
                                 }
                             }
                             TriggerPattern::Utf8(utf8_re) => {
@@ -958,7 +975,7 @@ impl LuaEngine {
                                                 .flatten()
                                                 .map(|m| m.as_str().to_string())
                                                 .collect();
-                                            result.push((i, full_match, caps_list));
+                                            result.push((i, full_match, caps_list, Vec::new()));
                                         }
                                     }
                                 } else if let Some(caps) = utf8_re.captures(&clean_line) {
@@ -969,7 +986,7 @@ impl LuaEngine {
                                         .flatten()
                                         .map(|m| m.as_str().to_string())
                                         .collect();
-                                    result.push((i, full_match, caps_list));
+                                    result.push((i, full_match, caps_list, Vec::new()));
                                 }
                             }
                         }
@@ -981,7 +998,7 @@ impl LuaEngine {
                 let mut any_omit = false;
 
                 // 逐个触发回调
-                for (idx, full_match, caps_list) in matches {
+                for (idx, full_match, caps_list, _sr) in matches {
                     let (callback, send_text, trigger_name, omit) = {
                         let state = state_rc_sim.borrow();
                         (
@@ -994,7 +1011,7 @@ impl LuaEngine {
                     if omit {
                         any_omit = true;
                     }
-                    // MUSHclient 触发器回调签名: function(name, line, wildcards)
+                    // MUSHclient 触发器回调签名: function(name, line, wildcards, styles)
                     if let Ok(wildcards_table) = lua.create_table() {
                         // w[0] = 完整匹配文本（MUSHclient 兼容）
                         let _ = wildcards_table.set(0, full_match.as_str());
@@ -1007,6 +1024,7 @@ impl LuaEngine {
                                 trigger_name.as_str(),
                                 clean_line.as_str(),
                                 wildcards_table,
+                                mlua::Value::Nil,
                             ));
                         }))
                         .is_err()
@@ -2185,6 +2203,72 @@ impl LuaEngine {
         globals.set("Trim", trim_fn)?;
 
         // ============================================================
+        // ANSI 样式 API
+        // ============================================================
+
+        /// ANSI 标准色号→名称映射（0-15）
+        const ANSI_COLOUR_NAMES: [(&str, u32); 16] = [
+            ("black", 0),
+            ("red", 1),
+            ("green", 2),
+            ("yellow", 3),
+            ("blue", 4),
+            ("magenta", 5),
+            ("cyan", 6),
+            ("silver", 7),
+            ("grey", 8),
+            ("bright red", 9),
+            ("bright green", 10),
+            ("bright yellow", 11),
+            ("bright blue", 12),
+            ("bright magenta", 13),
+            ("bright cyan", 14),
+            ("white", 15),
+        ];
+
+        /// 将 ANSI 色号转换为颜色名称
+        fn ansi_colour_to_name(colour: u32) -> String {
+            for (name, code) in &ANSI_COLOUR_NAMES {
+                if *code == colour {
+                    return name.to_string();
+                }
+            }
+            format!("colour_{}", colour)
+        }
+
+        // GetStyle(styles, position) — MushClient API: 查询样式表中指定位置的样式
+        // styles: 触发器回调的第 4 参数（一个表，包含所有样式运行片段）
+        // position: 1-based 字节位置（Lua string.find 返回值）
+        // 返回: {start, length, textcolour, backcolour, bold, italic, underline} 或 nil
+        let get_style_fn = lua.create_function(|_, (styles, position): (mlua::Table, i64)| {
+            let pos = if position > 0 {
+                (position - 1) as usize // 转为 0-based
+            } else {
+                0usize
+            };
+            let len = styles.len().unwrap_or(0) as usize;
+            // 遍历所有样式运行，找到包含 position 的那个
+            for i in 1..=len {
+                let entry: mlua::Table = match styles.get(i) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let start: usize = entry.get("start").unwrap_or(0);
+                let length: usize = entry.get("length").unwrap_or(0);
+                if pos >= start && pos < start + length {
+                    return Ok(Value::Table(entry));
+                }
+            }
+            Ok(Value::Nil)
+        })?;
+        globals.set("GetStyle", get_style_fn)?;
+
+        // RGBColourToName(colour) — MushClient API: 色号转颜色名称
+        let rgb_colour_to_name_fn =
+            lua.create_function(|_lua, colour: i64| Ok(ansi_colour_to_name(colour as u32)))?;
+        globals.set("RGBColourToName", rgb_colour_to_name_fn)?;
+
+        // ============================================================
         // 变量 API
         // ============================================================
 
@@ -2878,6 +2962,142 @@ impl LuaEngine {
         self.script_path.borrow().clone()
     }
 
+    /// 从原始 ANSI 行解析样式运行片段列表
+    #[allow(unused_assignments)]
+    fn parse_style_runs(raw_line: &str) -> Vec<StyleRun> {
+        let mut runs: Vec<StyleRun> = Vec::new();
+        let mut chars = raw_line.chars().peekable();
+        let mut clean_pos: usize = 0;
+
+        // 当前样式状态
+        let mut fg: u32 = 7;
+        let mut bg: u32 = 0;
+        let mut bold = false;
+        let mut italic = false;
+        let mut underline = false;
+
+        // 当前正在构建的运行
+        let mut run_start: usize = 0;
+        let mut run_len: usize = 0;
+
+        // 内部宏：刷新当前运行
+        macro_rules! flush_run {
+            () => {
+                if run_len > 0 {
+                    runs.push(StyleRun {
+                        start: run_start,
+                        length: run_len,
+                        textcolour: fg,
+                        backcolour: bg,
+                        bold,
+                        italic,
+                        underline,
+                    });
+                    run_len = 0;
+                }
+            };
+        }
+
+        while let Some(&ch) = chars.peek() {
+            if ch == '\x1b' {
+                // ANSI 转义序列
+                chars.next(); // 消耗 \x1b
+                if chars.next() == Some('[') {
+                    // CSI 序列
+                    let mut params = String::new();
+                    while let Some(&c) = chars.peek() {
+                        if ('\x30'..='\x3f').contains(&c) || ('\x20'..='\x2f').contains(&c) {
+                            params.push(c);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    if chars.peek() == Some(&'m') || chars.peek() == Some(&'M') {
+                        chars.next(); // 消耗 final byte
+
+                        // 1. 先根据 SGR 参数计算新的样式值
+                        let (new_fg, new_bg, new_bold, new_italic, new_underline) = {
+                            if params.is_empty() || params == "0" {
+                                (7u32, 0u32, false, false, false)
+                            } else {
+                                let mut nfg = fg;
+                                let mut nbg = bg;
+                                let mut nb = bold;
+                                let mut ni = italic;
+                                let mut nu = underline;
+                                for param_str in params.split(';') {
+                                    if param_str.is_empty() {
+                                        continue;
+                                    }
+                                    let param: u16 = match param_str.parse() {
+                                        Ok(v) => v,
+                                        Err(_) => continue,
+                                    };
+                                    match param {
+                                        0 => {
+                                            nfg = 7;
+                                            nbg = 0;
+                                            nb = false;
+                                            ni = false;
+                                            nu = false;
+                                        }
+                                        1 => nb = true,
+                                        3 => ni = true,
+                                        4 => nu = true,
+                                        22 => nb = false,
+                                        23 => ni = false,
+                                        24 => nu = false,
+                                        30..=37 => nfg = (param - 30) as u32,
+                                        38 => {} // 扩展前景色，跳过
+                                        39 => nfg = 7,
+                                        40..=47 => nbg = (param - 40) as u32,
+                                        48 => {} // 扩展背景色，跳过
+                                        49 => nbg = 0,
+                                        90..=97 => nfg = (param - 82) as u32,
+                                        100..=107 => nbg = (param - 92) as u32,
+                                        _ => {}
+                                    }
+                                }
+                                (nfg, nbg, nb, ni, nu)
+                            }
+                        };
+
+                        // 2. 如果样式发生变化，用旧值刷新当前运行
+                        if fg != new_fg
+                            || bg != new_bg
+                            || bold != new_bold
+                            || italic != new_italic
+                            || underline != new_underline
+                        {
+                            flush_run!();
+                            run_start = clean_pos;
+                        }
+
+                        // 3. 应用新样式值
+                        fg = new_fg;
+                        bg = new_bg;
+                        bold = new_bold;
+                        italic = new_italic;
+                        underline = new_underline;
+                    }
+                }
+                continue;
+            }
+
+            // 可见字符
+            let ch_len = ch.len_utf8();
+            run_len += ch_len;
+            clean_pos += ch_len;
+            chars.next();
+        }
+
+        // 刷新最后一个运行
+        flush_run!();
+
+        runs
+    }
+
     /// 记录错误信息到 stderr 和日志文件
     fn log_error(&self, msg: &str) {
         eprintln!("{}", msg);
@@ -2914,6 +3134,9 @@ impl LuaEngine {
         let clean_line = crate::ui::AnsiParser::strip_ansi(line);
         let clean_line = clean_line.trim_end_matches('\r').to_string();
 
+        // 解析样式运行片段（用于 GetStyle API）
+        let style_runs = Self::parse_style_runs(line);
+
         // 维护最近行缓冲区
         {
             let mut state = self.state.borrow_mut();
@@ -2927,7 +3150,7 @@ impl LuaEngine {
         let gbk_line = encoding_rs::GBK.encode(&clean_line).0.into_owned();
 
         // 收集需要触发的
-        let matches: Vec<(usize, String, Vec<String>)> = {
+        let matches: Vec<(usize, String, Vec<String>, Vec<StyleRun>)> = {
             let state = self.state.borrow();
             let mut result = Vec::new();
             for (i, trigger) in state.triggers.iter().enumerate() {
@@ -2966,7 +3189,7 @@ impl LuaEngine {
                                             cow.into_owned()
                                         })
                                         .collect();
-                                    result.push((i, full_match, caps_list));
+                                    result.push((i, full_match, caps_list, style_runs.clone()));
                                 }
                             }
                         } else {
@@ -2985,7 +3208,7 @@ impl LuaEngine {
                                         cow.into_owned()
                                     })
                                     .collect();
-                                result.push((i, full_match, caps_list));
+                                result.push((i, full_match, caps_list, style_runs.clone()));
                             }
                         }
                     }
@@ -3010,7 +3233,7 @@ impl LuaEngine {
                                         .flatten()
                                         .map(|m| m.as_str().to_string())
                                         .collect();
-                                    result.push((i, full_match, caps_list));
+                                    result.push((i, full_match, caps_list, style_runs.clone()));
                                 }
                             }
                         } else {
@@ -3022,7 +3245,7 @@ impl LuaEngine {
                                     .flatten()
                                     .map(|m| m.as_str().to_string())
                                     .collect();
-                                result.push((i, full_match, caps_list));
+                                result.push((i, full_match, caps_list, style_runs.clone()));
                             }
                         }
                     }
@@ -3031,8 +3254,30 @@ impl LuaEngine {
             result
         };
 
+        // 构建 styles Lua 表（所有回调共享同一行数据）
+        let styles_table: mlua::Value = if style_runs.is_empty() {
+            // 没有样式信息，传 nil
+            mlua::Value::Nil
+        } else if let Ok(t) = self.lua.create_table() {
+            for (i, sr) in style_runs.iter().enumerate() {
+                if let Ok(entry) = self.lua.create_table() {
+                    let _ = entry.set("start", sr.start);
+                    let _ = entry.set("length", sr.length);
+                    let _ = entry.set("textcolour", sr.textcolour);
+                    let _ = entry.set("backcolour", sr.backcolour);
+                    let _ = entry.set("bold", sr.bold);
+                    let _ = entry.set("italic", sr.italic);
+                    let _ = entry.set("underline", sr.underline);
+                    let _ = t.set(i + 1, entry);
+                }
+            }
+            mlua::Value::Table(t)
+        } else {
+            mlua::Value::Nil
+        };
+
         // 逐个触发
-        for (idx, full_match, caps_list) in matches {
+        for (idx, full_match, caps_list, _sr) in matches {
             let (callback, send_text, trigger_name) = {
                 let state = self.state.borrow();
                 (
@@ -3041,19 +3286,20 @@ impl LuaEngine {
                     state.triggers[idx].name.clone(),
                 )
             };
-            // MUSHclient 触发器回调签名: function(name, line, wildcards)
+            // MUSHclient 触发器回调签名: function(name, line, wildcards, styles)
             if let Ok(wildcards_table) = self.lua.create_table() {
                 // w[0] = 完整匹配文本（MUSHclient 兼容）
                 let _ = wildcards_table.set(0, full_match.as_str());
                 for (i, m) in caps_list.iter().enumerate() {
                     let _ = wildcards_table.set(i + 1, m.as_str());
                 }
-                // 使用 catch_unwind 防止 Rust panic 跨越 Lua FFI 边界导致静默崩溃
+                // 用 catch_unwind 防止 Rust panic 跨越 Lua FFI 边界导致静默崩溃
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let _ = callback.call::<()>((
                         trigger_name.as_str(),
                         clean_line.as_str(),
                         wildcards_table,
+                        styles_table.clone(),
                     ));
                 }))
                 .is_err()
@@ -8928,6 +9174,243 @@ mod tests {
             // Simulate returns nothing (nil in Lua)
             let result: mlua::Value = eval(engine, r#"return Simulate("anything\n")"#).unwrap();
             assert!(matches!(result, mlua::Value::Nil));
+        });
+    }
+
+    // ================================================================
+    // ANSI 样式解析测试 (parse_style_runs)
+    // ================================================================
+
+    #[test]
+    fn test_parse_style_runs_plain_text() {
+        let runs = LuaEngine::parse_style_runs("hello world");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].start, 0);
+        assert_eq!(runs[0].length, 11);
+        assert_eq!(runs[0].textcolour, 7); // 默认前景色 silver
+        assert_eq!(runs[0].backcolour, 0); // 默认背景色 black
+    }
+
+    #[test]
+    fn test_parse_style_runs_empty() {
+        let runs = LuaEngine::parse_style_runs("");
+        assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn test_parse_style_runs_red_foreground() {
+        let runs = LuaEngine::parse_style_runs("\x1b[31mred text\x1b[0m");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].textcolour, 1); // red
+        assert_eq!(runs[0].start, 0);
+        assert_eq!(runs[0].length, 8);
+    }
+
+    #[test]
+    fn test_parse_style_runs_reset_restores_defaults() {
+        // 红色前景 → reset → 白色文本（reset 后有文本 → 新增运行）
+        let runs = LuaEngine::parse_style_runs("\x1b[31mred\x1b[0mdefault");
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].textcolour, 1); // red
+        assert_eq!(runs[0].length, 3);
+        assert_eq!(runs[1].textcolour, 7); // default
+        assert_eq!(runs[1].length, 7);
+    }
+
+    #[test]
+    fn test_parse_style_runs_bold_and_underline() {
+        let runs = LuaEngine::parse_style_runs("\x1b[1mbold\x1b[0mnormal");
+        assert_eq!(runs.len(), 2);
+        assert!(runs[0].bold);
+        assert!(!runs[0].underline);
+        assert!(!runs[0].italic);
+        assert_eq!(runs[0].length, 4);
+        assert!(!runs[1].bold);
+    }
+
+    #[test]
+    fn test_parse_style_runs_multiple_colors() {
+        // 无 reset 后文本 → 2 个运行
+        let runs = LuaEngine::parse_style_runs("\x1b[33myellow\x1b[32mgreen\x1b[0m");
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].textcolour, 3); // yellow
+        assert_eq!(runs[0].length, 6);
+        assert_eq!(runs[1].textcolour, 2); // green
+        assert_eq!(runs[1].length, 5);
+    }
+
+    #[test]
+    fn test_parse_style_runs_background_color() {
+        let runs = LuaEngine::parse_style_runs("\x1b[41mred bg\x1b[0m");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].backcolour, 1); // red background
+        assert_eq!(runs[0].textcolour, 7);
+    }
+
+    #[test]
+    fn test_parse_style_runs_bright_colors() {
+        let runs = LuaEngine::parse_style_runs("\x1b[91mbright red\x1b[0m");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].textcolour, 9); // bright red (91 - 82 = 9)
+        assert_eq!(runs[0].length, 10);
+    }
+
+    #[test]
+    fn test_parse_style_runs_combined_sgr() {
+        // 多个参数组合 + 无 reset 后文本 → 1 个运行
+        let runs = LuaEngine::parse_style_runs("\x1b[1;31;42mstyled\x1b[0m");
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].bold);
+        assert_eq!(runs[0].textcolour, 1);
+        assert_eq!(runs[0].backcolour, 2);
+        assert_eq!(runs[0].length, 6);
+    }
+
+    #[test]
+    fn test_parse_style_runs_unicode_character_width() {
+        // 中文字符各占 3 字节（UTF-8），reset 后无文本 → 1 个运行
+        let runs = LuaEngine::parse_style_runs("\x1b[31m中文test\x1b[0m");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].length, 10); // 中文=6字节, test=4字节 → 10
+        assert_eq!(runs[0].start, 0);
+    }
+
+    // ================================================================
+    // GetStyle / RGBColourToName API 测试
+    // ================================================================
+
+    #[test]
+    fn test_get_style_basic() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                -- 先触发一个带 ANSI 的行，让引擎解析样式
+                test_styles = nil
+                AddTrigger('style_trig', 'hello', '', 33, 0, 0, '',
+                    'function(n,l,w,s) test_styles = s end', 0, 0)
+            "#).unwrap();
+            engine.process_output("\x1b[31mhello\x1b[0m");
+
+            let styles: mlua::Value = eval(engine, "return test_styles").unwrap();
+            assert!(matches!(styles, mlua::Value::Table(_)), "styles should be a table");
+
+            // 用 GetStyle 按位置查询
+            let result: mlua::Value = eval(engine, "
+                if test_styles then
+                    local s = GetStyle(test_styles, 1)
+                    return s.textcolour
+                end
+                return -1
+            ").unwrap();
+            assert_eq!(result, mlua::Value::Integer(1)); // red
+        });
+    }
+
+    #[test]
+    fn test_get_style_out_of_bounds() {
+        with_engine(|engine| {
+            exec(engine, r#"
+                test_styles = nil
+                AddTrigger('style_ob', 'hello', '', 33, 0, 0, '',
+                    'function(n,l,w,s) test_styles = s end', 0, 0)
+            "#).unwrap();
+            engine.process_output("\x1b[31mhello\x1b[0m");
+
+            // 查询超出范围的位置 → nil
+            let result: mlua::Value = eval(engine, "
+                if test_styles then
+                    return GetStyle(test_styles, 999)
+                end
+                return nil
+            ").unwrap();
+            assert!(matches!(result, mlua::Value::Nil));
+        });
+    }
+
+    #[test]
+    fn test_rgb_colour_to_name() {
+        with_engine(|engine| {
+            let cases = [
+                (0, "black"),
+                (1, "red"),
+                (2, "green"),
+                (3, "yellow"),
+                (4, "blue"),
+                (5, "magenta"),
+                (6, "cyan"),
+                (7, "silver"),
+                (8, "grey"),
+                (9, "bright red"),
+                (10, "bright green"),
+                (11, "bright yellow"),
+                (12, "bright blue"),
+                (13, "bright magenta"),
+                (14, "bright cyan"),
+                (15, "white"),
+            ];
+            for (code, name) in &cases {
+                let result: String =
+                    eval(engine, &format!("return RGBColourToName({})", code)).unwrap();
+                assert_eq!(result, *name, "colour {} should be '{}'", code, name);
+            }
+        });
+    }
+
+    #[test]
+    fn test_rgb_colour_to_name_out_of_range() {
+        with_engine(|engine| {
+            // 超出 0-15 范围的色号 → 返回 "colour_N"
+            let result: String = eval(engine, "return RGBColourToName(42)").unwrap();
+            assert_eq!(result, "colour_42");
+            let result: String = eval(engine, "return RGBColourToName(255)").unwrap();
+            assert_eq!(result, "colour_255");
+        });
+    }
+
+    #[test]
+    fn test_styles_passed_as_fourth_parameter() {
+        with_engine(|engine| {
+            // 验证 styles 确实作为第 4 个参数传入
+            exec(engine, r#"
+                style_count = nil
+                AddTrigger('style4', 'hello', '', 33, 0, 0, '',
+                    'function(n,l,w,s) style_count = s and #s or -1 end', 0, 0)
+            "#).unwrap();
+            engine.process_output("\x1b[32mhello\x1b[0m");
+
+            let count: i64 = eval(engine, "return style_count").unwrap();
+            assert!(count > 0, "styles should be non-nil for ANSI text, got count={}", count);
+        });
+    }
+
+    #[test]
+    fn test_no_styles_for_plain_text() {
+        with_engine(|engine| {
+            // 无 ANSI 的行 → styles 为包含 1 个默认运行的表
+            exec(engine, r#"
+                style_count = -1
+                AddTrigger('plain', 'hello', '', 33, 0, 0, '',
+                    'function(n,l,w,s) style_count = s and #s or -1 end', 0, 0)
+            "#).unwrap();
+            engine.process_output("hello world");
+
+            let count: i64 = eval(engine, "return style_count").unwrap();
+            assert_eq!(count, 1, "plain text should have 1 default style run, got {}", count);
+        });
+    }
+
+    #[test]
+    fn test_simulate_passes_nil_styles() {
+        with_engine(|engine| {
+            // Simulate 传 nil 作为第 4 参数
+            exec(engine, r#"
+                sim_style = 'unknown'
+                AddTrigger('sim_style_trig', 'hello', '', 33, 0, 0, '',
+                    'function(n,l,w,s) sim_style = (s == nil) and "nil" or "table" end', 0, 0)
+            "#).unwrap();
+            exec(engine, r#"Simulate("hello\n")"#).unwrap();
+
+            let result: String = eval(engine, "return sim_style").unwrap();
+            assert_eq!(result, "nil", "Simulate should pass nil as styles");
         });
     }
 }
