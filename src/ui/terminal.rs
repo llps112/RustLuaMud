@@ -91,22 +91,22 @@ fn build_status_bar(
     let mut regions = Vec::new();
     for (i, info) in sessions.iter().enumerate() {
         let state_icon = match info.state {
-            SessionState::Connected => "\x1b[32m●\x1b[0m",
-            SessionState::Disconnected => "\x1b[90m○\x1b[0m",
-            SessionState::Connecting => "\x1b[33m◎\x1b[0m",
-            SessionState::Reconnecting => "\x1b[35m⟳\x1b[0m",
+            SessionState::Connected => "\x1b[32m●",
+            SessionState::Disconnected => "\x1b[90m○",
+            SessionState::Connecting => "\x1b[33m◎",
+            SessionState::Reconnecting => "\x1b[35m⟳",
         };
         // 记录当前 x 位置（不包括 ANSI 码的可见宽度）
         let start_x = visible_width(&bar) as u16;
         if i == foreground_id {
             bar.push_str(&format!(
-                "\x1b[1;37;44m[{}]{} \x1b[0m{} ",
+                "\x1b[1;37;44m[{}]{} {}\x1b[0m ",
                 i + 1,
                 info.name,
                 state_icon
             ));
         } else {
-            bar.push_str(&format!("[{}]{}\x1b[0m{} ", i + 1, info.name, state_icon));
+            bar.push_str(&format!("[{}]{} {}\x1b[0m ", i + 1, info.name, state_icon));
         }
         let end_x = visible_width(&bar) as u16;
         regions.push(ClickRegion {
