@@ -303,20 +303,17 @@ mod tests {
         let logger = Logger::new(dir.path().to_str().unwrap(), 10, 1);
 
         // session_a 有 3 个旧文件（不同时间）
-         let a_names = [
-             "session_a_250624_10.log",
-             "session_a_250625_11.log",
-             "session_a_250626_12.log",
-         ];
-         for name in &a_names {
-             let path = dir.path().join(name);
-             fs::write(&path, "dummy").unwrap();
-         }
-         // session_b 有 2 个旧文件
-         let b_names = [
-             "session_b_250625_10.log",
-             "session_b_250626_11.log",
-         ];
+        let a_names = [
+            "session_a_250624_10.log",
+            "session_a_250625_11.log",
+            "session_a_250626_12.log",
+        ];
+        for name in &a_names {
+            let path = dir.path().join(name);
+            fs::write(&path, "dummy").unwrap();
+        }
+        // session_b 有 2 个旧文件
+        let b_names = ["session_b_250625_10.log", "session_b_250626_11.log"];
         for name in &b_names {
             let path = dir.path().join(name);
             fs::write(&path, "dummy").unwrap();
