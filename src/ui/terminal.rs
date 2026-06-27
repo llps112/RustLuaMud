@@ -100,7 +100,7 @@ fn build_status_bar(
         let start_x = visible_width(&bar) as u16;
         if i == foreground_id {
             bar.push_str(&format!(
-                "\x1b[33m[{}]{}\x1b[0m{} ",
+                "\x1b[1;37;44m[{}]{} \x1b[0m{} ",
                 i + 1,
                 info.name,
                 state_icon
@@ -1510,8 +1510,8 @@ mod tests {
             status_text: String::new(),
         }];
         let (bar, _regions) = build_status_bar(&sessions, 0, 80);
-        // Foreground should have yellow highlight
-        assert!(bar.contains("\x1b[33m[1]"));
+        // Foreground should have bold+white-on-blue highlight
+        assert!(bar.contains("\x1b[1;37;44m[1]"));
     }
 
     #[test]
