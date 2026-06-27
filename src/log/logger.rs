@@ -61,11 +61,15 @@ impl Logger {
         }
     }
 
-    /// 获取当前小时对应的日志文件路径
-    /// 格式: `<session>_<HH>.log`，例如 `mud_14.log`，每小时滚动
+    /// 获取当前时间后缀，格式: YYMMDD_HH，例如 250626_14
+    fn timestamp_suffix() -> String {
+        Local::now().format("%y%m%d_%H").to_string()
+    }
+
+    /// 获取当前时间对应的日志文件路径
+    /// 格式: `<session>_<YYMMDD_HH>.log`，例如 `mud_250626_14.log`，每小时滚动
     fn log_path(&self, session_name: &str) -> PathBuf {
-        let hour = Local::now().format("%H");
-        let filename = format!("{}_{}.log", session_name, hour);
+        let filename = format!("{}_{}.log", session_name, Self::timestamp_suffix());
         self.log_dir.join(filename)
     }
 
@@ -146,8 +150,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn hour() -> String {
-        Local::now().format("%H").to_string()
+    fn ts() -> String {
+        Local::now().format("%y%m%d_%H").to_string()
     }
 
     #[test]
@@ -164,7 +168,7 @@ mod tests {
         let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
         logger.log("session1", "hello world");
 
-        let log_file = dir.path().join(format!("session1_{}.log", hour()));
+        let log_file = dir.path().join(format!("session1_{}.log", ts()));
         assert!(log_file.exists());
 
         let content = fs::read_to_string(&log_file).unwrap();
@@ -178,7 +182,7 @@ mod tests {
         logger.log("sess", "line1");
         logger.log("sess", "line2");
 
-        let log_file = dir.path().join(format!("sess_{}.log", hour()));
+        let log_file = dir.path().join(format!("sess_{}.log", ts()));
         let content = fs::read_to_string(&log_file).unwrap();
         assert!(content.contains("line1"));
         assert!(content.contains("line2"));
@@ -190,7 +194,7 @@ mod tests {
         let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
         logger.log("sess", "hello   ");
 
-        let log_file = dir.path().join(format!("sess_{}.log", hour()));
+        let log_file = dir.path().join(format!("sess_{}.log", ts()));
         let content = fs::read_to_string(&log_file).unwrap();
         // 行尾空白被trim，但换行符由writeln添加
         assert!(content.contains("hello\n"));
@@ -203,7 +207,7 @@ mod tests {
         let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
         logger.log("sess", "test");
 
-        let log_file = dir.path().join(format!("sess_{}.log", hour()));
+        let log_file = dir.path().join(format!("sess_{}.log", ts()));
         let content = fs::read_to_string(&log_file).unwrap();
         // 时间戳格式 [HH:MM:SS.mmm]
         let re = regex::Regex::new(r"\[\d{2}:\d{2}:\d{2}\.\d{3}\]").unwrap();
@@ -217,8 +221,8 @@ mod tests {
         logger.log("session_a", "msg_a");
         logger.log("session_b", "msg_b");
 
-        let file_a = dir.path().join(format!("session_a_{}.log", hour()));
-        let file_b = dir.path().join(format!("session_b_{}.log", hour()));
+        let file_a = dir.path().join(format!("session_a_{}.log", ts()));
+        let file_b = dir.path().join(format!("session_b_{}.log", ts()));
 
         assert!(file_a.exists());
         assert!(file_b.exists());
@@ -231,7 +235,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
         logger.log("session", "");
-        let file = dir.path().join(format!("session_{}.log", hour()));
+        let file = dir.path().join(format!("session_{}.log", ts()));
         assert!(file.exists());
     }
 
@@ -240,7 +244,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
         logger.log("session", "你好世界 🌍");
-        let file = dir.path().join(format!("session_{}.log", hour()));
+        let file = dir.path().join(format!("session_{}.log", ts()));
         let content = fs::read_to_string(&file).unwrap();
         assert!(content.contains("你好世界 🌍"));
     }
@@ -253,7 +257,7 @@ mod tests {
         logger.log(&long_name, "msg");
         let file = dir
             .path()
-            .join(format!("a{}_{}.log", "a".repeat(199), hour()));
+            .join(format!("a{}_{}.log", "a".repeat(199), ts()));
         assert!(file.exists());
     }
 
@@ -263,13 +267,13 @@ mod tests {
         // max_files = 3，保留最近 3 个
         let logger = Logger::new(dir.path().to_str().unwrap(), 10, 3);
 
-        // 创建 5 个旧文件模拟不同小时
+        // 创建 5 个旧文件模拟不同时间（过去日期 + 不同小时，确保按文件名排序正确）
         let names = [
-            "sess_10.log",
-            "sess_11.log",
-            "sess_12.log",
-            "sess_13.log",
-            "sess_14.log",
+            "sess_250625_10.log",
+            "sess_250625_11.log",
+            "sess_250625_12.log",
+            "sess_250626_13.log",
+            "sess_250626_14.log",
         ];
         for name in &names {
             let path = dir.path().join(name);
@@ -279,7 +283,7 @@ mod tests {
         // 写入当前小时，触发 cleanup
         logger.log("sess", "current");
 
-        // 只应保留 3 个文件，最早的两个（10, 11）应被删除
+        // 只应保留 3 个文件，最早的两个（250625_10, 250625_11）应被删除
         let remaining: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
@@ -288,9 +292,9 @@ mod tests {
             .collect();
 
         assert_eq!(remaining.len(), 3);
-        // 直接验证 sess_10.log 和 sess_11.log 已被删除（不依赖当前小时，避免 flaky）
-        assert!(!dir.path().join("sess_10.log").exists());
-        assert!(!dir.path().join("sess_11.log").exists());
+        // 直接验证最早的两个文件已被删除（不依赖当前时间，避免 flaky）
+        assert!(!dir.path().join("sess_250625_10.log").exists());
+        assert!(!dir.path().join("sess_250625_11.log").exists());
     }
 
     #[test]
@@ -298,21 +302,30 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let logger = Logger::new(dir.path().to_str().unwrap(), 10, 1);
 
-        // session_a 有 3 个旧文件
-        for h in 10..=12 {
-            let path = dir.path().join(format!("session_a_{}.log", h));
-            fs::write(&path, "dummy").unwrap();
-        }
-        // session_b 有 2 个旧文件
-        for h in 10..=11 {
-            let path = dir.path().join(format!("session_b_{}.log", h));
+        // session_a 有 3 个旧文件（不同时间）
+         let a_names = [
+             "session_a_250624_10.log",
+             "session_a_250625_11.log",
+             "session_a_250626_12.log",
+         ];
+         for name in &a_names {
+             let path = dir.path().join(name);
+             fs::write(&path, "dummy").unwrap();
+         }
+         // session_b 有 2 个旧文件
+         let b_names = [
+             "session_b_250625_10.log",
+             "session_b_250626_11.log",
+         ];
+        for name in &b_names {
+            let path = dir.path().join(name);
             fs::write(&path, "dummy").unwrap();
         }
 
         // 写 session_a 触发其 cleanup
         logger.log("session_a", "current");
 
-        // session_a 只保留 1 个（当前小时）
+        // session_a 只保留 1 个（当前时间）
         let a_count = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
@@ -335,7 +348,7 @@ mod tests {
         let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
         // 首次写入，没有旧文件，不应报错
         logger.log("sess", "first line");
-        let log_file = dir.path().join(format!("sess_{}.log", hour()));
+        let log_file = dir.path().join(format!("sess_{}.log", ts()));
         assert!(log_file.exists());
     }
 }
