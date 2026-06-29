@@ -9681,7 +9681,11 @@ mod tests {
 
             engine.process_input("world"); // 应匹配新模式
             let m: Option<String> = eval(engine, "return last_match").unwrap();
-            assert_eq!(m, Some("world".to_string()), "new alias pattern should match");
+            assert_eq!(
+                m,
+                Some("world".to_string()),
+                "new alias pattern should match"
+            );
         });
     }
 
@@ -9846,8 +9850,7 @@ mod tests {
     fn test_addtimer_missing_arguments() {
         with_engine(|engine| {
             // 少于 6 个参数应报错
-            let result: mlua::Result<()> =
-                exec(engine, "AddTimer('name', 0, 0, 5, 'resp')");
+            let result: mlua::Result<()> = exec(engine, "AddTimer('name', 0, 0, 5, 'resp')");
             assert!(result.is_err(), "AddTimer with 5 args should error");
         });
     }
