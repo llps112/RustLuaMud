@@ -1508,6 +1508,12 @@ impl LuaEngine {
                 String::new()
             };
             let is_regex = (flags & 32) != 0;
+            let do_replace = (flags & 1024) != 0;
+
+            // Replace flag (1024): 先删除同名 alias
+            if do_replace {
+                state_rc15.borrow_mut().aliases.retain(|a| a.name != name);
+            }
 
             let re_str = if is_regex {
                 convert_pcre_to_rust_regex(&match_str)
@@ -3869,6 +3875,7 @@ fn add_trigger_impl(
 ) -> LuaResult<Value> {
     let case_insensitive = (flags & 16) != 0;
     let is_regex = (flags & 32) != 0;
+    let do_replace = (flags & 1024) != 0;
 
     let re_str = if is_regex {
         // 正则模式：先做 PCRE 兼容转换
@@ -3921,7 +3928,7 @@ fn add_trigger_impl(
         }
     };
 
-    state_rc.borrow_mut().triggers.push(Trigger {
+    let new_trigger = Trigger {
         name: name.to_string(),
         pattern: trigger_pattern,
         callback,
@@ -3933,7 +3940,18 @@ fn add_trigger_impl(
         omit_from_output: false,
         temporary: (flags & 4096) != 0,
         send_text: String::new(),
-    });
+    };
+
+    let mut state = state_rc.borrow_mut();
+    if do_replace {
+        if let Some(pos) = state.triggers.iter().position(|t| t.name == name) {
+            state.triggers[pos] = new_trigger;
+        } else {
+            state.triggers.push(new_trigger);
+        }
+    } else {
+        state.triggers.push(new_trigger);
+    }
 
     Ok(Value::Integer(0))
 }
@@ -9451,6 +9469,386 @@ mod tests {
 
             let result: String = eval(engine, "return sim_style").unwrap();
             assert_eq!(result, "nil", "Simulate should pass nil as styles");
+        });
+    }
+
+    // ================================================================
+    // AddTrigger / AddTriggerEx Replace 标志测试
+    // ================================================================
+
+    #[test]
+    fn test_trigger_replace_flag() {
+        with_engine(|engine| {
+            exec(engine, "counter = 0").unwrap();
+
+            // 用 Replace 标志创建第一个 trigger
+            exec(
+                engine,
+                "AddTrigger('rep_trig', 'hello', '', 1 + 1024 + 32, 0, 0, '', 'function() counter = counter + 1 end', 0, 0)",
+            )
+            .unwrap();
+            engine.process_output("hello");
+            let c: i64 = eval(engine, "return counter").unwrap();
+            assert_eq!(c, 1, "first trigger should fire once");
+
+            // 用 Replace 标志创建同名 trigger（应替换，不应追加）
+            exec(
+                engine,
+                "AddTrigger('rep_trig', 'hello', '', 1 + 1024 + 32, 0, 0, '', 'function() counter = counter + 10 end', 0, 0)",
+            )
+            .unwrap();
+
+            // 验证只有一个 trigger
+            let count: i64 = eval(engine, "return #GetTriggerList()").unwrap();
+            assert_eq!(count, 1);
+
+            // 重置计数器并触发
+            exec(engine, "counter = 0").unwrap();
+            engine.process_output("hello");
+            let c: i64 = eval(engine, "return counter").unwrap();
+            // 应为 10（新 trigger 触发一次），而不是 11（新旧各一次）
+            assert_eq!(c, 10, "replaced trigger should fire only new callback");
+        });
+    }
+
+    #[test]
+    fn test_trigger_replace_multiple_calls() {
+        with_engine(|engine| {
+            exec(engine, "counter = 0").unwrap();
+
+            // 连续多次 Replace
+            for i in 1..=5 {
+                let code = format!(
+                    "AddTrigger('multi_rep', 'hello', '', 1 + 1024 + 32, 0, 0, '', 'function() counter = counter + {} end', 0, 0)",
+                    i
+                );
+                exec(engine, &code).unwrap();
+            }
+
+            // 验证始终只有一个 trigger
+            let count: i64 = eval(engine, "return #GetTriggerList()").unwrap();
+            assert_eq!(count, 1);
+
+            exec(engine, "counter = 0").unwrap();
+            engine.process_output("hello");
+            let c: i64 = eval(engine, "return counter").unwrap();
+            // 应为 5（最后一次 Replace 的 callback）
+            assert_eq!(c, 5, "after 5 replaces, only the last callback should fire");
+        });
+    }
+
+    #[test]
+    fn test_trigger_replace_changes_pattern() {
+        with_engine(|engine| {
+            exec(engine, "last_match = nil").unwrap();
+
+            // 创建匹配 "hello" 的 trigger
+            exec(
+                engine,
+                "AddTrigger('pat_trig', 'hello', '', 1 + 1024 + 32, 0, 0, '', 'function() last_match = \"hello\" end', 0, 0)",
+            )
+            .unwrap();
+            engine.process_output("hello");
+            let m: Option<String> = eval(engine, "return last_match").unwrap();
+            assert_eq!(m, Some("hello".to_string()));
+
+            // Replace 为匹配 "world" 的 trigger
+            exec(
+                engine,
+                "AddTrigger('pat_trig', 'world', '', 1 + 1024 + 32, 0, 0, '', 'function() last_match = \"world\" end', 0, 0)",
+            )
+            .unwrap();
+            exec(engine, "last_match = nil").unwrap();
+            engine.process_output("hello"); // 不应匹配
+            let m: Option<String> = eval(engine, "return last_match").unwrap();
+            assert_eq!(m, None, "old pattern should no longer match");
+
+            engine.process_output("world"); // 应匹配新模式
+            let m: Option<String> = eval(engine, "return last_match").unwrap();
+            assert_eq!(m, Some("world".to_string()), "new pattern should match");
+        });
+    }
+
+    #[test]
+    fn test_trigger_without_replace_accumulates() {
+        with_engine(|engine| {
+            exec(engine, "counter = 0").unwrap();
+
+            // 不加 Replace 标志创建同名 trigger——会追加
+            for _ in 1..=3 {
+                exec(
+                    engine,
+                    "AddTrigger('acc_trig', 'hello', '', 1 + 32, 0, 0, '', 'function() counter = counter + 1 end', 0, 0)",
+                )
+                .unwrap();
+            }
+
+            engine.process_output("hello");
+            let c: i64 = eval(engine, "return counter").unwrap();
+            // 3 个同样的 trigger，各触发一次
+            assert_eq!(c, 3, "without Replace, duplicates accumulate");
+        });
+    }
+
+    // ================================================================
+    // AddAlias Replace 标志测试
+    // ================================================================
+
+    #[test]
+    fn test_alias_replace_flag() {
+        with_engine(|engine| {
+            exec(engine, "counter = 0").unwrap();
+
+            // 用 Replace 标志创建第一个 alias
+            exec(
+                engine,
+                "AddAlias('rep_alias', 'hello', '', 1 + 1024 + 32, 'function() counter = counter + 1 end')",
+            )
+            .unwrap();
+
+            // 匹配 alias
+            engine.process_input("hello");
+            let c: i64 = eval(engine, "return counter").unwrap();
+            assert_eq!(c, 1, "first alias should fire once");
+
+            // 用 Replace 标志创建同名 alias（应替换）
+            exec(
+                engine,
+                "AddAlias('rep_alias', 'hello', '', 1 + 1024 + 32, 'function() counter = counter + 10 end')",
+            )
+            .unwrap();
+
+            // 验证只有一个 alias
+            let count: i64 = eval(engine, "return #GetAliasList()").unwrap();
+            assert_eq!(count, 1, "Replace should leave only one alias");
+
+            exec(engine, "counter = 0").unwrap();
+            engine.process_input("hello");
+            let c: i64 = eval(engine, "return counter").unwrap();
+            assert_eq!(c, 10, "replaced alias should fire only new callback");
+        });
+    }
+
+    #[test]
+    fn test_alias_replace_multiple_calls() {
+        with_engine(|engine| {
+            exec(engine, "counter = 0").unwrap();
+
+            // 连续多次 Replace，最后一次应生效
+            for i in 1..=5 {
+                let code = format!(
+                    "AddAlias('multi_alias', 'hello', '', 1 + 1024 + 32, 'function() counter = counter + {} end')",
+                    i
+                );
+                exec(engine, &code).unwrap();
+            }
+
+            let count: i64 = eval(engine, "return #GetAliasList()").unwrap();
+            assert_eq!(count, 1);
+
+            exec(engine, "counter = 0").unwrap();
+            engine.process_input("hello");
+            let c: i64 = eval(engine, "return counter").unwrap();
+            assert_eq!(c, 5, "after 5 replaces, only last alias callback fires");
+        });
+    }
+
+    #[test]
+    fn test_alias_replace_changes_pattern() {
+        with_engine(|engine| {
+            exec(engine, "last_match = nil").unwrap();
+
+            // 创建匹配 "hello" 的 alias
+            exec(
+                engine,
+                "AddAlias('pat_alias', 'hello', '', 1 + 1024 + 32, 'function() last_match = \"hello\" end')",
+            )
+            .unwrap();
+            engine.process_input("hello");
+            let m: Option<String> = eval(engine, "return last_match").unwrap();
+            assert_eq!(m, Some("hello".to_string()));
+
+            // Replace 为匹配 "world" 的 alias
+            exec(
+                engine,
+                "AddAlias('pat_alias', 'world', '', 1 + 1024 + 32, 'function() last_match = \"world\" end')",
+            )
+            .unwrap();
+            exec(engine, "last_match = nil").unwrap();
+            engine.process_input("hello"); // 不应匹配
+            let m: Option<String> = eval(engine, "return last_match").unwrap();
+            assert_eq!(m, None, "old alias pattern should no longer match");
+
+            engine.process_input("world"); // 应匹配新模式
+            let m: Option<String> = eval(engine, "return last_match").unwrap();
+            assert_eq!(m, Some("world".to_string()), "new alias pattern should match");
+        });
+    }
+
+    #[test]
+    fn test_alias_without_replace_accumulates() {
+        with_engine(|engine| {
+            exec(engine, "counter = 0").unwrap();
+
+            // 不加 Replace 标志，同名 alias 会累积
+            for _ in 1..=3 {
+                exec(
+                    engine,
+                    "AddAlias('acc_alias', 'hello', '', 1 + 32, 'function() counter = counter + 1 end')",
+                )
+                .unwrap();
+            }
+
+            engine.process_input("hello");
+            let c: i64 = eval(engine, "return counter").unwrap();
+            assert_eq!(c, 3, "without Replace, aliases accumulate");
+        });
+    }
+
+    // ================================================================
+    // AddTimer Replace 标志补充测试
+    // ================================================================
+
+    #[test]
+    fn test_timer_replace_multiple_times() {
+        with_engine(|engine| {
+            exec(engine, "counter = 0").unwrap();
+
+            // 多次 replace 后，最后一次应生效
+            for i in 1..=5 {
+                let code = format!(
+                    "AddTimer('multi_t', 0, 0, 1, '', 1 + 1024, 'counter = counter + {}')",
+                    i
+                );
+                exec(engine, &code).unwrap();
+            }
+
+            let count: i64 = eval(engine, "return #GetTimerList()").unwrap();
+            assert_eq!(count, 1);
+
+            exec(engine, "counter = 0").unwrap();
+            engine.fire_timer(0);
+            let c: i64 = eval(engine, "return counter").unwrap();
+            assert_eq!(c, 5, "after 5 replaces, only last timer callback fires");
+        });
+    }
+
+    #[test]
+    fn test_timer_replace_without_replace_accumulates() {
+        with_engine(|engine| {
+            exec(engine, "counter = 0").unwrap();
+
+            // 不加 Replace 标志，同名 timer 会累积
+            for _ in 1..=3 {
+                exec(
+                    engine,
+                    "AddTimer('acc_t', 0, 0, 1, '', 1, 'counter = counter + 1')",
+                )
+                .unwrap();
+            }
+
+            let count: i64 = eval(engine, "return #GetTimerList()").unwrap();
+            assert_eq!(count, 3);
+
+            // 触发所有 timer
+            for i in 0..3 {
+                engine.fire_timer(i);
+            }
+            let c: i64 = eval(engine, "return counter").unwrap();
+            assert_eq!(c, 3, "without Replace, timers accumulate");
+        });
+    }
+
+    #[test]
+    fn test_timer_replace_preserves_disabled_after_enable_group() {
+        with_engine(|engine| {
+            exec(engine, "counter = 0").unwrap();
+
+            // 创建 timer 并设置 group
+            exec(
+                engine,
+                "AddTimer('grp_t', 0, 0, 1, '', 1 + 1024, 'counter = counter + 1')",
+            )
+            .unwrap();
+            exec(engine, "SetTimerOption('grp_t', 'group', 'test_grp')").unwrap();
+            // 禁用 group
+            exec(engine, "EnableTimerGroup('test_grp', false)").unwrap();
+
+            // Replace 后应继承禁用状态
+            exec(
+                engine,
+                "AddTimer('grp_t', 0, 0, 1, '', 1 + 1024, 'counter = counter + 10')",
+            )
+            .unwrap();
+            exec(engine, "SetTimerOption('grp_t', 'group', 'test_grp')").unwrap();
+
+            // 再次启用 group
+            exec(engine, "EnableTimerGroup('test_grp', true)").unwrap();
+
+            engine.fire_timer(0);
+            let c: i64 = eval(engine, "return counter").unwrap();
+            assert_eq!(c, 10, "timer should fire after group re-enabled");
+        });
+    }
+
+    #[test]
+    fn test_timer_replace_name_not_found() {
+        with_engine(|engine| {
+            exec(engine, "counter = 0").unwrap();
+
+            // Replace 一个不存在的 timer——应像 AddTimer 一样创建
+            exec(
+                engine,
+                "AddTimer('new_t', 0, 0, 1, '', 1 + 1024, 'counter = counter + 1')",
+            )
+            .unwrap();
+
+            let count: i64 = eval(engine, "return #GetTimerList()").unwrap();
+            assert_eq!(count, 1);
+
+            engine.fire_timer(0);
+            let c: i64 = eval(engine, "return counter").unwrap();
+            assert_eq!(c, 1);
+        });
+    }
+
+    // ================================================================
+    // AddAlias 参数错误处理
+    // ================================================================
+
+    #[test]
+    fn test_addalias_missing_arguments() {
+        with_engine(|engine| {
+            // 少于 4 个参数应报错
+            let result: mlua::Result<()> = exec(engine, "AddAlias('name', 'match', 'resp')");
+            assert!(result.is_err(), "AddAlias with 3 args should error");
+        });
+    }
+
+    // ================================================================
+    // AddTriggerEx 参数错误处理
+    // ================================================================
+
+    #[test]
+    fn test_addtriggerex_missing_arguments() {
+        with_engine(|engine| {
+            // 少于 4 个参数应报错
+            let result: mlua::Result<()> = exec(engine, "AddTriggerEx('name', 'match', 'resp')");
+            assert!(result.is_err(), "AddTriggerEx with 3 args should error");
+        });
+    }
+
+    // ================================================================
+    // AddTimer 参数错误处理
+    // ================================================================
+
+    #[test]
+    fn test_addtimer_missing_arguments() {
+        with_engine(|engine| {
+            // 少于 6 个参数应报错
+            let result: mlua::Result<()> =
+                exec(engine, "AddTimer('name', 0, 0, 5, 'resp')");
+            assert!(result.is_err(), "AddTimer with 5 args should error");
         });
     }
 }
