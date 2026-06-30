@@ -1020,12 +1020,23 @@ impl LuaEngine {
                         }
                         // 使用 catch_unwind 防止 Rust panic 跨越 Lua FFI 边界导致静默崩溃
                         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let _ = callback.call::<()>((
+                            if let Err(e) = callback.call::<()>((
                                 trigger_name.as_str(),
                                 clean_line.as_str(),
                                 wildcards_table,
                                 mlua::Value::Nil,
-                            ));
+                            )) {
+                                eprintln!(
+                                    "[Lua] Simulate 触发器 '{}' 回调中发生 Lua 错误: {}",
+                                    trigger_name, e
+                                );
+                                if let Ok(mut sim_state) = state_rc_sim.try_borrow_mut() {
+                                    sim_state.pending_logs.push(format!(
+                                        "[Lua] Simulate 触发器 '{}' 回调中发生 Lua 错误: {}",
+                                        trigger_name, e
+                                    ));
+                                }
+                            }
                         }))
                         .is_err()
                         {
@@ -3274,6 +3285,11 @@ impl LuaEngine {
                     let _ = entry.set("bold", sr.bold);
                     let _ = entry.set("italic", sr.italic);
                     let _ = entry.set("underline", sr.underline);
+                    // text 字段：MUSHclient 兼容，表示该样式区间的文本内容
+                    if sr.start < clean_line.len() {
+                        let end = std::cmp::min(sr.start + sr.length, clean_line.len());
+                        let _ = entry.set("text", &clean_line[sr.start..end]);
+                    }
                     let _ = t.set(i + 1, entry);
                 }
             }
@@ -3301,12 +3317,17 @@ impl LuaEngine {
                 }
                 // 用 catch_unwind 防止 Rust panic 跨越 Lua FFI 边界导致静默崩溃
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _ = callback.call::<()>((
+                    if let Err(e) = callback.call::<()>((
                         trigger_name.as_str(),
                         clean_line.as_str(),
                         wildcards_table,
                         styles_table.clone(),
-                    ));
+                    )) {
+                        self.log_error(&format!(
+                            "[Lua] 触发器 '{}' 回调中发生 Lua 错误: {}",
+                            trigger_name, e
+                        ));
+                    }
                 }))
                 .is_err()
                 {
@@ -3398,7 +3419,12 @@ impl LuaEngine {
                     // 使用 catch_unwind 防止 Rust panic 跨越 Lua FFI 边界导致静默崩溃
                     let name_for_err = alias_name.clone();
                     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let _ = callback.call::<()>((alias_name, input.to_string(), wildcards));
+                        if let Err(e) = callback.call::<()>((alias_name, input.to_string(), wildcards)) {
+                            self.log_error(&format!(
+                                "[Lua] 别名 '{}' 回调中发生 Lua 错误: {}",
+                                name_for_err, e
+                            ));
+                        }
                     }))
                     .is_err()
                     {
@@ -9852,6 +9878,303 @@ mod tests {
             // 少于 6 个参数应报错
             let result: mlua::Result<()> = exec(engine, "AddTimer('name', 0, 0, 5, 'resp')");
             assert!(result.is_err(), "AddTimer with 5 args should error");
+        });
+    }
+
+    // ================================================================
+    // GetStyle + capture group w[1] 综合测试
+    // ================================================================
+
+    /// 模拟 always_daytime.dosomething1 的颜色过滤场景：
+    /// trigger 捕获组 w[1] → string.find(l, w[1]) → GetStyle → RGBColourToName
+    #[test]
+    fn test_get_style_with_capture_group() {
+        with_engine(|engine| {
+            exec(engine, "test_colour = -1; test_back = -1; test_w1 = ''").unwrap();
+            exec(
+                engine,
+                "AddTrigger('cap_style', '(hello|world)', '', 41, 0, 0, '', \
+                 'function(n,l,w,s) \
+                    test_w1 = w[1] \
+                    local col = string.find(l, w[1]) \
+                    if col then \
+                        local st = GetStyle(s, col) \
+                        if st then test_colour = st.textcolour; test_back = st.backcolour end \
+                    end \
+                 end', 0, 0)",
+            )
+            .unwrap();
+
+            // 模拟带 ANSI 颜色的服务器文本（cyan = 6）
+            engine.process_output("\x1b[36mhello\x1b[0m");
+
+            let w1: String = eval(engine, "return test_w1").unwrap();
+            assert_eq!(w1, "hello", "w[1] should be the captured text");
+
+            let colour: i64 = eval(engine, "return test_colour").unwrap();
+            assert_eq!(colour, 6, "cyan text should have colour code 6");
+
+            let back: i64 = eval(engine, "return test_back").unwrap();
+            assert_eq!(back, 0, "default background is 0");
+
+            // RGBColourToName 验证
+            let name: String = eval(engine, "return RGBColourToName(6)").unwrap();
+            assert_eq!(name, "cyan", "colour 6 should be cyan");
+        });
+    }
+
+    #[test]
+    fn test_get_style_silver_filter_scenario() {
+        with_engine(|engine| {
+            exec(engine, "silver_detected = false").unwrap();
+            exec(
+                engine,
+                "AddTrigger('silver_test', '(command)', '', 41, 0, 0, '', \
+                 'function(n,l,w,s) \
+                    local col = string.find(l, w[1]) \
+                    if col then \
+                        local st = GetStyle(s, col) \
+                        if st then \
+                            local c = RGBColourToName(st.textcolour) \
+                            if c == \"silver\" and st.backcolour == 0 then silver_detected = true end \
+                        end \
+                    end \
+                 end', 0, 0)",
+            )
+            .unwrap();
+
+            // 模拟命令回显（无 ANSI，默认样式 silver=7, back=0）
+            engine.process_output("command");
+
+            let detected: bool = eval(engine, "return silver_detected").unwrap();
+            assert!(detected, "plain text should have silver colour on back=0");
+        });
+    }
+
+    #[test]
+    fn test_get_style_colourful_daytime_text() {
+        with_engine(|engine| {
+            exec(engine, "extracted_colour = -1; extracted_bg = -1; found_pos = -1").unwrap();
+            exec(
+                engine,
+                "AddTrigger('daytime_cap', \
+                 '(太阳从东方的地平线升起了|东方的天空中开始出现一丝微曦|夜晚降临了)', \
+                 '', 41, 0, 0, '', \
+                 'function(n,l,w,s) \
+                    local col = string.find(l, w[1]) \
+                    found_pos = col or -1 \
+                    if col then \
+                        local st = GetStyle(s, col) \
+                        if st then extracted_colour = st.textcolour; extracted_bg = st.backcolour end \
+                    end \
+                 end', 0, 0)",
+            )
+            .unwrap();
+
+            // 模拟 "东方的天空中开始出现一丝微曦"（cyan = 6）
+            engine
+                .process_output("\x1b[1;36m东方的天空中开始出现一丝微曦\x1b[37;0m");
+
+            let pos: i64 = eval(engine, "return found_pos").unwrap();
+            assert!(pos > 0, "w[1] should be found in clean_line");
+
+            let colour: i64 = eval(engine, "return extracted_colour").unwrap();
+            assert_eq!(colour, 6, "cyan ANSI (36) should map to colour 6");
+
+            let name: String =
+                eval(engine, "return RGBColourToName(extracted_colour)").unwrap();
+            assert_ne!(name, "silver", "daytime text should NOT be silver");
+
+            // RGBColourToName 验证标准色
+            let cyan_name: String =
+                eval(engine, "return RGBColourToName(extracted_colour)").unwrap();
+            assert_eq!(cyan_name, "cyan");
+        });
+    }
+
+    #[test]
+    fn test_get_style_colourful_daytime_text_yellow() {
+        with_engine(|engine| {
+            exec(engine, "y_colour = -1; y_bg = -1").unwrap();
+            exec(
+                engine,
+                "AddTrigger('daytime_yellow', \
+                 '(太阳从东方的地平线升起了|东方的天空中开始出现一丝微曦)', \
+                 '', 41, 0, 0, '', \
+                 'function(n,l,w,s) \
+                    local col = string.find(l, w[1]) \
+                    if col then \
+                        local st = GetStyle(s, col) \
+                        if st then y_colour = st.textcolour; y_bg = st.backcolour end \
+                    end \
+                 end', 0, 0)",
+            )
+            .unwrap();
+
+            // 模拟 "太阳从东方的地平线升起了"（yellow=3, bold）
+            engine
+                .process_output("\x1b[1;33m太阳从东方的地平线升起了。\x1b[37;0m");
+
+            let colour: i64 = eval(engine, "return y_colour").unwrap();
+            // yellow ANSI 33 → ANSI colour 3
+            assert_eq!(colour, 3, "yellow ANSI (33) should map to colour 3");
+        });
+    }
+
+    #[test]
+    fn test_get_style_with_w0_full_match() {
+        with_engine(|engine| {
+            exec(engine, "w0_colour = -1").unwrap();
+            exec(
+                engine,
+                "AddTrigger('w0_test', '(hello)', '', 41, 0, 0, '', \
+                 'function(n,l,w,s) \
+                    local col = string.find(l, w[0]) \
+                    if col then \
+                        local st = GetStyle(s, col) \
+                        if st then w0_colour = st.textcolour end \
+                    end \
+                 end', 0, 0)",
+            )
+            .unwrap();
+
+            // 红色文本
+            engine.process_output("\x1b[31mhello\x1b[0m");
+
+            let colour: i64 = eval(engine, "return w0_colour").unwrap();
+            assert_eq!(colour, 1, "red text should have colour 1");
+        });
+    }
+
+    #[test]
+    fn test_get_style_mid_line_position() {
+        with_engine(|engine| {
+            exec(engine, "mid_colour = -1").unwrap();
+            exec(
+                engine,
+                "AddTrigger('mid_test', '(world)', '', 41, 0, 0, '', \
+                 'function(n,l,w,s) \
+                    local col = string.find(l, w[1]) \
+                    if col then \
+                        local st = GetStyle(s, col) \
+                        if st then mid_colour = st.textcolour end \
+                    end \
+                 end', 0, 0)",
+            )
+            .unwrap();
+
+            // 一行多个颜色段，world 是绿色
+            engine.process_output("\x1b[31mhi \x1b[32mworld\x1b[0m");
+
+            let colour: i64 = eval(engine, "return mid_colour").unwrap();
+            assert_eq!(colour, 2, "mid-line green text should have colour 2");
+        });
+    }
+
+    #[test]
+    fn test_get_style_capture_not_found_returns_nil() {
+        with_engine(|engine| {
+            exec(engine, "style_result = 'not_called'").unwrap();
+            exec(
+                engine,
+                "AddTrigger('nil_test', '(xyz)', '', 41, 0, 0, '', \
+                 'function(n,l,w,s) \
+                    local col = string.find(l, w[1]) \
+                    if col then \
+                        local st = GetStyle(s, col) \
+                        style_result = (st == nil) and \"nil\" or \"table\" \
+                    else \
+                        style_result = \"not_found\" \
+                    end \
+                 end', 0, 0)",
+            )
+            .unwrap();
+
+            // 未匹配的文本不应触发
+            engine.process_output("nothing here");
+            let result: String = eval(engine, "return style_result").unwrap();
+            assert_eq!(result, "not_called", "non-matching text should not fire trigger");
+        });
+    }
+
+    #[test]
+    fn test_get_style_adjusts_twelve_hour_boundary() {
+        with_engine(|engine| {
+            exec(engine, "evening_colour = -1").unwrap();
+            exec(
+                engine,
+                "AddTrigger('evening_cap', '(傍晚了|一轮火红的夕阳|夜幕笼罩)', '', 41, 0, 0, '', \
+                 'function(n,l,w,s) \
+                    local col = string.find(l, w[1]) \
+                    if col then \
+                        local st = GetStyle(s, col) \
+                        if st then evening_colour = st.textcolour end \
+                    end \
+                 end', 0, 0)",
+            )
+            .unwrap();
+
+            // 模拟 "傍晚了，太阳的馀晖将西方的天空映成一片火红。"（magenta=5）
+            engine.process_output("\x1b[1;35m傍晚了，太阳的馀晖将西方的天空映成一片火红。\x1b[37;0m");
+
+            let colour: i64 = eval(engine, "return evening_colour").unwrap();
+            assert_eq!(colour, 5, "purple/magenta ANSI (35) should map to colour 5");
+        });
+    }
+
+    #[test]
+    fn test_get_style_all_ansi_colours_round_trip() {
+        // 验证所有 0-15 标准色都能通过 GetStyle + RGBColourToName 正确映射
+        with_engine(|engine| {
+            for (ansi_code, expected_colour, expected_name) in [
+                (30, 0, "black"),
+                (31, 1, "red"),
+                (32, 2, "green"),
+                (33, 3, "yellow"),
+                (34, 4, "blue"),
+                (35, 5, "magenta"),
+                (36, 6, "cyan"),
+                (37, 7, "silver"),
+                (90, 8, "grey"),
+                (91, 9, "bright red"),
+                (92, 10, "bright green"),
+                (93, 11, "bright yellow"),
+                (94, 12, "bright blue"),
+                (95, 13, "bright magenta"),
+                (96, 14, "bright cyan"),
+                (97, 15, "white"),
+            ] {
+                // 为每个 ANSI 色号注册一个独立的 trigger
+                let setup = format!(
+                    "colour_{c} = -1; \
+                     AddTrigger('ansi_{c}', '(text{c})', '', 41, 0, 0, '', \
+                     'function(n,l,w,s) \
+                        local col = string.find(l, w[1]) \
+                        if col then \
+                            local st = GetStyle(s, col) \
+                            if st then colour_{c} = st.textcolour end \
+                        end \
+                     end', 0, 0)",
+                    c = ansi_code
+                );
+                exec(engine, &setup).unwrap();
+
+                let ansi = format!("\x1b[{}mtext{}\x1b[0m", ansi_code, ansi_code);
+                engine.process_output(&ansi);
+
+                let colour: i64 =
+                    eval(engine, &format!("return colour_{}", ansi_code)).unwrap();
+                assert_eq!(
+                    colour, expected_colour,
+                    "ANSI {} should map to colour {} ({})",
+                    ansi_code, expected_colour, expected_name
+                );
+
+                let name: String =
+                    eval(engine, &format!("return RGBColourToName({})", expected_colour))
+                        .unwrap();
+                assert_eq!(name, expected_name, "colour {} should be named '{}'", expected_colour, expected_name);
+            }
         });
     }
 }
