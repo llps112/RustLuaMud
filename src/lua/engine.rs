@@ -3419,7 +3419,9 @@ impl LuaEngine {
                     // 使用 catch_unwind 防止 Rust panic 跨越 Lua FFI 边界导致静默崩溃
                     let name_for_err = alias_name.clone();
                     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        if let Err(e) = callback.call::<()>((alias_name, input.to_string(), wildcards)) {
+                        if let Err(e) =
+                            callback.call::<()>((alias_name, input.to_string(), wildcards))
+                        {
                             self.log_error(&format!(
                                 "[Lua] 别名 '{}' 回调中发生 Lua 错误: {}",
                                 name_for_err, e
@@ -9954,7 +9956,11 @@ mod tests {
     #[test]
     fn test_get_style_colourful_daytime_text() {
         with_engine(|engine| {
-            exec(engine, "extracted_colour = -1; extracted_bg = -1; found_pos = -1").unwrap();
+            exec(
+                engine,
+                "extracted_colour = -1; extracted_bg = -1; found_pos = -1",
+            )
+            .unwrap();
             exec(
                 engine,
                 "AddTrigger('daytime_cap', \
@@ -9972,8 +9978,7 @@ mod tests {
             .unwrap();
 
             // 模拟 "东方的天空中开始出现一丝微曦"（cyan = 6）
-            engine
-                .process_output("\x1b[1;36m东方的天空中开始出现一丝微曦\x1b[37;0m");
+            engine.process_output("\x1b[1;36m东方的天空中开始出现一丝微曦\x1b[37;0m");
 
             let pos: i64 = eval(engine, "return found_pos").unwrap();
             assert!(pos > 0, "w[1] should be found in clean_line");
@@ -9981,8 +9986,7 @@ mod tests {
             let colour: i64 = eval(engine, "return extracted_colour").unwrap();
             assert_eq!(colour, 6, "cyan ANSI (36) should map to colour 6");
 
-            let name: String =
-                eval(engine, "return RGBColourToName(extracted_colour)").unwrap();
+            let name: String = eval(engine, "return RGBColourToName(extracted_colour)").unwrap();
             assert_ne!(name, "silver", "daytime text should NOT be silver");
 
             // RGBColourToName 验证标准色
@@ -10012,8 +10016,7 @@ mod tests {
             .unwrap();
 
             // 模拟 "太阳从东方的地平线升起了"（yellow=3, bold）
-            engine
-                .process_output("\x1b[1;33m太阳从东方的地平线升起了。\x1b[37;0m");
+            engine.process_output("\x1b[1;33m太阳从东方的地平线升起了。\x1b[37;0m");
 
             let colour: i64 = eval(engine, "return y_colour").unwrap();
             // yellow ANSI 33 → ANSI colour 3
@@ -10093,7 +10096,10 @@ mod tests {
             // 未匹配的文本不应触发
             engine.process_output("nothing here");
             let result: String = eval(engine, "return style_result").unwrap();
-            assert_eq!(result, "not_called", "non-matching text should not fire trigger");
+            assert_eq!(
+                result, "not_called",
+                "non-matching text should not fire trigger"
+            );
         });
     }
 
@@ -10115,7 +10121,8 @@ mod tests {
             .unwrap();
 
             // 模拟 "傍晚了，太阳的馀晖将西方的天空映成一片火红。"（magenta=5）
-            engine.process_output("\x1b[1;35m傍晚了，太阳的馀晖将西方的天空映成一片火红。\x1b[37;0m");
+            engine
+                .process_output("\x1b[1;35m傍晚了，太阳的馀晖将西方的天空映成一片火红。\x1b[37;0m");
 
             let colour: i64 = eval(engine, "return evening_colour").unwrap();
             assert_eq!(colour, 5, "purple/magenta ANSI (35) should map to colour 5");
@@ -10162,18 +10169,23 @@ mod tests {
                 let ansi = format!("\x1b[{}mtext{}\x1b[0m", ansi_code, ansi_code);
                 engine.process_output(&ansi);
 
-                let colour: i64 =
-                    eval(engine, &format!("return colour_{}", ansi_code)).unwrap();
+                let colour: i64 = eval(engine, &format!("return colour_{}", ansi_code)).unwrap();
                 assert_eq!(
                     colour, expected_colour,
                     "ANSI {} should map to colour {} ({})",
                     ansi_code, expected_colour, expected_name
                 );
 
-                let name: String =
-                    eval(engine, &format!("return RGBColourToName({})", expected_colour))
-                        .unwrap();
-                assert_eq!(name, expected_name, "colour {} should be named '{}'", expected_colour, expected_name);
+                let name: String = eval(
+                    engine,
+                    &format!("return RGBColourToName({})", expected_colour),
+                )
+                .unwrap();
+                assert_eq!(
+                    name, expected_name,
+                    "colour {} should be named '{}'",
+                    expected_colour, expected_name
+                );
             }
         });
     }
