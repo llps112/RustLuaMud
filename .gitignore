@@ -21,3 +21,7 @@ scripts/*
 !scripts/example.lua
 !scripts/lua/
 !scripts/private
+
+# docs: 忽略代码分析和重构文件
+/docs/code-quality-assessment.md
+/docs/war_refactor_analysis.md
