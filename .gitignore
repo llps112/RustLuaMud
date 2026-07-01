@@ -25,3 +25,4 @@ scripts/*
 # docs: 忽略代码分析和重构文件
 /docs/code-quality-assessment.md
 /docs/war_refactor_analysis.md
+/docs/j1800-performance-optimization-plans.md
