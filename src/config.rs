@@ -82,10 +82,16 @@ pub struct ConnectionConfig {
     /// 日志文件保留数量（可选，不设置则使用全局默认值 24）
     #[serde(default)]
     pub log_rotation_count: Option<usize>,
+    /// 渲染间隔（毫秒），0 表示实时渲染，默认 1000ms
+    #[serde(default = "default_render_interval")]
+    pub render_interval: u64,
 }
 
 fn default_true() -> bool {
     true
+}
+fn default_render_interval() -> u64 {
+    1000
 }
 fn default_reconnect_delay() -> u64 {
     5
@@ -476,5 +482,40 @@ port = 6000"#
         "#;
         let config2: ConnectionConfig = toml::from_str(toml_str2).unwrap();
         assert_eq!(config2.log_rotation_count, Some(48));
+    }
+
+    #[test]
+    fn test_render_interval_default() {
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.render_interval, 1000);
+    }
+
+    #[test]
+    fn test_render_interval_custom() {
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+            render_interval = 500
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.render_interval, 500);
+    }
+
+    #[test]
+    fn test_render_interval_zero() {
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+            render_interval = 0
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.render_interval, 0);
     }
 }

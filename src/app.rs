@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -7,7 +8,7 @@ use crossterm::event::{
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::config::AppConfig;
 use crate::connection::{ConnectionManager, ManagerEvent, SessionState};
@@ -258,6 +259,11 @@ struct TimerRequest {
     session_id: usize,
 }
 
+/// 渲染刷新请求
+struct RenderTickRequest {
+    session_id: usize,
+}
+
 /// 解析 /connect 命令参数，返回 (host, port)
 fn parse_connect_args(parts: &[&str]) -> Option<(String, u16)> {
     if parts.len() < 3 {
@@ -307,6 +313,9 @@ pub struct App {
     connect_rx: mpsc::Receiver<ConnectRequest>,
     timer_tx: mpsc::Sender<TimerRequest>,
     timer_rx: mpsc::Receiver<TimerRequest>,
+    render_tick_tx: mpsc::Sender<RenderTickRequest>,
+    render_tick_rx: mpsc::Receiver<RenderTickRequest>,
+    render_tick_cancels: HashMap<usize, oneshot::Sender<()>>,
 }
 
 impl App {
@@ -338,6 +347,7 @@ impl App {
         let (reconnect_tx, reconnect_rx) = mpsc::channel(32);
         let (connect_tx, connect_rx) = mpsc::channel(16);
         let (timer_tx, timer_rx) = mpsc::channel(64);
+        let (render_tick_tx, render_tick_rx) = mpsc::channel(32);
 
         Ok(Self {
             config,
@@ -351,6 +361,9 @@ impl App {
             connect_rx,
             timer_tx,
             timer_rx,
+            render_tick_tx,
+            render_tick_rx,
+            render_tick_cancels: HashMap::new(),
         })
     }
 
@@ -378,6 +391,14 @@ impl App {
         }
 
         self.update_status_bar()?;
+
+        // 为每个 session 启动渲染刷新定时器（如果 render_interval > 0）
+        for id in 0..self.manager.sessions.len() {
+            let interval = self.manager.sessions[id].render_interval;
+            if interval > 0 {
+                self.start_render_tick_timer(id, interval);
+            }
+        }
 
         // 获取管理器事件接收器
         let mut mgr_rx = self
@@ -426,6 +447,11 @@ impl App {
                 // 处理定时器触发（轮询到达）
                 Some(req) = self.timer_rx.recv() => {
                     self.handle_timer(req.session_id)?;
+                }
+
+                // 处理渲染刷新请求
+                Some(req) = self.render_tick_rx.recv() => {
+                    self.handle_render_tick(req.session_id)?;
                 }
             }
         }
@@ -815,6 +841,69 @@ impl App {
         Ok(())
     }
 
+    /// 停止指定 session 的渲染刷新定时器
+    fn stop_render_tick_timer(&mut self, session_id: usize) {
+        if let Some(cancel_tx) = self.render_tick_cancels.remove(&session_id) {
+            let _ = cancel_tx.send(());
+        }
+    }
+
+    /// 启动渲染刷新定时器：按指定间隔定期发送刷新请求
+    fn start_render_tick_timer(&mut self, session_id: usize, interval_ms: u64) {
+        // 先停止旧的定时器
+        self.stop_render_tick_timer(session_id);
+
+        let tx = self.render_tick_tx.clone();
+        let (cancel_tx, mut cancel_rx) = oneshot::channel();
+        self.render_tick_cancels.insert(session_id, cancel_tx);
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if tx.send(RenderTickRequest { session_id }).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ = &mut cancel_rx => {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    /// 处理渲染刷新请求：将缓冲的待渲染数据一次性输出到终端
+    fn handle_render_tick(&mut self, session_id: usize) -> io::Result<()> {
+        if session_id >= self.manager.sessions.len() {
+            return Ok(());
+        }
+        // 仅当前台 session 且有待渲染数据时才刷新
+        if session_id != self.manager.foreground_id {
+            self.manager.sessions[session_id].render_dirty = false;
+            return Ok(());
+        }
+        if !self.manager.sessions[session_id].render_dirty {
+            return Ok(());
+        }
+        let pending = std::mem::take(&mut self.manager.sessions[session_id].pending_data);
+        self.manager.sessions[session_id].render_dirty = false;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        // 合并所有待渲染行，一次性输出
+        let mut combined = String::new();
+        for line in &pending {
+            combined.push_str(line);
+            combined.push('\n');
+        }
+        if !combined.is_empty() {
+            self.terminal.append_output(&combined)?;
+        }
+        Ok(())
+    }
+
     /// 处理 Lua 引擎产生的日志
     fn drain_lua_logs(&mut self, session_id: usize) -> io::Result<()> {
         if session_id >= self.manager.sessions.len() {
@@ -1006,6 +1095,7 @@ impl App {
                     socks5_username: None,
                     socks5_password: None,
                     log_rotation_count: None,
+                    render_interval: 1000,
                 };
 
                 let id = match self.manager.add_connection_dynamic(&conn_config) {
@@ -1015,6 +1105,10 @@ impl App {
                         return Ok(());
                     }
                 };
+                // 启动渲染定时器（如果配置了 render_interval > 0）
+                if conn_config.render_interval > 0 {
+                    self.start_render_tick_timer(id, conn_config.render_interval);
+                }
                 self.update_status_bar()?;
                 let _ = self.connect_tx.try_send(ConnectRequest { session_id: id });
                 self.terminal.append_output(&format!(
@@ -1102,8 +1196,31 @@ impl App {
                 } else {
                     self.manager.foreground_id
                 };
+                // 清理定时器：先停止目标 session 的定时器
+                self.stop_render_tick_timer(target);
+                // 收集所有 > target 的 session_id，因为 remove 后索引会前移
+                let higher_ids: Vec<usize> = self.render_tick_cancels.keys()
+                    .filter(|&&id| id > target)
+                    .copied()
+                    .collect();
+                // 停止这些定时器
+                for id in &higher_ids {
+                    self.stop_render_tick_timer(*id);
+                }
+
                 match self.manager.remove_session(target) {
                     Ok(name) => {
+                        // 重启索引前移后的 session 的定时器
+                        for old_id in higher_ids {
+                            let new_id = old_id - 1;
+                            if new_id < self.manager.sessions.len() {
+                                let interval = self.manager.sessions[new_id].render_interval;
+                                if interval > 0 {
+                                    self.start_render_tick_timer(new_id, interval);
+                                }
+                            }
+                        }
+
                         self.update_status_bar()?;
                         if !self.manager.sessions.is_empty() {
                             self.switch_foreground(self.manager.foreground_id)?;
@@ -1299,9 +1416,65 @@ impl App {
                     self.terminal
                         .append_output(&format!("[系统] 保留命令栏输入: {} (已保存)", status))?;
                 }
+                "render_interval" => {
+                    let fg = self.manager.foreground_id;
+                    if fg >= self.manager.sessions.len() {
+                        self.terminal.append_output("[错误] 无前台连接")?;
+                        return Ok(());
+                    }
+                    match value.parse::<u64>() {
+                        Ok(ms) => {
+                            // 限制范围：0 表示实时模式，>0 时限制在 [50, 10000]ms
+                            let clamped = if ms == 0 {
+                                0
+                            } else {
+                                ms.max(50).min(10000)
+                            };
+                            self.manager.sessions[fg].render_interval = clamped;
+                            // 重启定时器以应用新间隔
+                            if clamped > 0 {
+                                self.start_render_tick_timer(fg, clamped);
+                            } else {
+                                self.stop_render_tick_timer(fg);
+                            }
+                            let mode = if clamped == 0 { "实时" } else { &format!("{}ms", clamped) };
+                            self.terminal.append_output(&format!(
+                                "[系统] 渲染间隔已设置为: {} (当前连接)",
+                                mode
+                            ))?;
+                        }
+                        Err(_) => {
+                            self.terminal.append_output(&format!(
+                                "[错误] render_interval 必须是正整数（毫秒），当前值: {}",
+                                value
+                            ))?;
+                        }
+                    }
+                }
+                "realtime" => {
+                    let fg = self.manager.foreground_id;
+                    if fg >= self.manager.sessions.len() {
+                        self.terminal.append_output("[错误] 无前台连接")?;
+                        return Ok(());
+                    }
+                    let enabled = matches!(value.as_str(), "on" | "1" | "true" | "yes");
+                    let new_interval = if enabled { 0 } else { 1000 };
+                    self.manager.sessions[fg].render_interval = new_interval;
+                    // 重启定时器以应用新模式
+                    if new_interval > 0 {
+                        self.start_render_tick_timer(fg, new_interval);
+                    } else {
+                        self.stop_render_tick_timer(fg);
+                    }
+                    let status = if enabled { "实时的" } else { "每1秒刷新一次" };
+                    self.terminal.append_output(&format!(
+                        "[系统] 渲染模式已切换为: {} (当前连接)",
+                        status
+                    ))?;
+                }
                 _ => {
                     self.terminal.append_output(&format!(
-                        "[错误] 未知设置选项: {}。可用选项: keep_command",
+                        "[错误] 未知设置选项: {}。可用选项: keep_command, render_interval, realtime",
                         option
                     ))?;
                 }
@@ -1410,6 +1583,11 @@ impl App {
                         }
                     };
 
+                    // 启动渲染定时器（如果配置了 render_interval > 0）
+                    if conn_config.render_interval > 0 {
+                        self.start_render_tick_timer(id, conn_config.render_interval);
+                    }
+
                     // 设置日志保留数量
                     if let Some(count) = conn_config.log_rotation_count {
                         self.logger.set_session_max_files(&conn_config.name, count);
@@ -1475,6 +1653,10 @@ impl App {
                 self.terminal
                     .append_output("  /set keep_command on|off     执行后保留命令栏输入")?;
                 self.terminal
+                    .append_output("  /set realtime on|off          实时/节流渲染模式切换")?;
+                self.terminal
+                    .append_output("  /set render_interval <毫秒>  设置渲染间隔（0=实时，默认1000）")?;
+                self.terminal
                     .append_output("  /switch <编号或名称>        切换到指定连接")?;
                 self.terminal
                     .append_output("  /sw <编号或名称>            切换到指定连接 (简写)")?;
@@ -1516,7 +1698,21 @@ impl App {
                 }
                 // 仅渲染前台连接的数据
                 if id == self.manager.foreground_id {
-                    self.terminal.append_output(&data)?;
+                    if self.manager.sessions[id].render_interval == 0 {
+                        // 实时渲染模式
+                        self.terminal.append_output(&data)?;
+                    } else {
+                        // 节流渲染模式：缓冲数据，等待定时器刷新
+                        for part in data.split_inclusive('\n') {
+                            let trimmed = part.trim_end_matches(['\r', '\n']);
+                            if !trimmed.is_empty() {
+                                self.manager.sessions[id]
+                                    .pending_data
+                                    .push(trimmed.to_string());
+                            }
+                        }
+                        self.manager.sessions[id].render_dirty = true;
+                    }
                 }
                 // 所有连接数据写入日志
                 self.log_session_data(id, &data);
@@ -2125,6 +2321,42 @@ mod tests {
         assert_eq!(parse_builtin_command("/unknown"), BuiltinCommand::Unknown);
         assert_eq!(parse_builtin_command(""), BuiltinCommand::Unknown);
         assert_eq!(parse_builtin_command("hello"), BuiltinCommand::Unknown);
+    }
+
+    #[test]
+    fn test_parse_builtin_set_realtime_on() {
+        let cmd = parse_builtin_command("/set realtime on");
+        assert_eq!(
+            cmd,
+            BuiltinCommand::Set {
+                option: "realtime".to_string(),
+                value: "on".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_builtin_set_realtime_off() {
+        let cmd = parse_builtin_command("/set realtime off");
+        assert_eq!(
+            cmd,
+            BuiltinCommand::Set {
+                option: "realtime".to_string(),
+                value: "off".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_builtin_set_render_interval() {
+        let cmd = parse_builtin_command("/set render_interval 500");
+        assert_eq!(
+            cmd,
+            BuiltinCommand::Set {
+                option: "render_interval".to_string(),
+                value: "500".to_string(),
+            }
+        );
     }
 
     #[test]
