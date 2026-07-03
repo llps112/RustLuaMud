@@ -858,7 +858,8 @@ impl App {
         self.render_tick_cancels.insert(session_id, cancel_tx);
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -1199,7 +1200,9 @@ impl App {
                 // 清理定时器：先停止目标 session 的定时器
                 self.stop_render_tick_timer(target);
                 // 收集所有 > target 的 session_id，因为 remove 后索引会前移
-                let higher_ids: Vec<usize> = self.render_tick_cancels.keys()
+                let higher_ids: Vec<usize> = self
+                    .render_tick_cancels
+                    .keys()
                     .filter(|&&id| id > target)
                     .copied()
                     .collect();
@@ -1425,11 +1428,7 @@ impl App {
                     match value.parse::<u64>() {
                         Ok(ms) => {
                             // 限制范围：0 表示实时模式，>0 时限制在 [50, 10000]ms
-                            let clamped = if ms == 0 {
-                                0
-                            } else {
-                                ms.max(50).min(10000)
-                            };
+                            let clamped = if ms == 0 { 0 } else { ms.max(50).min(10000) };
                             self.manager.sessions[fg].render_interval = clamped;
                             // 重启定时器以应用新间隔
                             if clamped > 0 {
@@ -1437,7 +1436,11 @@ impl App {
                             } else {
                                 self.stop_render_tick_timer(fg);
                             }
-                            let mode = if clamped == 0 { "实时" } else { &format!("{}ms", clamped) };
+                            let mode = if clamped == 0 {
+                                "实时"
+                            } else {
+                                &format!("{}ms", clamped)
+                            };
                             self.terminal.append_output(&format!(
                                 "[系统] 渲染间隔已设置为: {} (当前连接)",
                                 mode
@@ -1466,7 +1469,11 @@ impl App {
                     } else {
                         self.stop_render_tick_timer(fg);
                     }
-                    let status = if enabled { "实时的" } else { "每1秒刷新一次" };
+                    let status = if enabled {
+                        "实时的"
+                    } else {
+                        "每1秒刷新一次"
+                    };
                     self.terminal.append_output(&format!(
                         "[系统] 渲染模式已切换为: {} (当前连接)",
                         status
@@ -1654,8 +1661,9 @@ impl App {
                     .append_output("  /set keep_command on|off     执行后保留命令栏输入")?;
                 self.terminal
                     .append_output("  /set realtime on|off          实时/节流渲染模式切换")?;
-                self.terminal
-                    .append_output("  /set render_interval <毫秒>  设置渲染间隔（0=实时，默认1000）")?;
+                self.terminal.append_output(
+                    "  /set render_interval <毫秒>  设置渲染间隔（0=实时，默认1000）",
+                )?;
                 self.terminal
                     .append_output("  /switch <编号或名称>        切换到指定连接")?;
                 self.terminal
