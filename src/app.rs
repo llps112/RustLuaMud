@@ -905,8 +905,8 @@ impl App {
         };
         let name = self.manager.sessions[session_id].name.clone();
         // 节流模式下将 Lua 日志缓冲到 pending_data，与 MUD 数据一起刷新
-        let buffer = session_id == self.manager.foreground_id
-            && !self.manager.sessions[session_id].realtime;
+        let buffer =
+            session_id == self.manager.foreground_id && !self.manager.sessions[session_id].realtime;
         for msg in logs {
             // 日志写入文件（剥离 ANSI 码），根据前缀分类
             let clean = crate::ui::AnsiParser::strip_ansi(&msg);
