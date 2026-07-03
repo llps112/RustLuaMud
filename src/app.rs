@@ -478,13 +478,13 @@ impl App {
                     && self.manager.sessions[session_id].lua_engine.is_some()
                 {
                     // 先排空 OnConnect() 产生的命令和日志，再发送
-                    let (queued_cmds, queued_logs) = {
+                    let queued_cmds = {
                         let engine = self.manager.sessions[session_id]
                             .lua_engine
                             .as_mut()
                             .unwrap();
                         engine.set_connected(true);
-                        (engine.drain_commands(), engine.drain_logs())
+                        engine.drain_commands()
                     };
                     for cmd in &queued_cmds {
                         self.logger.log_command(&name, cmd);
@@ -492,9 +492,7 @@ impl App {
                             self.terminal.append_output(&format!("[发送错误] {}", e))?;
                         }
                     }
-                    for msg in &queued_logs {
-                        self.terminal.append_output(msg)?;
-                    }
+                    self.drain_lua_logs(session_id)?;
                 } else {
                     self.init_lua_for_session(session_id)?;
                 }
@@ -603,14 +601,8 @@ impl App {
                                 }
                             }
 
-                            // 排空并显示脚本加载期间的 Lua 日志
-                            let name = self.manager.sessions[id].name.clone();
-                            let logs = engine.drain_logs();
-                            for msg in logs {
-                                let clean = crate::ui::AnsiParser::strip_ansi(&msg);
-                                self.logger.log(&name, &clean);
-                                self.terminal.append_output(&msg)?;
-                            }
+                            // 排空脚本加载期间的 Lua 日志
+                            self.drain_lua_logs(id)?;
 
                             let msg = format!("[Lua] 连接 {} 脚本已加载: {}", id + 1, path);
                             self.terminal.append_output(&msg)?;
@@ -639,13 +631,13 @@ impl App {
                         crate::connection::SessionState::Connected
                     );
                     if is_connected {
-                        let (queued_cmds, queued_logs) = {
+                        let queued_cmds = {
                             match self.manager.sessions[id].lua_engine.as_mut() {
                                 Some(eng) => {
                                     eng.set_connected(true);
-                                    (eng.drain_commands(), eng.drain_logs())
+                                    eng.drain_commands()
                                 }
-                                None => (Vec::new(), Vec::new()),
+                                None => Vec::new(),
                             }
                         };
                         for cmd in &queued_cmds {
@@ -654,9 +646,7 @@ impl App {
                                 self.terminal.append_output(&format!("[发送错误] {}", e))?;
                             }
                         }
-                        for msg in &queued_logs {
-                            self.terminal.append_output(msg)?;
-                        }
+                        self.drain_lua_logs(id)?;
                     } else {
                         // session 尚未连接，无需同步
                     }
@@ -735,7 +725,6 @@ impl App {
                                     self.terminal.append_output(&format!("[Lua 错误] {}", e))?;
                                 }
                             }
-                            self.drain_lua_logs(session_id)?;
                         }
                         Err(e) => {
                             self.terminal.append_output(&format!("[Lua 错误] {}", e))?;
@@ -755,7 +744,6 @@ impl App {
                                     queue.push_front(sub_cmd);
                                 }
                             }
-                            self.drain_lua_logs(session_id)?;
                         }
                         handled
                     } else {
@@ -916,6 +904,9 @@ impl App {
             Vec::new()
         };
         let name = self.manager.sessions[session_id].name.clone();
+        // 节流模式下将 Lua 日志缓冲到 pending_data，与 MUD 数据一起刷新
+        let buffer = session_id == self.manager.foreground_id
+            && !self.manager.sessions[session_id].realtime;
         for msg in logs {
             // 日志写入文件（剥离 ANSI 码），根据前缀分类
             let clean = crate::ui::AnsiParser::strip_ansi(&msg);
@@ -929,8 +920,15 @@ impl App {
             }
             // 如果是前台连接，也在终端显示（保留 ANSI 码以显示颜色）
             if session_id == self.manager.foreground_id {
-                self.terminal
-                    .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
+                if buffer {
+                    self.manager.sessions[session_id]
+                        .pending_data
+                        .push(format!("\x1b[36m[Lua] {}\x1b[0m", msg));
+                    self.manager.sessions[session_id].render_dirty = true;
+                } else {
+                    self.terminal
+                        .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
+                }
             }
         }
         Ok(())
@@ -1335,16 +1333,9 @@ impl App {
                             }
                             match engine.load_script(&path) {
                                 Ok(()) => {
-                                    // 排空并记录加载期间的 Lua 日志
-                                    let name = self.manager.sessions[fg].name.clone();
-                                    let logs = engine.drain_logs();
-                                    for msg in logs {
-                                        let clean = crate::ui::AnsiParser::strip_ansi(&msg);
-                                        self.logger.log(&name, &clean);
-                                        self.terminal
-                                            .append_output(&format!("\x1b[36m{}\x1b[0m", msg))?;
-                                    }
+                                    // 排空 Lua 日志（drain_lua_logs 会处理日志写入和终端输出）
                                     self.manager.sessions[fg].lua_engine = Some(engine);
+                                    self.drain_lua_logs(fg)?;
                                     self.terminal.append_output(&format!(
                                         "\x1b[36m[Lua] 脚本已重新加载: {}\x1b[0m",
                                         path
@@ -1721,6 +1712,7 @@ impl App {
 
                 // 触发器处理（所有连接都触发，不仅仅是前台）
                 if id < self.manager.sessions.len() {
+                    let mut pending_lua_logs = Vec::new();
                     let trigger_commands =
                         if let Some(ref engine) = self.manager.sessions[id].lua_engine {
                             // 对每行数据分别匹配触发器
@@ -1732,23 +1724,39 @@ impl App {
                                     all_cmds.extend(engine.drain_commands());
                                 }
                             }
-                            // 处理 Lua 日志
+                            // 收集 Lua 日志（写入文件 + 暂存待终端输出）
                             let logs = engine.drain_logs();
                             let name = self.manager.sessions[id].name.clone();
-                            for msg in logs {
-                                let clean = crate::ui::AnsiParser::strip_ansi(&msg);
+                            for msg in &logs {
+                                let clean = crate::ui::AnsiParser::strip_ansi(msg);
                                 self.logger.log(&name, &clean);
-                                if id == self.manager.foreground_id {
-                                    self.terminal
-                                        .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
-                                }
                             }
+                            pending_lua_logs = logs;
                             all_cmds
                         } else {
                             Vec::new()
                         };
                     // 发送触发器产生的命令
                     self.send_lua_commands(id, trigger_commands)?;
+                    // 处理 Lua 日志（写入日志文件已在上面的分支中完成）
+                    // 节流模式下缓冲到 pending_data，实时模式直接输出
+                    if !pending_lua_logs.is_empty() && id == self.manager.foreground_id {
+                        if !self.manager.sessions[id].realtime {
+                            for msg in pending_lua_logs {
+                                self.manager.sessions[id]
+                                    .pending_data
+                                    .push(format!("\x1b[36m[Lua] {}\x1b[0m", msg));
+                            }
+                            self.manager.sessions[id].render_dirty = true;
+                        } else {
+                            for msg in pending_lua_logs {
+                                self.terminal
+                                    .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
+                            }
+                        }
+                    }
+                    // 排空引擎中剩余的 Lua 日志（触发器处理后又产生的）
+                    self.drain_lua_logs(id)?;
                     // 发送 SendPkt 压入的原始数据包
                     self.send_lua_raw(id)?;
                     // 触发器中可能调用了 SetStatus，刷新状态栏
@@ -1984,16 +1992,8 @@ impl App {
                                     match engine.load_script(&path) {
                                         Ok(()) => {
                                             // 排空脚本加载期间的 Lua 日志
-                                            let logs = engine.drain_logs();
-                                            for msg in logs {
-                                                let clean = crate::ui::AnsiParser::strip_ansi(&msg);
-                                                self.logger.log(&name, &clean);
-                                                self.terminal.append_output(&format!(
-                                                    "\x1b[36m{}\x1b[0m",
-                                                    msg
-                                                ))?;
-                                            }
                                             self.manager.sessions[i].lua_engine = Some(engine);
+                                            self.drain_lua_logs(i)?;
                                             executed += 1;
                                         }
                                         Err(e) => {
