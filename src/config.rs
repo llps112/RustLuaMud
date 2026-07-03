@@ -82,9 +82,12 @@ pub struct ConnectionConfig {
     /// 日志文件保留数量（可选，不设置则使用全局默认值 24）
     #[serde(default)]
     pub log_rotation_count: Option<usize>,
-    /// 渲染间隔（毫秒），0 表示实时渲染，默认 1000ms
+    /// 渲染间隔（毫秒），最小值 50ms，默认 1000ms
     #[serde(default = "default_render_interval")]
     pub render_interval: u64,
+    /// 实时渲染开关，true 时忽略 render_interval 直接实时渲染，默认 false
+    #[serde(default)]
+    pub realtime: bool,
 }
 
 fn default_true() -> bool {

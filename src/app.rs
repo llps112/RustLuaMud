@@ -392,11 +392,11 @@ impl App {
 
         self.update_status_bar()?;
 
-        // 为每个 session 启动渲染刷新定时器（如果 render_interval > 0）
+        // 为每个 session 启动渲染刷新定时器（非实时模式且 render_interval > 0）
         for id in 0..self.manager.sessions.len() {
-            let interval = self.manager.sessions[id].render_interval;
-            if interval > 0 {
-                self.start_render_tick_timer(id, interval);
+            let session = &self.manager.sessions[id];
+            if !session.realtime && session.render_interval > 0 {
+                self.start_render_tick_timer(id, session.render_interval);
             }
         }
 
@@ -1097,6 +1097,7 @@ impl App {
                     socks5_password: None,
                     log_rotation_count: None,
                     render_interval: 1000,
+                    realtime: false,
                 };
 
                 let id = match self.manager.add_connection_dynamic(&conn_config) {
@@ -1106,8 +1107,8 @@ impl App {
                         return Ok(());
                     }
                 };
-                // 启动渲染定时器（如果配置了 render_interval > 0）
-                if conn_config.render_interval > 0 {
+                // 启动渲染定时器（非实时模式且配置了 render_interval > 0）
+                if !conn_config.realtime && conn_config.render_interval > 0 {
                     self.start_render_tick_timer(id, conn_config.render_interval);
                 }
                 self.update_status_bar()?;
@@ -1213,13 +1214,13 @@ impl App {
 
                 match self.manager.remove_session(target) {
                     Ok(name) => {
-                        // 重启索引前移后的 session 的定时器
+                        // 重启索引前移后的 session 的定时器（非实时模式）
                         for old_id in higher_ids {
                             let new_id = old_id - 1;
                             if new_id < self.manager.sessions.len() {
-                                let interval = self.manager.sessions[new_id].render_interval;
-                                if interval > 0 {
-                                    self.start_render_tick_timer(new_id, interval);
+                                let session = &self.manager.sessions[new_id];
+                                if !session.realtime && session.render_interval > 0 {
+                                    self.start_render_tick_timer(new_id, session.render_interval);
                                 }
                             }
                         }
@@ -1427,23 +1428,16 @@ impl App {
                     }
                     match value.parse::<u64>() {
                         Ok(ms) => {
-                            // 限制范围：0 表示实时模式，>0 时限制在 [50, 10000]ms
-                            let clamped = if ms == 0 { 0 } else { ms.max(50).min(10000) };
+                            // 限制范围：[50, 10000]ms
+                            let clamped = ms.max(50).min(10000);
                             self.manager.sessions[fg].render_interval = clamped;
-                            // 重启定时器以应用新间隔
-                            if clamped > 0 {
+                            // 仅在非实时模式下重启定时器
+                            if !self.manager.sessions[fg].realtime {
                                 self.start_render_tick_timer(fg, clamped);
-                            } else {
-                                self.stop_render_tick_timer(fg);
                             }
-                            let mode = if clamped == 0 {
-                                "实时"
-                            } else {
-                                &format!("{}ms", clamped)
-                            };
                             self.terminal.append_output(&format!(
-                                "[系统] 渲染间隔已设置为: {} (当前连接)",
-                                mode
+                                "[系统] 渲染间隔已设置为: {}ms (当前连接)",
+                                clamped
                             ))?;
                         }
                         Err(_) => {
@@ -1461,19 +1455,19 @@ impl App {
                         return Ok(());
                     }
                     let enabled = matches!(value.as_str(), "on" | "1" | "true" | "yes");
-                    let new_interval = if enabled { 0 } else { 1000 };
-                    self.manager.sessions[fg].render_interval = new_interval;
-                    // 重启定时器以应用新模式
-                    if new_interval > 0 {
-                        self.start_render_tick_timer(fg, new_interval);
-                    } else {
+                    self.manager.sessions[fg].realtime = enabled;
+                    // 根据新模式调整定时器
+                    if enabled {
+                        // 实时模式：停止定时器
                         self.stop_render_tick_timer(fg);
-                    }
-                    let status = if enabled {
-                        "实时的"
                     } else {
-                        "每1秒刷新一次"
-                    };
+                        // 节流模式：启动定时器
+                        let interval = self.manager.sessions[fg].render_interval;
+                        if interval > 0 {
+                            self.start_render_tick_timer(fg, interval);
+                        }
+                    }
+                    let status = if enabled { "实时" } else { "节流" };
                     self.terminal.append_output(&format!(
                         "[系统] 渲染模式已切换为: {} (当前连接)",
                         status
@@ -1590,8 +1584,8 @@ impl App {
                         }
                     };
 
-                    // 启动渲染定时器（如果配置了 render_interval > 0）
-                    if conn_config.render_interval > 0 {
+                    // 启动渲染定时器（非实时模式且配置了 render_interval > 0）
+                    if !conn_config.realtime && conn_config.render_interval > 0 {
                         self.start_render_tick_timer(id, conn_config.render_interval);
                     }
 
@@ -1706,7 +1700,7 @@ impl App {
                 }
                 // 仅渲染前台连接的数据
                 if id == self.manager.foreground_id {
-                    if self.manager.sessions[id].render_interval == 0 {
+                    if self.manager.sessions[id].realtime {
                         // 实时渲染模式
                         self.terminal.append_output(&data)?;
                     } else {

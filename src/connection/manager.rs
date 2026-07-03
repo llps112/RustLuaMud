@@ -206,6 +206,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         }
     }
 

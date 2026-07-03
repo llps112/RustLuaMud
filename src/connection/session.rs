@@ -78,9 +78,11 @@ pub struct Session {
     /// SOCKS5 代理密码（可选）
     pub socks5_password: Option<String>,
 
-    /// 渲染间隔（毫秒），0 表示实时渲染
+    /// 渲染间隔（毫秒），最小值 50ms
     pub render_interval: u64,
-    /// 待渲染的缓冲数据（render_interval > 0 时使用）
+    /// 实时渲染开关，true 时忽略 render_interval 直接实时渲染
+    pub realtime: bool,
+    /// 待渲染的缓冲数据（realtime = false 时使用）
     pub pending_data: Vec<String>,
     /// 是否有待渲染的数据
     pub render_dirty: bool,
@@ -181,6 +183,7 @@ impl Session {
             socks5_username: config.socks5_username.clone(),
             socks5_password: config.socks5_password.clone(),
             render_interval: config.render_interval,
+            realtime: config.realtime,
             pending_data: Vec::new(),
             render_dirty: false,
             send_tx: None,
@@ -643,6 +646,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(1, &config);
         assert_eq!(session.name, "test");
@@ -672,6 +676,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 2000,
+            realtime: false,
         };
         let session = Session::new(1, &config);
         assert_eq!(session.render_interval, 2000);
@@ -699,6 +704,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(1, &config);
         assert!(session.send("hello").is_err());
@@ -724,6 +730,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let mut session = Session::new(1, &config);
         session.disconnect();
@@ -750,6 +757,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(2, &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -775,6 +783,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(3, &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -800,6 +809,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(5, &config);
         assert_eq!(session.script_path, Some("/path/to/script.lua".to_string()));
@@ -825,6 +835,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(6, &config);
         assert_eq!(session.username, Some("player".to_string()));
@@ -851,6 +862,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(7, &config);
         assert!(session.auto_connect);
@@ -878,6 +890,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(8, &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -903,6 +916,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(9, &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -976,6 +990,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(1, &config);
         assert!(session.output_lines.is_empty());
@@ -1001,6 +1016,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(1, &config);
         assert!(session.lua_engine.is_none());
@@ -1026,6 +1042,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let mut session = Session::new(1, &config);
         session.disconnect();
@@ -1060,6 +1077,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(1, &config);
         assert!(!session.socks5_enable);
@@ -1087,6 +1105,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(1, &config);
         assert!(session.socks5_enable);
@@ -1114,6 +1133,7 @@ mod tests {
             socks5_password: Some("pass".to_string()),
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(1, &config);
         assert!(session.socks5_enable);
@@ -1144,6 +1164,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(1, &config);
         assert!(session.socks5_enable);
@@ -1171,6 +1192,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         };
         let session = Session::new(1, &config);
         assert!(session.socks5_enable);
@@ -1198,6 +1220,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         }
     }
 
@@ -1220,6 +1243,7 @@ mod tests {
             socks5_password: None,
             log_rotation_count: None,
             render_interval: 1000,
+            realtime: false,
         }
     }
 
