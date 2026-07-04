@@ -53,7 +53,8 @@ impl ConnectionManager {
 
     /// 用户 1-based 显示编号 → SessionId
     pub fn session_id_by_display_number(&self, n: usize) -> Option<SessionId> {
-        n.checked_sub(1).and_then(|i| self.session_order.get(i).copied())
+        n.checked_sub(1)
+            .and_then(|i| self.session_order.get(i).copied())
     }
 
     /// SessionId → 用户 1-based 显示编号
@@ -110,7 +111,10 @@ impl ConnectionManager {
     }
 
     /// 动态添加连接（运行时通过命令行添加）
-    pub fn add_connection_dynamic(&mut self, config: &ConnectionConfig) -> Result<SessionId, String> {
+    pub fn add_connection_dynamic(
+        &mut self,
+        config: &ConnectionConfig,
+    ) -> Result<SessionId, String> {
         self.add_connection(config)
     }
 
