@@ -51,6 +51,26 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source $HOME/.cargo/env
 ```
 
+### 配置 crates.io 镜像源
+
+国内首次编译依赖下载缓慢，推荐配置中科大 USTC 镜像：
+
+```bash
+mkdir -p ~/.cargo
+cat >> ~/.cargo/config.toml << 'EOF'
+
+[source.crates-io]
+replace-with = "ustc"
+
+[source.ustc]
+registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+EOF
+```
+
+配置完成后，后续 `cargo build` 将自动从 USTC 镜像拉取依赖，显著提升下载速度。
+
+> **可选镜像源**：除 USTC 外也可使用清华 TUNA 源（将上述 `ustc` 替换为 `tuna`，URL 改为 `https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/`）。
+
 ### 编译
 
 ```bash
