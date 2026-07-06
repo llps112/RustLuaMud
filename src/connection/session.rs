@@ -6,6 +6,19 @@ use tokio_socks::tcp::Socks5Stream;
 
 use crate::config::ConnectionConfig;
 
+/// 稳定会话 ID，在 session 生命周期内不变，不受 Vec 索引移位影响
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SessionId(pub u64);
+
+impl SessionId {
+    // 用于显示给用户的 1-based 编号（从 Vec 位置转换）
+    // 当前直接在各处使用 index + 1，保留此方法供未来统一使用
+    #[allow(dead_code)]
+    pub fn display_number(index: usize) -> usize {
+        index + 1
+    }
+}
+
 /// 连接状态
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionState {
@@ -19,6 +32,7 @@ pub enum SessionState {
 /// 连接信息摘要（供 UI 层使用）
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
+    pub session_id: SessionId,
     pub name: String,
     pub state: SessionState,
     pub status_text: String,
@@ -41,7 +55,7 @@ pub enum Encoding {
 
 /// 单个 MUD 连接会话
 pub struct Session {
-    pub id: usize,
+    pub session_id: SessionId,
     pub name: String,
     pub host: String,
     pub port: u16,
@@ -78,12 +92,23 @@ pub struct Session {
     /// SOCKS5 代理密码（可选）
     pub socks5_password: Option<String>,
 
+    /// 渲染间隔（毫秒），最小值 50ms
+    pub render_interval: u64,
+    /// 实时渲染开关，true 时忽略 render_interval 直接实时渲染
+    pub realtime: bool,
+    /// 待渲染的缓冲数据（realtime = false 时使用）
+    pub pending_data: Vec<String>,
+    /// 是否有待渲染的数据
+    pub render_dirty: bool,
+
     // 发送命令的通道
     send_tx: Option<mpsc::Sender<String>>,
     /// 发送原始数据包的通道
     send_raw_tx: Option<mpsc::Sender<Vec<u8>>>,
     /// 取消信号发送端：shutdown() 时发送信号让读任务静默退出
     cancel_tx: Option<oneshot::Sender<()>>,
+    /// 定时器轮询任务的取消信号发送端
+    pub timer_cancel_tx: Option<oneshot::Sender<()>>,
 }
 
 /// 将 GBK 字节解码为 UTF-8 字符串
@@ -144,7 +169,7 @@ fn strip_telnet_iac(bytes: &[u8]) -> Vec<u8> {
 }
 
 impl Session {
-    pub fn new(id: usize, config: &ConnectionConfig) -> Self {
+    pub fn new(session_id: SessionId, config: &ConnectionConfig) -> Self {
         let encoding = if config.encoding.as_deref() == Some("gbk")
             || config.encoding.as_deref() == Some("GBK")
         {
@@ -153,7 +178,7 @@ impl Session {
             Encoding::Utf8
         };
         Self {
-            id,
+            session_id,
             name: config.name.clone(),
             host: config.host.clone(),
             port: config.port,
@@ -173,9 +198,14 @@ impl Session {
             socks5_port: config.socks5_port,
             socks5_username: config.socks5_username.clone(),
             socks5_password: config.socks5_password.clone(),
+            render_interval: config.render_interval,
+            realtime: config.realtime,
+            pending_data: Vec::new(),
+            render_dirty: false,
             send_tx: None,
             send_raw_tx: None,
             cancel_tx: None,
+            timer_cancel_tx: None,
         }
     }
 
@@ -315,7 +345,7 @@ impl Session {
 
         let _auto_reconnect = self.auto_reconnect;
         let encoding = self.encoding.clone();
-        let _session_id = self.id;
+        let _session_id = self.session_id;
 
         // 读取任务：从服务器接收数据，按行读取并转码
         let event_tx_read = event_tx.clone();
@@ -492,10 +522,13 @@ impl Session {
     }
 
     /// 彻底关闭连接（用于 /close 命令）
-    /// 发送取消信号让读任务静默退出（不发送 StateChange(Disconnected)），
-    /// 防止 remove_session 后索引移位导致雪崩级联重连。
+    /// 发送取消信号让读任务和定时器轮询任务静默退出，
+    /// 防止 remove_session 后旧异步任务用过期 id 发事件。
     pub fn shutdown(&mut self) {
         if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(tx) = self.timer_cancel_tx.take() {
             let _ = tx.send(());
         }
         self.send_tx = None;
@@ -632,13 +665,43 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(1, &config);
+        let session = Session::new(SessionId(1), &config);
         assert_eq!(session.name, "test");
         assert_eq!(session.host, "localhost");
         assert_eq!(session.port, 4000);
         assert!(matches!(session.state, SessionState::Disconnected));
         assert!(session.send_tx.is_none());
+    }
+
+    #[test]
+    fn test_session_render_fields_default() {
+        let config = ConnectionConfig {
+            name: "test".to_string(),
+            host: "localhost".to_string(),
+            port: 4000,
+            encoding: None,
+            script: None,
+            auto_connect: true,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
+            log_rotation_count: None,
+            render_interval: 2000,
+            realtime: false,
+        };
+        let session = Session::new(SessionId(1), &config);
+        assert_eq!(session.render_interval, 2000);
+        assert!(!session.render_dirty);
+        assert!(session.pending_data.is_empty());
     }
 
     #[test]
@@ -660,8 +723,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(1, &config);
+        let session = Session::new(SessionId(1), &config);
         assert!(session.send("hello").is_err());
     }
 
@@ -684,8 +749,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let mut session = Session::new(1, &config);
+        let mut session = Session::new(SessionId(1), &config);
         session.disconnect();
         assert!(matches!(session.state, SessionState::Disconnected));
     }
@@ -709,8 +776,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(2, &config);
+        let session = Session::new(SessionId(2), &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
     }
 
@@ -733,8 +802,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(3, &config);
+        let session = Session::new(SessionId(3), &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
     }
 
@@ -757,8 +828,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(5, &config);
+        let session = Session::new(SessionId(5), &config);
         assert_eq!(session.script_path, Some("/path/to/script.lua".to_string()));
     }
 
@@ -781,8 +854,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(6, &config);
+        let session = Session::new(SessionId(6), &config);
         assert_eq!(session.username, Some("player".to_string()));
         assert_eq!(session.password, Some("secret".to_string()));
     }
@@ -806,8 +881,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(7, &config);
+        let session = Session::new(SessionId(7), &config);
         assert!(session.auto_connect);
         assert!(!session.auto_reconnect);
         assert_eq!(session.reconnect_delay_secs, 3);
@@ -832,8 +909,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(8, &config);
+        let session = Session::new(SessionId(8), &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
     }
 
@@ -856,8 +935,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(9, &config);
+        let session = Session::new(SessionId(9), &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
     }
 
@@ -928,8 +1009,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(1, &config);
+        let session = Session::new(SessionId(1), &config);
         assert!(session.output_lines.is_empty());
     }
 
@@ -952,8 +1035,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(1, &config);
+        let session = Session::new(SessionId(1), &config);
         assert!(session.lua_engine.is_none());
     }
 
@@ -976,8 +1061,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let mut session = Session::new(1, &config);
+        let mut session = Session::new(SessionId(1), &config);
         session.disconnect();
         assert!(session.send_tx.is_none());
         // Send should fail after disconnect
@@ -1009,8 +1096,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(1, &config);
+        let session = Session::new(SessionId(1), &config);
         assert!(!session.socks5_enable);
         assert!(session.socks5_host.is_none());
         assert_eq!(session.socks5_port, 1080);
@@ -1035,8 +1124,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(1, &config);
+        let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
         assert_eq!(session.socks5_host, Some("127.0.0.1".to_string()));
         assert_eq!(session.socks5_port, 1080);
@@ -1061,8 +1152,10 @@ mod tests {
             socks5_username: Some("user".to_string()),
             socks5_password: Some("pass".to_string()),
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(1, &config);
+        let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
         assert_eq!(session.socks5_host, Some("proxy.example.com".to_string()));
         assert_eq!(session.socks5_port, 1081);
@@ -1090,8 +1183,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(1, &config);
+        let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
         assert!(session.socks5_host.is_none());
     }
@@ -1116,8 +1211,10 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         };
-        let session = Session::new(1, &config);
+        let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
         assert_eq!(session.socks5_host, Some("".to_string()));
     }
@@ -1142,6 +1239,8 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         }
     }
 
@@ -1163,6 +1262,8 @@ mod tests {
             socks5_username: None,
             socks5_password: None,
             log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
         }
     }
 
@@ -1202,7 +1303,7 @@ mod tests {
     async fn test_session_connect_and_receive_data() {
         let data = b"hello world\n";
         let port = start_send_and_close_server(data).await;
-        let mut session = Session::new(0, &make_test_config("test", port));
+        let mut session = Session::new(SessionId(0), &make_test_config("test", port));
 
         let mut event_rx = session.connect().await.unwrap();
         assert!(matches!(session.state, SessionState::Connected));
@@ -1223,7 +1324,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_connect_state_changes() {
         let port = start_echo_server().await;
-        let mut session = Session::new(0, &make_test_config("test", port));
+        let mut session = Session::new(SessionId(0), &make_test_config("test", port));
 
         let mut event_rx = session.connect().await.unwrap();
 
@@ -1247,7 +1348,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_send_command() {
         let port = start_echo_server().await;
-        let mut session = Session::new(0, &make_test_config("test", port));
+        let mut session = Session::new(SessionId(0), &make_test_config("test", port));
 
         let mut event_rx = session.connect().await.unwrap();
 
@@ -1271,7 +1372,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_connect_failure() {
         // 连接到一个不存在的端口
-        let mut session = Session::new(0, &make_test_config("test", 1));
+        let mut session = Session::new(SessionId(0), &make_test_config("test", 1));
 
         let result = session.connect().await;
         assert!(result.is_err());
@@ -1281,7 +1382,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_disconnect_after_connect() {
         let port = start_echo_server().await;
-        let mut session = Session::new(0, &make_test_config("test", port));
+        let mut session = Session::new(SessionId(0), &make_test_config("test", port));
 
         let _event_rx = session.connect().await.unwrap();
         assert!(matches!(session.state, SessionState::Connected));
@@ -1296,7 +1397,7 @@ mod tests {
         // GBK 编码的 "你好\n"
         let gbk_bytes = encode_gbk("你好\n");
         let port = start_send_and_close_server(&gbk_bytes).await;
-        let mut session = Session::new(0, &make_gbk_test_config("gbk_test", port));
+        let mut session = Session::new(SessionId(0), &make_gbk_test_config("gbk_test", port));
 
         let mut event_rx = session.connect().await.unwrap();
 
@@ -1316,7 +1417,7 @@ mod tests {
     async fn test_session_receive_multiple_lines() {
         let data = b"line1\nline2\nline3\n";
         let port = start_send_and_close_server(data).await;
-        let mut session = Session::new(0, &make_test_config("test", port));
+        let mut session = Session::new(SessionId(0), &make_test_config("test", port));
 
         let mut event_rx = session.connect().await.unwrap();
 
@@ -1357,7 +1458,7 @@ mod tests {
             }
         });
 
-        let mut session = Session::new(0, &make_test_config("test", port));
+        let mut session = Session::new(SessionId(0), &make_test_config("test", port));
         let mut event_rx = session.connect().await.unwrap();
 
         let mut got_disconnect = false;

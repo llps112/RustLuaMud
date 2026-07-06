@@ -51,6 +51,26 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source $HOME/.cargo/env
 ```
 
+### 配置 crates.io 镜像源
+
+国内首次编译依赖下载缓慢，推荐配置中科大 USTC 镜像：
+
+```bash
+mkdir -p ~/.cargo
+cat >> ~/.cargo/config.toml << 'EOF'
+
+[source.crates-io]
+replace-with = "ustc"
+
+[source.ustc]
+registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+EOF
+```
+
+配置完成后，后续 `cargo build` 将自动从 USTC 镜像拉取依赖，显著提升下载速度。
+
+> **可选镜像源**：除 USTC 外也可使用清华 TUNA 源（将上述 `ustc` 替换为 `tuna`，URL 改为 `https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/`）。
+
 ### 编译
 
 ```bash
@@ -94,6 +114,10 @@ socks5_password = "pass"   # 可选
 
 # 日志保留数量（可选，默认 24，即保留最近 24 小时日志文件）
 # log_rotation_count = 168
+
+# 渲染控制（可选）
+# render_interval = 1000  # 渲染间隔（毫秒），范围 [50, 10000]，默认 1000
+# realtime = false        # 实时渲染开关，true 时忽略 render_interval 直接实时渲染，默认 false
 ```
 
 > `profiles/example.toml` 为示例文件，程序启动时自动跳过，不会加载。如需临时禁用某个角色配置，可将文件后缀改为非 `.toml`（如 `.bak`），恢复时改回即可。
@@ -161,6 +185,8 @@ socks5_password = "pass"   # 可选
 | `/all <命令>` | 向所有连接发送指令。支持 MUD 命令广播（如 `/all look`）与客户端命令广播（如 `/all /reload`），客户端命令仅允许 `/lua`、`/reload`、`/load`、`/list`、`/disconnect`、`/reconnect` |
 | `/lua <Lua 代码>` | 直接执行 Lua 代码 |
 | `/set keep_command on\|off` | 设置 Enter 后是否保留命令栏输入内容 |
+| `/set render_interval <毫秒>` | 设置渲染间隔（50-10000ms），仅在非实时模式下生效 |
+| `/set realtime on\|off` | 切换实时渲染模式（on=实时渲染，off=节流渲染） |
 
 ---
 

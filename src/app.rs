@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -7,10 +8,10 @@ use crossterm::event::{
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::config::AppConfig;
-use crate::connection::{ConnectionManager, ManagerEvent, SessionState};
+use crate::connection::{ConnectionManager, ManagerEvent, SessionId, SessionState};
 use crate::log::Logger;
 use crate::ui::{AnsiParser, Terminal};
 
@@ -245,17 +246,22 @@ fn split_commands(cmd: &str) -> Vec<String> {
 
 /// 重连请求
 struct ReconnectRequest {
-    session_id: usize,
+    session_id: SessionId,
 }
 
 /// 动态连接请求
 struct ConnectRequest {
-    session_id: usize,
+    session_id: SessionId,
 }
 
 /// 定时器触发请求
 struct TimerRequest {
-    session_id: usize,
+    session_id: SessionId,
+}
+
+/// 渲染刷新请求
+struct RenderTickRequest {
+    session_id: SessionId,
 }
 
 /// 解析 /connect 命令参数，返回 (host, port)
@@ -307,6 +313,9 @@ pub struct App {
     connect_rx: mpsc::Receiver<ConnectRequest>,
     timer_tx: mpsc::Sender<TimerRequest>,
     timer_rx: mpsc::Receiver<TimerRequest>,
+    render_tick_tx: mpsc::Sender<RenderTickRequest>,
+    render_tick_rx: mpsc::Receiver<RenderTickRequest>,
+    render_tick_cancels: HashMap<SessionId, oneshot::Sender<()>>,
 }
 
 impl App {
@@ -338,6 +347,7 @@ impl App {
         let (reconnect_tx, reconnect_rx) = mpsc::channel(32);
         let (connect_tx, connect_rx) = mpsc::channel(16);
         let (timer_tx, timer_rx) = mpsc::channel(64);
+        let (render_tick_tx, render_tick_rx) = mpsc::channel(32);
 
         Ok(Self {
             config,
@@ -351,6 +361,9 @@ impl App {
             connect_rx,
             timer_tx,
             timer_rx,
+            render_tick_tx,
+            render_tick_rx,
+            render_tick_cancels: HashMap::new(),
         })
     }
 
@@ -359,25 +372,57 @@ impl App {
         self.terminal.init_screen()?;
 
         // 自动连接所有 auto_connect 的连接（包括从 profile 加载的）
-        let auto_connect_ids: Vec<usize> = (0..self.manager.sessions.len())
-            .filter(|&id| self.manager.sessions[id].auto_connect)
+        let auto_connect_ids: Vec<SessionId> = self
+            .manager
+            .ordered_session_ids()
+            .iter()
+            .filter(|&&id| {
+                self.manager
+                    .get_by_id(id)
+                    .map(|s| s.auto_connect)
+                    .unwrap_or(false)
+            })
+            .copied()
             .collect();
-        for id in auto_connect_ids {
-            let name = self.manager.sessions[id].name.clone();
-            match self.manager.connect_session(id).await {
+        for session_id in auto_connect_ids {
+            let name = self
+                .manager
+                .get_by_id(session_id)
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
+            let display_pos = self.manager.display_number_of(session_id);
+            match self.manager.connect_session(session_id).await {
                 Ok(()) => {
-                    let msg = format!("[系统] 连接 {} ({}) 已建立", id + 1, name);
+                    let msg = format!("[系统] 连接 {} ({}) 已建立", display_pos, name);
                     self.terminal.append_output(&msg)?;
-                    self.init_lua_for_session(id)?;
+                    self.init_lua_for_session(session_id)?;
                 }
                 Err(e) => {
-                    let msg = format!("[系统] 连接 {} ({}) 失败: {}", id + 1, name, e);
+                    let msg = format!("[系统] 连接 {} ({}) 失败: {}", display_pos, name, e);
                     self.terminal.append_output(&msg)?;
                 }
             }
         }
 
         self.update_status_bar()?;
+
+        // 为每个 session 启动渲染刷新定时器（非实时模式且 render_interval > 0）
+        let render_tick_sessions: Vec<(SessionId, u64)> = self
+            .manager
+            .ordered_session_ids()
+            .iter()
+            .filter_map(|&id| {
+                let s = self.manager.get_by_id(id)?;
+                if !s.realtime && s.render_interval > 0 {
+                    Some((id, s.render_interval))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (session_id, interval) in render_tick_sessions {
+            self.start_render_tick_timer(session_id, interval);
+        }
 
         // 获取管理器事件接收器
         let mut mgr_rx = self
@@ -427,6 +472,11 @@ impl App {
                 Some(req) = self.timer_rx.recv() => {
                     self.handle_timer(req.session_id)?;
                 }
+
+                // 处理渲染刷新请求
+                Some(req) = self.render_tick_rx.recv() => {
+                    self.handle_render_tick(req.session_id)?;
+                }
             }
         }
 
@@ -434,31 +484,36 @@ impl App {
     }
 
     /// 执行重连
-    async fn perform_reconnect(&mut self, session_id: usize) -> io::Result<()> {
-        let name = if session_id < self.manager.sessions.len() {
-            self.manager.sessions[session_id].name.clone()
-        } else {
-            "未知".to_string()
-        };
+    async fn perform_reconnect(&mut self, session_id: SessionId) -> io::Result<()> {
+        let name = self
+            .manager
+            .get_by_id(session_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "未知".to_string());
+        let display_pos = self.manager.display_number_of(session_id);
 
         match self.manager.connect_session(session_id).await {
             Ok(()) => {
-                let msg = format!("[系统] 连接 {} ({}) 重连成功", session_id + 1, name);
+                let msg = format!("[系统] 连接 {} ({}) 重连成功", display_pos, name);
                 self.terminal.append_output(&msg)?;
                 // 如果 Lua 引擎已存在（重连前已加载脚本），不重建引擎，
                 // 保留 Lua 变量状态（stat.* 等统计数据）。仅通知引擎已连接以触发 OnConnect。
                 // 若引擎不存在（首次连接或未加载脚本），则执行标准初始化流程。
-                if session_id < self.manager.sessions.len()
-                    && self.manager.sessions[session_id].lua_engine.is_some()
-                {
+                let has_engine = self
+                    .manager
+                    .get_by_id(session_id)
+                    .map(|s| s.lua_engine.is_some())
+                    .unwrap_or(false);
+                if has_engine {
                     // 先排空 OnConnect() 产生的命令和日志，再发送
-                    let (queued_cmds, queued_logs) = {
-                        let engine = self.manager.sessions[session_id]
-                            .lua_engine
-                            .as_mut()
+                    let queued_cmds = {
+                        let engine = self
+                            .manager
+                            .get_mut_by_id(session_id)
+                            .and_then(|s| s.lua_engine.as_mut())
                             .unwrap();
                         engine.set_connected(true);
-                        (engine.drain_commands(), engine.drain_logs())
+                        engine.drain_commands()
                     };
                     for cmd in &queued_cmds {
                         self.logger.log_command(&name, cmd);
@@ -466,9 +521,7 @@ impl App {
                             self.terminal.append_output(&format!("[发送错误] {}", e))?;
                         }
                     }
-                    for msg in &queued_logs {
-                        self.terminal.append_output(msg)?;
-                    }
+                    self.drain_lua_logs(session_id)?;
                 } else {
                     self.init_lua_for_session(session_id)?;
                 }
@@ -478,7 +531,7 @@ impl App {
                 }
             }
             Err(e) => {
-                let msg = format!("[系统] 重连 {} ({}) 失败: {}", session_id + 1, name, e);
+                let msg = format!("[系统] 重连 {} ({}) 失败: {}", display_pos, name, e);
                 self.terminal.append_output(&msg)?;
             }
         }
@@ -486,23 +539,21 @@ impl App {
     }
 
     /// 执行动态连接
-    async fn perform_connect(&mut self, session_id: usize) -> io::Result<()> {
-        if session_id >= self.manager.sessions.len() {
-            self.terminal.append_output("[错误] 无效的连接 ID")?;
-            return Ok(());
-        }
-        let name = self.manager.sessions[session_id].name.clone();
-        let host = self.manager.sessions[session_id].host.clone();
-        let port = self.manager.sessions[session_id].port;
+    async fn perform_connect(&mut self, session_id: SessionId) -> io::Result<()> {
+        let (name, host, port) = match self.manager.get_by_id(session_id) {
+            Some(s) => (s.name.clone(), s.host.clone(), s.port),
+            None => {
+                self.terminal.append_output("[错误] 无效的连接 ID")?;
+                return Ok(());
+            }
+        };
+        let display_pos = self.manager.display_number_of(session_id);
 
         match self.manager.connect_session(session_id).await {
             Ok(()) => {
                 let msg = format!(
                     "[系统] 连接 {} ({}) → {}:{} 已建立",
-                    session_id + 1,
-                    name,
-                    host,
-                    port
+                    display_pos, name, host, port
                 );
                 self.terminal.append_output(&msg)?;
                 self.init_lua_for_session(session_id)?;
@@ -518,33 +569,36 @@ impl App {
     }
 
     /// 为指定连接初始化 Lua 引擎并加载脚本
-    fn init_lua_for_session(&mut self, id: usize) -> io::Result<()> {
-        if id >= self.manager.sessions.len() {
-            return Ok(());
-        }
-
+    fn init_lua_for_session(&mut self, session_id: SessionId) -> io::Result<()> {
         // 从 Session 自身获取配置
-        let name = self.manager.sessions[id].name.clone();
-        let script_path = self.manager.sessions[id].script_path.clone();
-        let username = self.manager.sessions[id].username.clone();
-        let password = self.manager.sessions[id].password.clone();
-        let host = self.manager.sessions[id].host.clone();
+        let (name, script_path, username, password, host) = match self.manager.get_by_id(session_id)
+        {
+            Some(s) => (
+                s.name.clone(),
+                s.script_path.clone(),
+                s.username.clone(),
+                s.password.clone(),
+                s.host.clone(),
+            ),
+            None => return Ok(()),
+        };
+        let display_pos = self.manager.display_number_of(session_id);
 
         match crate::lua::LuaEngine::new() {
             Ok(mut engine) => {
                 // 注入主机地址（供 GetInfo(1) 返回）
                 engine.set_host(&host);
                 // 注入世界名称（供 GetInfo(2) 返回）
-                engine.set_world_name(&self.manager.sessions[id].name);
+                engine.set_world_name(&name);
                 // 注入日志目录（供 GetInfo(58) 返回）
                 engine.set_log_dir(&self.config.general.log_dir);
 
                 // 注入登录凭证到 Lua 变量和全局变量
-                if let Some(ref name) = username {
-                    if !name.is_empty() {
-                        engine.set_variable("char_name", name);
-                        engine.set_global("char_name", name);
-                        engine.set_char_name(name); // 供 GetInfo(3) 返回
+                if let Some(ref uname) = username {
+                    if !uname.is_empty() {
+                        engine.set_variable("char_name", uname);
+                        engine.set_global("char_name", uname);
+                        engine.set_char_name(uname); // 供 GetInfo(3) 返回
                     }
                 }
                 if let Some(ref pwd) = password {
@@ -570,23 +624,17 @@ impl App {
                                     }
                                 } else {
                                     self.logger.log_command(&name, cmd);
-                                    if let Err(e) = self.manager.send_to(id, cmd) {
+                                    if let Err(e) = self.manager.send_to(session_id, cmd) {
                                         self.terminal
                                             .append_output(&format!("[发送错误] {}", e))?;
                                     }
                                 }
                             }
 
-                            // 排空并显示脚本加载期间的 Lua 日志
-                            let name = self.manager.sessions[id].name.clone();
-                            let logs = engine.drain_logs();
-                            for msg in logs {
-                                let clean = crate::ui::AnsiParser::strip_ansi(&msg);
-                                self.logger.log(&name, &clean);
-                                self.terminal.append_output(&msg)?;
-                            }
+                            // 排空脚本加载期间的 Lua 日志
+                            self.drain_lua_logs(session_id)?;
 
-                            let msg = format!("[Lua] 连接 {} 脚本已加载: {}", id + 1, path);
+                            let msg = format!("[Lua] 连接 {} 脚本已加载: {}", display_pos, path);
                             self.terminal.append_output(&msg)?;
                         }
                         Err(e) => {
@@ -595,7 +643,6 @@ impl App {
                                 self.terminal.append_output(&line)?;
                             }
                             // 脚本加载错误也写入日志
-                            let name = self.manager.sessions[id].name.clone();
                             for line in format_lua_error(&err_msg) {
                                 self.logger.log_debug(&name, &line);
                             }
@@ -603,43 +650,46 @@ impl App {
                     }
                 }
 
-                self.manager.sessions[id].lua_engine = Some(engine);
+                self.manager
+                    .get_mut_by_id(session_id)
+                    .map(|s| s.lua_engine = Some(engine));
                 // 同步连接状态：session.connect() 在创建事件通道前已设置 state，
                 // 初始 Connected 状态不会通过 StateChange 事件到达 engine，
                 // 此处手动同步，确保 engine 知道当前已连接并触发 alias.atconnect()
-                if id < self.manager.sessions.len() {
-                    let is_connected = matches!(
-                        self.manager.sessions[id].state,
-                        crate::connection::SessionState::Connected
-                    );
+                {
+                    let is_connected = self
+                        .manager
+                        .get_by_id(session_id)
+                        .map(|s| matches!(s.state, crate::connection::SessionState::Connected))
+                        .unwrap_or(false);
                     if is_connected {
-                        let (queued_cmds, queued_logs) = {
-                            match self.manager.sessions[id].lua_engine.as_mut() {
+                        let queued_cmds = {
+                            match self
+                                .manager
+                                .get_mut_by_id(session_id)
+                                .and_then(|s| s.lua_engine.as_mut())
+                            {
                                 Some(eng) => {
                                     eng.set_connected(true);
-                                    (eng.drain_commands(), eng.drain_logs())
+                                    eng.drain_commands()
                                 }
-                                None => (Vec::new(), Vec::new()),
+                                None => Vec::new(),
                             }
                         };
                         for cmd in &queued_cmds {
                             self.logger.log_command(&name, cmd);
-                            if let Err(e) = self.manager.send_to(id, cmd) {
+                            if let Err(e) = self.manager.send_to(session_id, cmd) {
                                 self.terminal.append_output(&format!("[发送错误] {}", e))?;
                             }
                         }
-                        for msg in &queued_logs {
-                            self.terminal.append_output(msg)?;
-                        }
-                    } else {
-                        // session 尚未连接，无需同步
+                        self.drain_lua_logs(session_id)?;
                     }
                 }
                 // 启动定时器
-                self.start_timers_for_session(id);
+                self.start_timers_for_session(session_id);
             }
             Err(e) => {
-                let msg = format!("[Lua] 连接 {} 引擎初始化失败: {}", id + 1, e);
+                let msg = format!("[Lua] 连接 {} 引擎初始化失败: {}", display_pos, e);
                 self.terminal.append_output(&msg)?;
             }
         }
@@ -647,10 +697,13 @@ impl App {
     }
 
     /// 为指定连接启动定时器任务
-    fn start_timers_for_session(&mut self, id: usize) {
-        if id >= self.manager.sessions.len() {
-            return;
-        }
+    fn start_timers_for_session(&mut self, session_id: SessionId) {
+        let session = match self.manager.get_mut_by_id(session_id) {
+            Some(s) => s,
+            None => return,
+        };
+        let (timer_cancel_tx, mut timer_cancel_rx) = oneshot::channel();
+        session.timer_cancel_tx = Some(timer_cancel_tx);
 
         // 使用轮询方式：单个 tokio 任务定期检查所有定时器
         // 这解决了动态创建的定时器（如 wait.time 创建的）无法触发的问题
@@ -659,24 +712,31 @@ impl App {
             // 轮询间隔 50ms，确保定时器精度
             let poll_interval = tokio::time::Duration::from_millis(50);
             loop {
-                tokio::time::sleep(poll_interval).await;
-                if timer_tx
-                    .send(TimerRequest { session_id: id })
-                    .await
-                    .is_err()
-                {
-                    break;
+                tokio::select! {
+                    _ = &mut timer_cancel_rx => { break; }
+                    _ = tokio::time::sleep(poll_interval) => {
+                        if timer_tx
+                            .send(TimerRequest { session_id })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                 }
             }
         });
     }
 
     /// 发送 Lua 引擎产生的命令，拦截 / 开头的命令作为 Lua 代码执行
-    fn send_lua_commands(&mut self, session_id: usize, commands: Vec<String>) -> io::Result<()> {
-        let name = if session_id < self.manager.sessions.len() {
-            self.manager.sessions[session_id].name.clone()
-        } else {
-            return Ok(());
+    fn send_lua_commands(
+        &mut self,
+        session_id: SessionId,
+        commands: Vec<String>,
+    ) -> io::Result<()> {
+        let name = match self.manager.get_by_id(session_id) {
+            Some(s) => s.name.clone(),
+            None => return Ok(()),
         };
         // 使用队列处理命令，别名匹配可能产生新命令需要继续处理
         // 先按 ; 拆分，保证带多个分号分隔的命令被逐条处理
@@ -699,7 +759,11 @@ impl App {
                 // / 开头的命令作为 Lua 代码执行
                 // 去掉前导 /
                 self.logger.log_lua(&name, lua_code);
-                if let Some(ref engine) = self.manager.sessions[session_id].lua_engine {
+                if let Some(ref engine) = self
+                    .manager
+                    .get_by_id(session_id)
+                    .and_then(|s| s.lua_engine.as_ref())
+                {
                     match engine.eval_code(lua_code) {
                         Ok(_) => {
                             let sub_commands = engine.drain_commands();
@@ -709,7 +773,6 @@ impl App {
                                     self.terminal.append_output(&format!("[Lua 错误] {}", e))?;
                                 }
                             }
-                            self.drain_lua_logs(session_id)?;
                         }
                         Err(e) => {
                             self.terminal.append_output(&format!("[Lua 错误] {}", e))?;
@@ -718,23 +781,25 @@ impl App {
                 }
             } else if depth < max_depth {
                 // 非 / 开头的命令：先尝试别名匹配（与 MUSHclient Execute 行为一致）
-                let alias_handled =
-                    if let Some(ref engine) = self.manager.sessions[session_id].lua_engine {
-                        let handled = engine.process_input(&cmd);
-                        if handled {
-                            let sub_commands = engine.drain_commands();
-                            if !sub_commands.is_empty() {
-                                // 别名匹配成功，产生的命令加入队列继续处理
-                                for sub_cmd in sub_commands {
-                                    queue.push_front(sub_cmd);
-                                }
+                let alias_handled = if let Some(ref engine) = self
+                    .manager
+                    .get_by_id(session_id)
+                    .and_then(|s| s.lua_engine.as_ref())
+                {
+                    let handled = engine.process_input(&cmd);
+                    if handled {
+                        let sub_commands = engine.drain_commands();
+                        if !sub_commands.is_empty() {
+                            // 别名匹配成功，产生的命令加入队列继续处理
+                            for sub_cmd in sub_commands {
+                                queue.push_front(sub_cmd);
                             }
-                            self.drain_lua_logs(session_id)?;
                         }
-                        handled
-                    } else {
-                        false
-                    };
+                    }
+                    handled
+                } else {
+                    false
+                };
 
                 if !alias_handled {
                     // 无别名匹配，直接发送到 MUD
@@ -756,13 +821,11 @@ impl App {
     }
 
     /// 发送 Lua 引擎产生的原始数据包（SendPkt 压入的）
-    fn send_lua_raw(&mut self, session_id: usize) -> io::Result<()> {
-        if session_id >= self.manager.sessions.len() {
-            return Ok(());
-        }
-        let raw_packets = self.manager.sessions[session_id]
-            .lua_engine
-            .as_ref()
+    fn send_lua_raw(&mut self, session_id: SessionId) -> io::Result<()> {
+        let raw_packets = self
+            .manager
+            .get_by_id(session_id)
+            .and_then(|s| s.lua_engine.as_ref())
             .map(|engine| engine.drain_raw())
             .unwrap_or_default();
         for data in raw_packets {
@@ -775,25 +838,27 @@ impl App {
     }
 
     /// 处理定时器触发（轮询模式：检查所有到期定时器）
-    fn handle_timer(&mut self, session_id: usize) -> io::Result<()> {
-        if session_id >= self.manager.sessions.len() {
+    fn handle_timer(&mut self, session_id: SessionId) -> io::Result<()> {
+        if self.manager.get_by_id(session_id).is_none() {
             return Ok(());
         }
         let mut any_fired = false;
         loop {
             // 先检查是否有到期的定时器，确保 engine 引用在调用 self 方法前被释放
-            let should_fire = self.manager.sessions[session_id]
-                .lua_engine
-                .as_ref()
+            let should_fire = self
+                .manager
+                .get_by_id(session_id)
+                .and_then(|s| s.lua_engine.as_ref())
                 .map(|engine| engine.fire_next_due_timer())
                 .unwrap_or(false);
             if !should_fire {
                 break;
             }
             any_fired = true;
-            let commands = self.manager.sessions[session_id]
-                .lua_engine
-                .as_ref()
+            let commands = self
+                .manager
+                .get_by_id(session_id)
+                .and_then(|s| s.lua_engine.as_ref())
                 .map(|engine| engine.drain_commands())
                 .unwrap_or_default();
             if !commands.is_empty() {
@@ -804,7 +869,11 @@ impl App {
             self.drain_lua_logs(session_id)?;
         }
         // 空闲心跳检测：服务器静默超过 30 秒时发送 IAC NOP
-        if let Some(ref engine) = self.manager.sessions[session_id].lua_engine {
+        if let Some(ref engine) = self
+            .manager
+            .get_by_id(session_id)
+            .and_then(|s| s.lua_engine.as_ref())
+        {
             engine.fire_keepalive_if_idle();
         }
         self.send_lua_raw(session_id)?;
@@ -815,17 +884,104 @@ impl App {
         Ok(())
     }
 
-    /// 处理 Lua 引擎产生的日志
-    fn drain_lua_logs(&mut self, session_id: usize) -> io::Result<()> {
-        if session_id >= self.manager.sessions.len() {
+    /// 停止指定 session 的渲染刷新定时器
+    fn stop_render_tick_timer(&mut self, session_id: SessionId) {
+        if let Some(cancel_tx) = self.render_tick_cancels.remove(&session_id) {
+            let _ = cancel_tx.send(());
+        }
+    }
+
+    /// 启动渲染刷新定时器：按指定间隔定期发送刷新请求
+    fn start_render_tick_timer(&mut self, session_id: SessionId, interval_ms: u64) {
+        // 先停止旧的定时器
+        self.stop_render_tick_timer(session_id);
+
+        let tx = self.render_tick_tx.clone();
+        let (cancel_tx, mut cancel_rx) = oneshot::channel();
+        self.render_tick_cancels.insert(session_id, cancel_tx);
+
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if tx.send(RenderTickRequest { session_id }).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ = &mut cancel_rx => {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    /// 处理渲染刷新请求：将缓冲的待渲染数据一次性输出到终端
+    fn handle_render_tick(&mut self, session_id: SessionId) -> io::Result<()> {
+        if self.manager.get_by_id(session_id).is_none() {
             return Ok(());
         }
-        let logs = if let Some(ref engine) = self.manager.sessions[session_id].lua_engine {
-            engine.drain_logs()
-        } else {
-            Vec::new()
-        };
-        let name = self.manager.sessions[session_id].name.clone();
+        // 仅当前台 session 且有待渲染数据时才刷新
+        if session_id != self.manager.foreground_id {
+            if let Some(session) = self.manager.get_mut_by_id(session_id) {
+                session.render_dirty = false;
+            }
+            return Ok(());
+        }
+        if !self
+            .manager
+            .get_by_id(session_id)
+            .map(|s| s.render_dirty)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        let pending = self
+            .manager
+            .get_mut_by_id(session_id)
+            .map(|s| std::mem::take(&mut s.pending_data))
+            .unwrap_or_default();
+        if let Some(session) = self.manager.get_mut_by_id(session_id) {
+            session.render_dirty = false;
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+        // 合并所有待渲染行，一次性输出
+        let mut combined = String::new();
+        for line in &pending {
+            combined.push_str(line);
+            combined.push('\n');
+        }
+        if !combined.is_empty() {
+            self.terminal.append_output(&combined)?;
+        }
+        Ok(())
+    }
+
+    /// 处理 Lua 引擎产生的日志
+    fn drain_lua_logs(&mut self, session_id: SessionId) -> io::Result<()> {
+        let logs = self
+            .manager
+            .get_by_id(session_id)
+            .and_then(|s| s.lua_engine.as_ref())
+            .map(|engine| engine.drain_logs())
+            .unwrap_or_default();
+        let name = self
+            .manager
+            .get_by_id(session_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        let is_foreground = session_id == self.manager.foreground_id;
+        // 节流模式下将 Lua 日志缓冲到 pending_data，与 MUD 数据一起刷新
+        let buffer = is_foreground
+            && !self
+                .manager
+                .get_by_id(session_id)
+                .map(|s| s.realtime)
+                .unwrap_or(false);
         for msg in logs {
             // 日志写入文件（剥离 ANSI 码），根据前缀分类
             let clean = crate::ui::AnsiParser::strip_ansi(&msg);
@@ -838,9 +994,16 @@ impl App {
                 self.logger.log(&name, &clean);
             }
             // 如果是前台连接，也在终端显示（保留 ANSI 码以显示颜色）
-            if session_id == self.manager.foreground_id {
-                self.terminal
-                    .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
+            if is_foreground {
+                if buffer {
+                    self.manager.get_mut_by_id(session_id).map(|s| {
+                        s.pending_data.push(format!("\x1b[36m[Lua] {}\x1b[0m", msg));
+                        s.render_dirty = true;
+                    });
+                } else {
+                    self.terminal
+                        .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
+                }
             }
         }
         Ok(())
@@ -853,7 +1016,7 @@ impl App {
             let x = mouse.column;
             for region in self.terminal.click_regions() {
                 if x >= region.start_x && x < region.end_x {
-                    if region.session_id < self.manager.sessions.len() {
+                    if self.manager.get_by_id(region.session_id).is_some() {
                         self.switch_foreground(region.session_id)?;
                     }
                     break;
@@ -880,9 +1043,10 @@ impl App {
         if key.modifiers.contains(KeyModifiers::ALT) {
             if let KeyCode::Char(c) = key.code {
                 if let Some(digit) = c.to_digit(10) {
-                    let id = if digit == 0 { 9 } else { (digit as usize) - 1 };
-                    if id < self.manager.sessions.len() {
-                        self.switch_foreground(id)?;
+                    let display_num = if digit == 0 { 10 } else { digit as usize };
+                    if let Some(session_id) = self.manager.session_id_by_display_number(display_num)
+                    {
+                        self.switch_foreground(session_id)?;
                     }
                     return Ok(());
                 }
@@ -893,25 +1057,26 @@ impl App {
         // U+00B0 (°) = Alt+0, U+00B1 (±) = Alt+1, ..., U+00B9 (¹) = Alt+9
         if let KeyCode::Char(c) = key.code {
             if let Some(digit) = Self::parse_xterm_alt_digit(c) {
-                let id = if digit == 0 { 9 } else { (digit as usize) - 1 };
-                if id < self.manager.sessions.len() {
-                    self.switch_foreground(id)?;
+                let display_num = if digit == 0 { 10 } else { digit as usize };
+                if let Some(session_id) = self.manager.session_id_by_display_number(display_num) {
+                    self.switch_foreground(session_id)?;
                 }
                 return Ok(());
             }
         }
 
         // Alt+Left: 切换到前一个连接 (循环), Alt+Right: 切换到后一个连接 (循环)
-        let total = self.manager.sessions.len();
-        if total > 0 {
+        if self.manager.session_count() > 0 {
             if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Left {
-                let new_id = (self.manager.foreground_id + total - 1) % total;
-                self.switch_foreground(new_id)?;
+                if let Some(new_id) = self.manager.cycle_foreground(-1) {
+                    self.switch_foreground(new_id)?;
+                }
                 return Ok(());
             }
             if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Right {
-                let new_id = (self.manager.foreground_id + 1) % total;
-                self.switch_foreground(new_id)?;
+                if let Some(new_id) = self.manager.cycle_foreground(1) {
+                    self.switch_foreground(new_id)?;
+                }
                 return Ok(());
             }
         }
@@ -936,29 +1101,28 @@ impl App {
                     // 逐条处理命令
                     for single_cmd in commands {
                         // 先尝试别名匹配
-                        let fg = self.manager.foreground_id;
-                        let alias_handled = if fg < self.manager.sessions.len() {
-                            if let Some(ref engine) = self.manager.sessions[fg].lua_engine {
-                                let handled = engine.process_input(&single_cmd);
-                                if handled {
-                                    let commands = engine.drain_commands();
-                                    self.send_lua_commands(fg, commands)?;
-                                    self.drain_lua_logs(fg)?;
-                                } else {
-                                    self.drain_lua_logs(fg)?;
-                                }
-                                handled
+                        let fg_id = self.manager.foreground_id;
+                        let alias_handled = if let Some(ref engine) = self
+                            .manager
+                            .get_by_id(fg_id)
+                            .and_then(|s| s.lua_engine.as_ref())
+                        {
+                            let handled = engine.process_input(&single_cmd);
+                            if handled {
+                                let commands = engine.drain_commands();
+                                self.send_lua_commands(fg_id, commands)?;
+                                self.drain_lua_logs(fg_id)?;
                             } else {
-                                false
+                                self.drain_lua_logs(fg_id)?;
                             }
+                            handled
                         } else {
                             false
                         };
 
                         if !alias_handled {
                             // 无别名匹配，发送到前台连接
-                            if let Some(fg) = self.manager.sessions.get(self.manager.foreground_id)
-                            {
+                            if let Some(fg) = self.manager.get_by_id(self.manager.foreground_id) {
                                 self.logger.log_command(&fg.name, &single_cmd);
                             }
                             if let Err(e) = self.manager.send_to_foreground(&single_cmd) {
@@ -1006,34 +1170,42 @@ impl App {
                     socks5_username: None,
                     socks5_password: None,
                     log_rotation_count: None,
+                    render_interval: 1000,
+                    realtime: false,
                 };
 
-                let id = match self.manager.add_connection_dynamic(&conn_config) {
+                let session_id = match self.manager.add_connection_dynamic(&conn_config) {
                     Ok(id) => id,
                     Err(e) => {
                         self.terminal.append_output(&format!("[错误] {}", e))?;
                         return Ok(());
                     }
                 };
+                // 启动渲染定时器（非实时模式且配置了 render_interval > 0）
+                if !conn_config.realtime && conn_config.render_interval > 0 {
+                    self.start_render_tick_timer(session_id, conn_config.render_interval);
+                }
                 self.update_status_bar()?;
-                let _ = self.connect_tx.try_send(ConnectRequest { session_id: id });
+                let _ = self.connect_tx.try_send(ConnectRequest { session_id });
+                let display_pos = self.manager.display_number_of(session_id);
                 self.terminal.append_output(&format!(
                     "[系统] 正在连接 {} ({}) → {}:{}",
-                    id + 1,
-                    name,
-                    host,
-                    port
+                    display_pos, name, host, port
                 ))?;
             }
 
             BuiltinCommand::Disconnect { id } => {
                 if let Some(id) = id {
-                    if id > 0 && id <= self.manager.sessions.len() {
-                        let target_id = id - 1;
-                        self.manager.sessions[target_id].disconnect();
-                        let name = self.manager.sessions[target_id].name.clone();
-                        self.manager.sessions[target_id].state =
-                            crate::connection::SessionState::Disconnected;
+                    if let Some(session_id) = self.manager.session_id_by_display_number(id) {
+                        if let Some(session) = self.manager.get_mut_by_id(session_id) {
+                            session.disconnect();
+                            session.state = crate::connection::SessionState::Disconnected;
+                        }
+                        let name = self
+                            .manager
+                            .get_by_id(session_id)
+                            .map(|s| s.name.clone())
+                            .unwrap_or_default();
                         self.update_status_bar()?;
                         self.terminal
                             .append_output(&format!("[系统] 已断开连接 {} ({})", id, name))?;
@@ -1042,78 +1214,86 @@ impl App {
                             .append_output(&format!("[错误] 连接 {} 不存在", id))?;
                     }
                 } else {
-                    let fg = self.manager.foreground_id;
-                    if fg < self.manager.sessions.len() {
-                        self.manager.sessions[fg].disconnect();
-                        self.manager.sessions[fg].state =
-                            crate::connection::SessionState::Disconnected;
+                    let fg_id = self.manager.foreground_id;
+                    if self.manager.get_by_id(fg_id).is_some() {
+                        if let Some(session) = self.manager.get_mut_by_id(fg_id) {
+                            session.disconnect();
+                            session.state = crate::connection::SessionState::Disconnected;
+                        }
                         self.update_status_bar()?;
+                        let name = self
+                            .manager
+                            .get_by_id(fg_id)
+                            .map(|s| s.name.clone())
+                            .unwrap_or_default();
+                        let display_pos = self.manager.display_number_of(fg_id);
                         self.terminal.append_output(&format!(
                             "[系统] 已断开连接 {} ({})",
-                            fg + 1,
-                            self.manager.sessions[fg].name
+                            display_pos, name
                         ))?;
                     }
                 }
             }
 
             BuiltinCommand::Reconnect { id } => {
-                let target = if let Some(id) = id {
-                    match id.checked_sub(1) {
-                        Some(t) => t,
-                        None => {
-                            self.terminal.append_output("[错误] 无效的编号")?;
-                            return Ok(());
-                        }
+                let session_id = if let Some(id) = id {
+                    if let Some(sid) = self.manager.session_id_by_display_number(id) {
+                        sid
+                    } else {
+                        self.terminal
+                            .append_output(&format!("[错误] 连接 {} 不存在", id))?;
+                        return Ok(());
                     }
                 } else {
                     self.manager.foreground_id
                 };
-                if target < self.manager.sessions.len() {
-                    let name = self.manager.sessions[target].name.clone();
-                    self.manager.sessions[target].disconnect();
-                    self.manager.sessions[target].state =
-                        crate::connection::SessionState::Disconnected;
-                    self.terminal.append_output(&format!(
-                        "[系统] 正在重连 {} ({})...",
-                        target + 1,
-                        name
-                    ))?;
-                    self.update_status_bar()?;
-                    let _ = self
-                        .reconnect_tx
-                        .try_send(ReconnectRequest { session_id: target });
-                } else {
-                    let display = id.unwrap_or(0);
-                    self.terminal
-                        .append_output(&format!("[错误] 连接 {} 不存在", display))?;
+                if self.manager.get_by_id(session_id).is_none() {
+                    self.terminal.append_output("[错误] 连接不存在")?;
+                    return Ok(());
                 }
+                let name = self
+                    .manager
+                    .get_by_id(session_id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                if let Some(session) = self.manager.get_mut_by_id(session_id) {
+                    session.disconnect();
+                    session.state = crate::connection::SessionState::Disconnected;
+                }
+                let display_pos = self.manager.display_number_of(session_id);
+                self.terminal
+                    .append_output(&format!("[系统] 正在重连 {} ({})...", display_pos, name))?;
+                self.update_status_bar()?;
+                let _ = self.reconnect_tx.try_send(ReconnectRequest { session_id });
             }
 
             BuiltinCommand::Close { id } => {
-                let target = if let Some(id) = id {
-                    match id.checked_sub(1) {
-                        Some(t) => t,
-                        None => {
-                            self.terminal.append_output("[错误] 无效的编号")?;
-                            return Ok(());
-                        }
+                let session_id = if let Some(id) = id {
+                    if let Some(sid) = self.manager.session_id_by_display_number(id) {
+                        sid
+                    } else {
+                        self.terminal
+                            .append_output(&format!("[错误] 连接 {} 不存在", id))?;
+                        return Ok(());
                     }
                 } else {
                     self.manager.foreground_id
                 };
-                match self.manager.remove_session(target) {
+                let display_pos = self.manager.display_number_of(session_id);
+                // 清理定时器：停止目标 session 的渲染刷新定时器
+                self.stop_render_tick_timer(session_id);
+
+                match self.manager.remove_session(session_id) {
                     Ok(name) => {
                         self.update_status_bar()?;
-                        if !self.manager.sessions.is_empty() {
+                        if self.manager.session_count() > 0 {
                             self.switch_foreground(self.manager.foreground_id)?;
                         } else {
                             self.terminal.replace_output(&Vec::new())?;
                         }
                         self.terminal.append_output(&format!(
                             "[系统] 已关闭连接 {} ({})",
-                            target + 1,
-                            name
+                            display_pos, name
                         ))?;
                     }
                     Err(e) => {
@@ -1123,43 +1303,45 @@ impl App {
             }
 
             BuiltinCommand::List => {
-                for (i, s) in self.manager.sessions.iter().enumerate() {
-                    let state_str = match s.state {
-                        crate::connection::SessionState::Connected => "已连接",
-                        crate::connection::SessionState::Disconnected => "已断开",
-                        crate::connection::SessionState::Connecting => "连接中...",
-                        crate::connection::SessionState::Reconnecting => "重连中...",
-                    };
-                    let marker = if i == self.manager.foreground_id {
-                        "★"
-                    } else {
-                        " "
-                    };
-                    self.terminal.append_output(&format!(
-                        "{} [{}] {} - {}",
-                        marker,
-                        i + 1,
-                        s.name,
-                        state_str
-                    ))?;
+                for &sid in self.manager.ordered_session_ids() {
+                    if let Some(s) = self.manager.get_by_id(sid) {
+                        let state_str = match s.state {
+                            crate::connection::SessionState::Connected => "已连接",
+                            crate::connection::SessionState::Disconnected => "已断开",
+                            crate::connection::SessionState::Connecting => "连接中...",
+                            crate::connection::SessionState::Reconnecting => "重连中...",
+                        };
+                        let marker = if sid == self.manager.foreground_id {
+                            "★"
+                        } else {
+                            " "
+                        };
+                        let display_num = self.manager.display_number_of(sid);
+                        self.terminal.append_output(&format!(
+                            "{} [{}] {} - {}",
+                            marker, display_num, s.name, state_str
+                        ))?;
+                    }
                 }
             }
 
             BuiltinCommand::Load { path } => {
-                let fg = self.manager.foreground_id;
-                if fg >= self.manager.sessions.len() {
+                let fg_id = self.manager.foreground_id;
+                if self.manager.get_by_id(fg_id).is_none() {
                     self.terminal.append_output("[错误] 无前台连接")?;
                     return Ok(());
                 }
                 match crate::lua::LuaEngine::new() {
                     Ok(mut engine) => match engine.load_script(&path) {
                         Ok(()) => {
-                            self.manager.sessions[fg].lua_engine = Some(engine);
+                            if let Some(session) = self.manager.get_mut_by_id(fg_id) {
+                                session.lua_engine = Some(engine);
+                            }
                             self.terminal.append_output(&format!(
                                 "\x1b[36m[Lua] 脚本已加载: {}\x1b[0m",
                                 path
                             ))?;
-                            self.start_timers_for_session(fg);
+                            self.start_timers_for_session(fg_id);
                         }
                         Err(e) => {
                             let err_msg = e.to_string();
@@ -1179,25 +1361,33 @@ impl App {
             }
 
             BuiltinCommand::LoadReload => {
-                let fg = self.manager.foreground_id;
-                if fg >= self.manager.sessions.len() {
+                let fg_id = self.manager.foreground_id;
+                if self.manager.get_by_id(fg_id).is_none() {
                     self.terminal.append_output("[错误] 无前台连接")?;
                     return Ok(());
                 }
-                let script_path = self.manager.sessions[fg]
-                    .lua_engine
-                    .as_ref()
+                let script_path = self
+                    .manager
+                    .get_by_id(fg_id)
+                    .and_then(|s| s.lua_engine.as_ref())
                     .and_then(|e| e.script_path());
                 // 保存原 engine 的变量（如 char_name 等）
-                let saved_vars = self.manager.sessions[fg]
-                    .lua_engine
-                    .as_ref()
+                let saved_vars = self
+                    .manager
+                    .get_by_id(fg_id)
+                    .and_then(|s| s.lua_engine.as_ref())
                     .map(|e| e.get_variables());
                 // 保存原 engine 的连接状态
-                let saved_conn_state = self.manager.sessions[fg]
-                    .lua_engine
-                    .as_ref()
+                let saved_conn_state = self
+                    .manager
+                    .get_by_id(fg_id)
+                    .and_then(|s| s.lua_engine.as_ref())
                     .map(|e| e.get_connection_state());
+                let fg_name = self
+                    .manager
+                    .get_by_id(fg_id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
                 if let Some(path) = script_path {
                     match crate::lua::LuaEngine::new() {
                         Ok(mut engine) => {
@@ -1214,21 +1404,16 @@ impl App {
                             }
                             match engine.load_script(&path) {
                                 Ok(()) => {
-                                    // 排空并记录加载期间的 Lua 日志
-                                    let name = self.manager.sessions[fg].name.clone();
-                                    let logs = engine.drain_logs();
-                                    for msg in logs {
-                                        let clean = crate::ui::AnsiParser::strip_ansi(&msg);
-                                        self.logger.log(&name, &clean);
-                                        self.terminal
-                                            .append_output(&format!("\x1b[36m{}\x1b[0m", msg))?;
+                                    // 排空 Lua 日志（drain_lua_logs 会处理日志写入和终端输出）
+                                    if let Some(session) = self.manager.get_mut_by_id(fg_id) {
+                                        session.lua_engine = Some(engine);
                                     }
-                                    self.manager.sessions[fg].lua_engine = Some(engine);
+                                    self.drain_lua_logs(fg_id)?;
                                     self.terminal.append_output(&format!(
                                         "\x1b[36m[Lua] 脚本已重新加载: {}\x1b[0m",
                                         path
                                     ))?;
-                                    self.start_timers_for_session(fg);
+                                    self.start_timers_for_session(fg_id);
                                 }
                                 Err(e) => {
                                     let err_msg = e.to_string();
@@ -1239,9 +1424,8 @@ impl App {
                                         ))?;
                                     }
                                     // 脚本加载错误也写入日志
-                                    let name = self.manager.sessions[fg].name.clone();
                                     for line in format_lua_error(&err_msg) {
-                                        self.logger.log_debug(&name, &line);
+                                        self.logger.log_debug(&fg_name, &line);
                                     }
                                 }
                             }
@@ -1260,20 +1444,28 @@ impl App {
             }
 
             BuiltinCommand::Lua { code } => {
-                let fg = self.manager.foreground_id;
-                if fg >= self.manager.sessions.len() {
+                let fg_id = self.manager.foreground_id;
+                if self.manager.get_by_id(fg_id).is_none() {
                     self.terminal.append_output("[错误] 无前台连接")?;
                     return Ok(());
                 }
-                let name = self.manager.sessions[fg].name.clone();
+                let name = self
+                    .manager
+                    .get_by_id(fg_id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
                 self.logger.log_lua(&name, &code);
-                if let Some(ref engine) = self.manager.sessions[fg].lua_engine {
+                if let Some(ref engine) = self
+                    .manager
+                    .get_by_id(fg_id)
+                    .and_then(|s| s.lua_engine.as_ref())
+                {
                     match engine.eval_code(&code) {
                         Ok(_) => {
                             let commands = engine.drain_commands();
-                            self.send_lua_commands(fg, commands)?;
-                            self.send_lua_raw(fg)?;
-                            self.drain_lua_logs(fg)?;
+                            self.send_lua_commands(fg_id, commands)?;
+                            self.send_lua_raw(fg_id)?;
+                            self.drain_lua_logs(fg_id)?;
                             // /lua 命令可能调用了 SetStatus，刷新状态栏
                             self.update_status_bar()?;
                         }
@@ -1299,9 +1491,75 @@ impl App {
                     self.terminal
                         .append_output(&format!("[系统] 保留命令栏输入: {} (已保存)", status))?;
                 }
+                "render_interval" => {
+                    let fg_id = self.manager.foreground_id;
+                    if self.manager.get_by_id(fg_id).is_none() {
+                        self.terminal.append_output("[错误] 无前台连接")?;
+                        return Ok(());
+                    }
+                    match value.parse::<u64>() {
+                        Ok(ms) => {
+                            // 限制范围：[50, 10000]ms
+                            let clamped = ms.max(50).min(10000);
+                            let is_realtime = self
+                                .manager
+                                .get_by_id(fg_id)
+                                .map(|s| s.realtime)
+                                .unwrap_or(false);
+                            if let Some(session) = self.manager.get_mut_by_id(fg_id) {
+                                session.render_interval = clamped;
+                            }
+                            // 仅在非实时模式下重启定时器
+                            if !is_realtime {
+                                self.start_render_tick_timer(fg_id, clamped);
+                            }
+                            self.terminal.append_output(&format!(
+                                "[系统] 渲染间隔已设置为: {}ms (当前连接)",
+                                clamped
+                            ))?;
+                        }
+                        Err(_) => {
+                            self.terminal.append_output(&format!(
+                                "[错误] render_interval 必须是正整数（毫秒），当前值: {}",
+                                value
+                            ))?;
+                        }
+                    }
+                }
+                "realtime" => {
+                    let fg_id = self.manager.foreground_id;
+                    if self.manager.get_by_id(fg_id).is_none() {
+                        self.terminal.append_output("[错误] 无前台连接")?;
+                        return Ok(());
+                    }
+                    let enabled = matches!(value.as_str(), "on" | "1" | "true" | "yes");
+                    if let Some(session) = self.manager.get_mut_by_id(fg_id) {
+                        session.realtime = enabled;
+                    }
+                    // 根据新模式调整定时器
+                    if enabled {
+                        // 实时模式：停止定时器
+                        self.stop_render_tick_timer(fg_id);
+                    } else {
+                        // 节流模式：启动定时器
+                        let interval = self
+                            .manager
+                            .get_by_id(fg_id)
+                            .map(|s| s.render_interval)
+                            .unwrap_or(0);
+                        if interval > 0 {
+                            self.start_render_tick_timer(fg_id, interval);
+                        }
+                    }
+                    let status = if enabled { "实时" } else { "节流" };
+                    self.terminal.append_output(&format!(
+                        "[系统] 渲染模式已切换为: {} (当前连接)",
+                        status
+                    ))?;
+                }
                 _ => {
                     self.terminal.append_output(&format!(
-                        "[错误] 未知设置选项: {}。可用选项: keep_command",
+                        "[错误] 未知设置选项: {}。可用选项: keep_command, render_interval, realtime",
                         option
                     ))?;
                 }
@@ -1310,13 +1568,15 @@ impl App {
             BuiltinCommand::Switch { target } => {
                 // 尝试解析为数字
                 if let Ok(id) = target.parse::<usize>() {
-                    if id > 0 && id <= self.manager.sessions.len() {
-                        let target_id = id - 1;
-                        self.switch_foreground(target_id)?;
-                        self.terminal.append_output(&format!(
-                            "[系统] 已切换到连接 {} ({})",
-                            id, self.manager.sessions[target_id].name
-                        ))?;
+                    if let Some(session_id) = self.manager.session_id_by_display_number(id) {
+                        self.switch_foreground(session_id)?;
+                        let name = self
+                            .manager
+                            .get_by_id(session_id)
+                            .map(|s| s.name.clone())
+                            .unwrap_or_default();
+                        self.terminal
+                            .append_output(&format!("[系统] 已切换到连接 {} ({})", id, name))?;
                     } else {
                         self.terminal
                             .append_output(&format!("[错误] 连接 {} 不存在", id))?;
@@ -1324,18 +1584,24 @@ impl App {
                 } else {
                     // 按名称查找
                     let target_name = target.to_lowercase();
-                    if let Some((id, _)) = self
-                        .manager
-                        .sessions
-                        .iter()
-                        .enumerate()
-                        .find(|(_, s)| s.name.to_lowercase() == target_name)
+                    if let Some(&session_id) =
+                        self.manager.ordered_session_ids().iter().find(|&&sid| {
+                            self.manager
+                                .get_by_id(sid)
+                                .map(|s| s.name.to_lowercase() == target_name)
+                                .unwrap_or(false)
+                        })
                     {
-                        self.switch_foreground(id)?;
+                        self.switch_foreground(session_id)?;
+                        let display_num = self.manager.display_number_of(session_id);
+                        let name = self
+                            .manager
+                            .get_by_id(session_id)
+                            .map(|s| s.name.clone())
+                            .unwrap_or_default();
                         self.terminal.append_output(&format!(
                             "[系统] 已切换到连接 {} ({})",
-                            id + 1,
-                            self.manager.sessions[id].name
+                            display_num, name
                         ))?;
                     } else {
                         self.terminal
@@ -1355,7 +1621,13 @@ impl App {
                         (profiles, _) => {
                             self.terminal.append_output("[系统] 可用角色配置:")?;
                             for p in &profiles {
-                                let loaded = self.manager.sessions.iter().any(|s| s.name == p.name);
+                                let loaded =
+                                    self.manager.ordered_session_ids().iter().any(|&sid| {
+                                        self.manager
+                                            .get_by_id(sid)
+                                            .map(|s| s.name == p.name)
+                                            .unwrap_or(false)
+                                    });
                                 let marker = if loaded { " (已加载)" } else { "" };
                                 self.terminal.append_output(&format!(
                                     "  {} — {}:{}{}",
@@ -1402,7 +1674,7 @@ impl App {
                             }
                         };
 
-                    let id = match self.manager.add_connection_dynamic(&conn_config) {
+                    let session_id = match self.manager.add_connection_dynamic(&conn_config) {
                         Ok(id) => id,
                         Err(e) => {
                             self.terminal.append_output(&format!("[错误] {}", e))?;
@@ -1410,13 +1682,18 @@ impl App {
                         }
                     };
 
+                    // 启动渲染定时器（非实时模式且配置了 render_interval > 0）
+                    if !conn_config.realtime && conn_config.render_interval > 0 {
+                        self.start_render_tick_timer(session_id, conn_config.render_interval);
+                    }
+
                     // 设置日志保留数量
                     if let Some(count) = conn_config.log_rotation_count {
                         self.logger.set_session_max_files(&conn_config.name, count);
                     }
 
                     self.update_status_bar()?;
-                    let _ = self.connect_tx.try_send(ConnectRequest { session_id: id });
+                    let _ = self.connect_tx.try_send(ConnectRequest { session_id });
                     self.terminal.append_output(&format!(
                         "[系统] 正在从配置文件加载角色 '{}' 并连接 ({}:{})",
                         conn_config.name, conn_config.host, conn_config.port
@@ -1433,7 +1710,7 @@ impl App {
                     let results = self.manager.send_to_all(&cmd);
                     let count = results.len();
                     let mut ok_count = 0;
-                    for (name, result) in &results {
+                    for (_session_id, name, result) in &results {
                         match result {
                             Ok(()) => ok_count += 1,
                             Err(e) => {
@@ -1475,6 +1752,11 @@ impl App {
                 self.terminal
                     .append_output("  /set keep_command on|off     执行后保留命令栏输入")?;
                 self.terminal
+                    .append_output("  /set realtime on|off          实时/节流渲染模式切换")?;
+                self.terminal.append_output(
+                    "  /set render_interval <毫秒>  设置渲染间隔（0=实时，默认1000）",
+                )?;
+                self.terminal
                     .append_output("  /switch <编号或名称>        切换到指定连接")?;
                 self.terminal
                     .append_output("  /sw <编号或名称>            切换到指定连接 (简写)")?;
@@ -1498,59 +1780,108 @@ impl App {
     fn handle_manager_event(&mut self, event: ManagerEvent) -> io::Result<()> {
         match event {
             ManagerEvent::Data(id, data) => {
+                if self.manager.get_by_id(id).is_none() {
+                    return Ok(());
+                }
                 // 将数据追加到对应连接的输出缓冲区
-                if id < self.manager.sessions.len() {
+                {
                     let max_lines = self.config.general.scroll_buffer;
-                    let session = &mut self.manager.sessions[id];
-                    for part in data.split_inclusive('\n') {
-                        let trimmed = part.trim_end_matches(['\r', '\n']);
-                        if !trimmed.is_empty() {
-                            session.output_lines.push(trimmed.to_string());
+                    if let Some(session) = self.manager.get_mut_by_id(id) {
+                        for part in data.split_inclusive('\n') {
+                            let trimmed = part.trim_end_matches(['\r', '\n']);
+                            if !trimmed.is_empty() {
+                                session.output_lines.push(trimmed.to_string());
+                            }
                         }
-                    }
-                    // 限制缓冲区大小
-                    if session.output_lines.len() > max_lines {
-                        let drain_count = session.output_lines.len() - max_lines;
-                        session.output_lines.drain(..drain_count);
+                        // 限制缓冲区大小
+                        if session.output_lines.len() > max_lines {
+                            let drain_count = session.output_lines.len() - max_lines;
+                            session.output_lines.drain(..drain_count);
+                        }
                     }
                 }
                 // 仅渲染前台连接的数据
+                let is_realtime = self
+                    .manager
+                    .get_by_id(id)
+                    .map(|s| s.realtime)
+                    .unwrap_or(false);
                 if id == self.manager.foreground_id {
-                    self.terminal.append_output(&data)?;
+                    if is_realtime {
+                        // 实时渲染模式
+                        self.terminal.append_output(&data)?;
+                    } else {
+                        // 节流渲染模式：缓冲数据，等待定时器刷新
+                        if let Some(session) = self.manager.get_mut_by_id(id) {
+                            for part in data.split_inclusive('\n') {
+                                let trimmed = part.trim_end_matches(['\r', '\n']);
+                                if !trimmed.is_empty() {
+                                    session.pending_data.push(trimmed.to_string());
+                                }
+                            }
+                            session.render_dirty = true;
+                        }
+                    }
                 }
                 // 所有连接数据写入日志
                 self.log_session_data(id, &data);
 
                 // 触发器处理（所有连接都触发，不仅仅是前台）
-                if id < self.manager.sessions.len() {
-                    let trigger_commands =
-                        if let Some(ref engine) = self.manager.sessions[id].lua_engine {
-                            // 对每行数据分别匹配触发器
-                            let mut all_cmds = Vec::new();
-                            for part in data.split_inclusive('\n') {
-                                let trimmed = part.trim_end_matches(['\r', '\n']);
-                                if !trimmed.is_empty() {
-                                    engine.process_output(trimmed);
-                                    all_cmds.extend(engine.drain_commands());
-                                }
+                {
+                    let mut pending_lua_logs = Vec::new();
+                    let trigger_commands = if let Some(ref engine) = self
+                        .manager
+                        .get_by_id(id)
+                        .and_then(|s| s.lua_engine.as_ref())
+                    {
+                        // 对每行数据分别匹配触发器
+                        let mut all_cmds = Vec::new();
+                        for part in data.split_inclusive('\n') {
+                            let trimmed = part.trim_end_matches(['\r', '\n']);
+                            if !trimmed.is_empty() {
+                                engine.process_output(trimmed);
+                                all_cmds.extend(engine.drain_commands());
                             }
-                            // 处理 Lua 日志
-                            let logs = engine.drain_logs();
-                            let name = self.manager.sessions[id].name.clone();
-                            for msg in logs {
-                                let clean = crate::ui::AnsiParser::strip_ansi(&msg);
-                                self.logger.log(&name, &clean);
-                                if id == self.manager.foreground_id {
-                                    self.terminal
-                                        .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
-                                }
-                            }
-                            all_cmds
-                        } else {
-                            Vec::new()
-                        };
+                        }
+                        // 收集 Lua 日志（写入文件 + 暂存待终端输出）
+                        let logs = engine.drain_logs();
+                        let name = self
+                            .manager
+                            .get_by_id(id)
+                            .map(|s| s.name.clone())
+                            .unwrap_or_default();
+                        for msg in &logs {
+                            let clean = crate::ui::AnsiParser::strip_ansi(msg);
+                            self.logger.log(&name, &clean);
+                        }
+                        pending_lua_logs = logs;
+                        all_cmds
+                    } else {
+                        Vec::new()
+                    };
                     // 发送触发器产生的命令
                     self.send_lua_commands(id, trigger_commands)?;
+                    // 处理 Lua 日志（写入日志文件已在上面的分支中完成）
+                    // 节流模式下缓冲到 pending_data，实时模式直接输出
+                    if !pending_lua_logs.is_empty() && id == self.manager.foreground_id {
+                        if !is_realtime {
+                            if let Some(session) = self.manager.get_mut_by_id(id) {
+                                for msg in pending_lua_logs {
+                                    session
+                                        .pending_data
+                                        .push(format!("\x1b[36m[Lua] {}\x1b[0m", msg));
+                                }
+                                session.render_dirty = true;
+                            }
+                        } else {
+                            for msg in pending_lua_logs {
+                                self.terminal
+                                    .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
+                            }
+                        }
+                    }
+                    // 排空引擎中剩余的 Lua 日志（触发器处理后又产生的）
+                    self.drain_lua_logs(id)?;
                     // 发送 SendPkt 压入的原始数据包
                     self.send_lua_raw(id)?;
                     // 触发器中可能调用了 SetStatus，刷新状态栏
@@ -1561,13 +1892,15 @@ impl App {
             }
             ManagerEvent::StateChange(id, state) => {
                 // 检查 session 是否仍然存在（可能已被 /close 移除）
-                if id >= self.manager.sessions.len() {
+                if self.manager.get_by_id(id).is_none() {
                     return Ok(());
                 }
-                self.manager.sessions[id].state = state.clone();
-                // 同步 Lua 引擎的连接状态（同步到对应 session，不限于前台）
-                if let Some(ref mut engine) = self.manager.sessions[id].lua_engine {
-                    engine.set_connected(matches!(state, SessionState::Connected));
+                if let Some(session) = self.manager.get_mut_by_id(id) {
+                    session.state = state.clone();
+                    // 同步 Lua 引擎的连接状态（同步到对应 session，不限于前台）
+                    if let Some(ref mut engine) = session.lua_engine {
+                        engine.set_connected(matches!(state, SessionState::Connected));
+                    }
                 }
                 if id == self.manager.foreground_id {
                     self.update_status_bar()?;
@@ -1578,19 +1911,25 @@ impl App {
                     SessionState::Connecting => "连接中...",
                     SessionState::Reconnecting => "重连中...",
                 };
-                let name = &self.manager.sessions[id].name;
+                let name = self
+                    .manager
+                    .get_by_id(id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                let display_pos = self.manager.display_number_of(id);
                 self.terminal.append_output(&format!(
                     "[系统] 连接 {} ({}) {}",
-                    id + 1,
-                    name,
-                    state_str
+                    display_pos, name, state_str
                 ))?;
 
                 // 自动重连：断开时启动延迟重连任务
                 if state == SessionState::Disconnected {
-                    let session = &self.manager.sessions[id];
-                    if session.auto_reconnect {
-                        let delay = session.reconnect_delay_secs;
+                    let (auto_reconnect, delay) = self
+                        .manager
+                        .get_by_id(id)
+                        .map(|s| (s.auto_reconnect, s.reconnect_delay_secs))
+                        .unwrap_or((false, 5));
+                    if auto_reconnect {
                         self.terminal
                             .append_output(&format!("[系统] {} 秒后尝试重连 {}...", delay, name))?;
                         // 启动延迟重连任务
@@ -1603,17 +1942,14 @@ impl App {
                 }
             }
             ManagerEvent::Error(id, err) => {
-                let name = if id < self.manager.sessions.len() {
-                    &self.manager.sessions[id].name
-                } else {
-                    "未知"
-                };
-                self.terminal.append_output(&format!(
-                    "[错误] 连接 {} ({}): {}",
-                    id + 1,
-                    name,
-                    err
-                ))?;
+                let name = self
+                    .manager
+                    .get_by_id(id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| "未知".to_string());
+                let display_pos = self.manager.display_number_of(id);
+                self.terminal
+                    .append_output(&format!("[错误] 连接 {} ({}): {}", display_pos, name, err))?;
             }
         }
         Ok(())
@@ -1639,46 +1975,52 @@ impl App {
     }
 
     /// 记录连接数据到日志文件（剥离 ANSI 码）
-    fn log_session_data(&self, id: usize, data: &str) {
-        let name = if id < self.manager.sessions.len() {
-            &self.manager.sessions[id].name
-        } else {
-            return;
+    fn log_session_data(&self, session_id: SessionId, data: &str) {
+        let name = match self.manager.get_by_id(session_id) {
+            Some(s) => &s.name,
+            None => return,
         };
         let clean = AnsiParser::strip_ansi(data);
         self.logger.log(name, &clean);
     }
 
     /// 切换前台连接，恢复目标连接的输出缓冲区
-    fn switch_foreground(&mut self, id: usize) -> io::Result<()> {
+    fn switch_foreground(&mut self, session_id: SessionId) -> io::Result<()> {
         // 保存当前前台 session 的输入状态
         let old_id = self.manager.foreground_id;
-        if old_id < self.manager.sessions.len() {
+        if self.manager.get_by_id(old_id).is_some() {
             let saved = self.terminal.save_input_state();
-            self.manager.sessions[old_id].input_state = saved;
+            if let Some(session) = self.manager.get_mut_by_id(old_id) {
+                session.input_state = saved;
+            }
         }
 
-        self.manager.switch_foreground(id).ok();
+        self.manager.switch_foreground(session_id).ok();
         self.update_status_bar()?;
 
         // 恢复目标 session 的输入状态
-        if id < self.manager.sessions.len() {
-            let saved = self.manager.sessions[id].input_state.clone();
+        if let Some(saved) = self
+            .manager
+            .get_by_id(session_id)
+            .map(|s| s.input_state.clone())
+        {
             self.terminal.restore_input_state(&saved);
         }
 
         // 恢复目标连接的输出缓冲区到终端
-        let output = if id < self.manager.sessions.len() {
-            &self.manager.sessions[id].output_lines
-        } else {
-            &Vec::new()
-        };
+        // 预提取 display_pos 和 foreground_name，避免后续与 terminal 借用冲突
+        let display_pos = self.manager.display_number_of(session_id);
+        let fg_name = self.manager.foreground_name().to_string();
+        // 拆分借用：manager（不可变）和 terminal（可变）是 App 的不同字段
+        let empty = Vec::new();
+        let output: &[String] = self
+            .manager
+            .get_by_id(session_id)
+            .map(|s| s.output_lines.as_slice())
+            .unwrap_or(&empty);
         self.terminal.replace_output(output)?;
-        self.terminal.append_output(&format!(
-            "[系统] 切换到连接 {} ({})",
-            id + 1,
-            self.manager.foreground_name()
-        ))?;
+        self.terminal
+            .append_output(&format!("[系统] 切换到连接 {} ({})", display_pos, fg_name))?;
         Ok(())
     }
 
@@ -1705,7 +2047,8 @@ impl App {
             return Ok(());
         }
 
-        let session_count = self.manager.sessions.len();
+        let session_count = self.manager.session_count();
+        let session_ids: Vec<SessionId> = self.manager.ordered_session_ids().to_vec();
 
         match parts[0] {
             "lua" => {
@@ -1717,15 +2060,23 @@ impl App {
                 }
                 let mut executed = 0usize;
                 let mut skipped = 0usize;
-                for i in 0..session_count {
-                    let name = self.manager.sessions[i].name.clone();
-                    if let Some(ref engine) = self.manager.sessions[i].lua_engine {
+                for &sid in &session_ids {
+                    let name = self
+                        .manager
+                        .get_by_id(sid)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+                    if let Some(ref engine) = self
+                        .manager
+                        .get_by_id(sid)
+                        .and_then(|s| s.lua_engine.as_ref())
+                    {
                         self.logger.log_lua(&name, code);
                         match engine.eval_code(code) {
                             Ok(_) => {
-                                let _ = self.send_lua_commands(i, engine.drain_commands());
-                                let _ = self.send_lua_raw(i);
-                                let _ = self.drain_lua_logs(i);
+                                let _ = self.send_lua_commands(sid, engine.drain_commands());
+                                let _ = self.send_lua_raw(sid);
+                                let _ = self.drain_lua_logs(sid);
                                 executed += 1;
                             }
                             Err(e) => {
@@ -1756,21 +2107,28 @@ impl App {
                 let is_reload =
                     parts[0] == "reload" || parts.get(1).is_some_and(|&p| p == "reload");
                 let mut executed = 0usize;
-                for i in 0..session_count {
-                    let name = self.manager.sessions[i].name.clone();
+                for &sid in &session_ids {
+                    let name = self
+                        .manager
+                        .get_by_id(sid)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
                     if is_reload {
-                        let path = self.manager.sessions[i]
-                            .lua_engine
-                            .as_ref()
+                        let path = self
+                            .manager
+                            .get_by_id(sid)
+                            .and_then(|s| s.lua_engine.as_ref())
                             .and_then(|e| e.script_path());
                         if let Some(path) = path {
-                            let saved_vars = self.manager.sessions[i]
-                                .lua_engine
-                                .as_ref()
+                            let saved_vars = self
+                                .manager
+                                .get_by_id(sid)
+                                .and_then(|s| s.lua_engine.as_ref())
                                 .map(|e| e.get_variables());
-                            let saved_conn = self.manager.sessions[i]
-                                .lua_engine
-                                .as_ref()
+                            let saved_conn = self
+                                .manager
+                                .get_by_id(sid)
+                                .and_then(|s| s.lua_engine.as_ref())
                                 .map(|e| e.get_connection_state());
                             match crate::lua::LuaEngine::new() {
                                 Ok(mut engine) => {
@@ -1786,16 +2144,10 @@ impl App {
                                     match engine.load_script(&path) {
                                         Ok(()) => {
                                             // 排空脚本加载期间的 Lua 日志
-                                            let logs = engine.drain_logs();
-                                            for msg in logs {
-                                                let clean = crate::ui::AnsiParser::strip_ansi(&msg);
-                                                self.logger.log(&name, &clean);
-                                                self.terminal.append_output(&format!(
-                                                    "\x1b[36m{}\x1b[0m",
-                                                    msg
-                                                ))?;
+                                            if let Some(session) = self.manager.get_mut_by_id(sid) {
+                                                session.lua_engine = Some(engine);
                                             }
-                                            self.manager.sessions[i].lua_engine = Some(engine);
+                                            self.drain_lua_logs(sid)?;
                                             executed += 1;
                                         }
                                         Err(e) => {
@@ -1824,8 +2176,10 @@ impl App {
                         match crate::lua::LuaEngine::new() {
                             Ok(mut engine) => match engine.load_script(&path) {
                                 Ok(()) => {
-                                    self.manager.sessions[i].lua_engine = Some(engine);
-                                    self.start_timers_for_session(i);
+                                    if let Some(session) = self.manager.get_mut_by_id(sid) {
+                                        session.lua_engine = Some(engine);
+                                    }
+                                    self.start_timers_for_session(sid);
                                     executed += 1;
                                 }
                                 Err(e) => {
@@ -1845,8 +2199,8 @@ impl App {
                     }
                 }
                 if is_reload && executed > 0 {
-                    for i in 0..session_count {
-                        self.start_timers_for_session(i);
+                    for &sid in &session_ids {
+                        self.start_timers_for_session(sid);
                     }
                 }
                 self.terminal.append_output(&format!(
@@ -1859,9 +2213,11 @@ impl App {
                 return self.handle_builtin_command("/list");
             }
             "disconnect" => {
-                for i in 0..session_count {
-                    self.manager.sessions[i].disconnect();
-                    self.manager.sessions[i].state = crate::connection::SessionState::Disconnected;
+                for &sid in &session_ids {
+                    if let Some(session) = self.manager.get_mut_by_id(sid) {
+                        session.disconnect();
+                        session.state = crate::connection::SessionState::Disconnected;
+                    }
                 }
                 self.update_status_bar()?;
                 self.terminal.append_output(&format!(
@@ -1870,18 +2226,22 @@ impl App {
                 ))?;
             }
             "reconnect" => {
-                for i in 0..session_count {
-                    let name = self.manager.sessions[i].name.clone();
-                    self.manager.sessions[i].disconnect();
-                    self.manager.sessions[i].state = crate::connection::SessionState::Disconnected;
-                    self.terminal.append_output(&format!(
-                        "[系统] 正在重连 {} ({})...",
-                        i + 1,
-                        name
-                    ))?;
+                for &sid in &session_ids {
+                    let name = self
+                        .manager
+                        .get_by_id(sid)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+                    if let Some(session) = self.manager.get_mut_by_id(sid) {
+                        session.disconnect();
+                        session.state = crate::connection::SessionState::Disconnected;
+                    }
+                    let display_pos = self.manager.display_number_of(sid);
+                    self.terminal
+                        .append_output(&format!("[系统] 正在重连 {} ({})...", display_pos, name))?;
                     let _ = self
                         .reconnect_tx
-                        .try_send(ReconnectRequest { session_id: i });
+                        .try_send(ReconnectRequest { session_id: sid });
                 }
                 self.update_status_bar()?;
             }
@@ -2125,6 +2485,42 @@ mod tests {
         assert_eq!(parse_builtin_command("/unknown"), BuiltinCommand::Unknown);
         assert_eq!(parse_builtin_command(""), BuiltinCommand::Unknown);
         assert_eq!(parse_builtin_command("hello"), BuiltinCommand::Unknown);
+    }
+
+    #[test]
+    fn test_parse_builtin_set_realtime_on() {
+        let cmd = parse_builtin_command("/set realtime on");
+        assert_eq!(
+            cmd,
+            BuiltinCommand::Set {
+                option: "realtime".to_string(),
+                value: "on".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_builtin_set_realtime_off() {
+        let cmd = parse_builtin_command("/set realtime off");
+        assert_eq!(
+            cmd,
+            BuiltinCommand::Set {
+                option: "realtime".to_string(),
+                value: "off".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_builtin_set_render_interval() {
+        let cmd = parse_builtin_command("/set render_interval 500");
+        assert_eq!(
+            cmd,
+            BuiltinCommand::Set {
+                option: "render_interval".to_string(),
+                value: "500".to_string(),
+            }
+        );
     }
 
     #[test]

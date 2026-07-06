@@ -128,6 +128,38 @@ eat apple
 
 ---
 
+## 渲染控制
+
+客户端支持渲染节流功能，可以降低多连接时的 CPU 占用。渲染控制分为两个独立配置：
+
+- **render_interval**: 渲染间隔时间（毫秒），范围 [50, 10000]，默认 1000ms
+- **realtime**: 实时渲染开关，true 时忽略 render_interval 直接实时渲染，默认 false
+
+### 配置文件设置
+
+在 `profiles/*.toml` 中配置：
+
+```toml
+# 渲染控制（可选）
+render_interval = 1000  # 渲染间隔（毫秒），范围 [50, 10000]，默认 1000
+realtime = false        # 实时渲染开关，true 时忽略 render_interval 直接实时渲染，默认 false
+```
+
+### 运行时命令
+
+```
+/set render_interval <毫秒>    设置渲染间隔（50-10000ms），仅在非实时模式下生效
+/set realtime on|off           切换实时渲染模式（on=实时渲染，off=节流渲染）
+```
+
+### 使用场景
+
+- **手动操作**: 设置 `realtime = true` 或使用 `/set realtime on`，获得即时反馈
+- **挂机模式**: 设置 `realtime = false` 并调整 `render_interval`，降低 CPU 占用
+- **多连接**: 非前台连接不受影响，前台连接可根据需要调整渲染模式
+
+---
+
 ## Profile 管理（运行时加载角色）
 
 客户端启动时自动加载 `profiles/` 目录下的所有 TOML 配置文件。如果在运行中新增了角色配置，可以通过以下命令在不重启客户端的情况下加载：

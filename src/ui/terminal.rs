@@ -7,7 +7,7 @@ use crossterm::{
 };
 use std::io::{self, Write};
 
-use crate::connection::{SessionInfo, SessionState};
+use crate::connection::{SessionId, SessionInfo, SessionState};
 use crate::ui::{ensure_ansi_reset, AnsiParser};
 
 /// 可点击区域（状态栏上的 session 标签）
@@ -15,7 +15,7 @@ use crate::ui::{ensure_ansi_reset, AnsiParser};
 pub struct ClickRegion {
     pub start_x: u16,
     pub end_x: u16,
-    pub session_id: usize,
+    pub session_id: SessionId,
 }
 
 /// 提取字符串中最后一组 CSI SGR 序列（形如 \x1b[...m），返回完整序列
@@ -84,7 +84,7 @@ fn visible_width(s: &str) -> usize {
 /// 返回 (状态栏字符串, 可点击区域列表)
 fn build_status_bar(
     sessions: &[SessionInfo],
-    foreground_id: usize,
+    foreground_id: SessionId,
     total_width: usize,
 ) -> (String, Vec<ClickRegion>) {
     let mut bar = String::new();
@@ -98,7 +98,7 @@ fn build_status_bar(
         };
         // 记录当前 x 位置（不包括 ANSI 码的可见宽度）
         let start_x = visible_width(&bar) as u16;
-        if i == foreground_id {
+        if info.session_id == foreground_id {
             bar.push_str(&format!(
                 "\x1b[1;37;44m[{}]{} {}\x1b[0m ",
                 i + 1,
@@ -112,7 +112,7 @@ fn build_status_bar(
         regions.push(ClickRegion {
             start_x,
             end_x,
-            session_id: i,
+            session_id: info.session_id,
         });
     }
     let right_text = "RustLuaMud";
@@ -130,10 +130,10 @@ fn build_status_bar(
 /// 构建 Lua SetStatus 状态栏字符串（前台连接的自定义状态文本）
 fn build_lua_status_text(
     sessions: &[SessionInfo],
-    foreground_id: usize,
+    foreground_id: SessionId,
     total_width: usize,
 ) -> String {
-    if let Some(fg) = sessions.get(foreground_id) {
+    if let Some(fg) = sessions.iter().find(|s| s.session_id == foreground_id) {
         if !fg.status_text.is_empty() {
             let truncated: String = fg.status_text.chars().take(total_width).collect();
             return truncated;
@@ -584,14 +584,14 @@ impl TerminalState {
     }
 
     /// 更新状态栏缓存（纯逻辑）
-    pub fn update_status_bar(&mut self, sessions: &[SessionInfo], foreground_id: usize) {
+    pub fn update_status_bar(&mut self, sessions: &[SessionInfo], foreground_id: SessionId) {
         let (bar, regions) = build_status_bar(sessions, foreground_id, self.width as usize);
         self.status_bar_cache = Some(bar);
         self.status_bar_regions = regions;
     }
 
     /// 更新 Lua 状态栏缓存（纯逻辑）
-    pub fn update_lua_status_bar(&mut self, sessions: &[SessionInfo], foreground_id: usize) {
+    pub fn update_lua_status_bar(&mut self, sessions: &[SessionInfo], foreground_id: SessionId) {
         let text = build_lua_status_text(sessions, foreground_id, self.width as usize);
         self.lua_status_cache = if text.is_empty() { None } else { Some(text) };
     }
@@ -782,7 +782,7 @@ impl Terminal {
         &mut self,
         stdout: &mut io::Stdout,
         sessions: &[SessionInfo],
-        foreground_id: usize,
+        foreground_id: SessionId,
     ) -> io::Result<()> {
         self.state.update_status_bar(sessions, foreground_id);
         if let Some(ref bar) = self.state.status_bar_cache {
@@ -798,7 +798,7 @@ impl Terminal {
         &mut self,
         stdout: &mut io::Stdout,
         sessions: &[SessionInfo],
-        foreground_id: usize,
+        foreground_id: SessionId,
     ) -> io::Result<()> {
         self.state.update_lua_status_bar(sessions, foreground_id);
         let lua_bar_y = self
@@ -1473,7 +1473,7 @@ mod tests {
 
     #[test]
     fn test_build_status_bar_empty() {
-        let (bar, regions) = build_status_bar(&[], 0, 80);
+        let (bar, regions) = build_status_bar(&[], SessionId(0), 80);
         assert!(bar.contains("RustLuaMud"));
         assert!(regions.is_empty());
     }
@@ -1482,34 +1482,37 @@ mod tests {
     fn test_build_status_bar_with_sessions() {
         let sessions = vec![
             SessionInfo {
+                session_id: SessionId(0),
                 name: "mud1".to_string(),
                 state: SessionState::Connected,
                 status_text: String::new(),
             },
             SessionInfo {
+                session_id: SessionId(1),
                 name: "mud2".to_string(),
                 state: SessionState::Disconnected,
                 status_text: String::new(),
             },
         ];
-        let (bar, regions) = build_status_bar(&sessions, 0, 80);
+        let (bar, regions) = build_status_bar(&sessions, SessionId(0), 80);
         assert!(bar.contains("mud1"));
         assert!(bar.contains("mud2"));
         assert!(bar.contains("RustLuaMud"));
         assert_eq!(regions.len(), 2);
-        assert_eq!(regions[0].session_id, 0);
-        assert_eq!(regions[1].session_id, 1);
+        assert_eq!(regions[0].session_id, SessionId(0));
+        assert_eq!(regions[1].session_id, SessionId(1));
         assert!(regions[1].start_x >= regions[0].end_x);
     }
 
     #[test]
     fn test_build_status_bar_foreground_highlight() {
         let sessions = vec![SessionInfo {
+            session_id: SessionId(0),
             name: "mud1".to_string(),
             state: SessionState::Connected,
             status_text: String::new(),
         }];
-        let (bar, _regions) = build_status_bar(&sessions, 0, 80);
+        let (bar, _regions) = build_status_bar(&sessions, SessionId(0), 80);
         // Foreground should have bold+white-on-blue highlight
         assert!(bar.contains("\x1b[1;37;44m[1]"));
     }
@@ -1518,17 +1521,18 @@ mod tests {
     fn test_state_update_status_bar() {
         let mut state = TerminalState::new(80, 24);
         let sessions = vec![SessionInfo {
+            session_id: SessionId(0),
             name: "test".to_string(),
             state: SessionState::Connected,
             status_text: String::new(),
         }];
-        state.update_status_bar(&sessions, 0);
+        state.update_status_bar(&sessions, SessionId(0));
         assert!(state.status_bar_cache.is_some());
         let bar = state.status_bar_cache.as_ref().unwrap();
         assert!(bar.contains("test"));
         // 验证可点击区域
         assert_eq!(state.status_bar_regions.len(), 1);
-        assert_eq!(state.status_bar_regions[0].session_id, 0);
+        assert_eq!(state.status_bar_regions[0].session_id, SessionId(0));
         assert!(state.status_bar_regions[0].end_x > state.status_bar_regions[0].start_x);
     }
 
