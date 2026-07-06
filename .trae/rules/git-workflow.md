@@ -18,3 +18,17 @@
 - **短时间内不要重复提交**该文件的纯数据变更（经验值数字变动）
 - 如果一次提交中已经包含了其他功能性修改（如 always.lua、michen_yb.lua 等），可以顺带包含 `war_members_data.lua` 的更新
 - 如果距离上次提交该文件不到 24 小时，且没有功能性代码变更，**跳过**该文件的提交
+
+## michen_xkx.lua 同步规则
+
+`scripts/private/michen_xkx.lua` 是子模块中的加载清单，`scripts/michen_xkx.lua` 是主仓库中的本地配置。两者需要保持同步。
+
+**同步原则**：
+- 修改 `scripts/private/michen_xkx.lua` 后，**必须同步**到 `scripts/michen_xkx.lua`
+- 同步方式：直接复制文件内容（注意 `scripts/michen_xkx.lua` 不在 git 跟踪中，是本地配置）
+- 同步时机：在子模块提交前完成同步，确保本地测试环境使用最新的加载清单
+
+**执行命令**：
+```bash
+cp scripts/private/michen_xkx.lua scripts/michen_xkx.lua
+```
