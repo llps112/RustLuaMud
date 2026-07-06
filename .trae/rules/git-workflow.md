@@ -21,10 +21,11 @@
 
 ## michen_xkx.lua 同步规则
 
-`scripts/private/michen_xkx.lua` 是子模块中的加载清单，`scripts/michen_xkx.lua` 是主仓库中的本地配置。两者需要保持同步。
+`scripts/private/michen_xkx.lua` 是子模块中的加载清单（**唯一源文件**），`scripts/michen_xkx.lua` 是主仓库中的本地配置副本。两者需要保持同步。
 
-**同步原则**：
-- 修改 `scripts/private/michen_xkx.lua` 后，**必须同步**到 `scripts/michen_xkx.lua`
+**修改原则**：
+- **只修改** `scripts/private/michen_xkx.lua`，**禁止**直接编辑 `scripts/michen_xkx.lua`
+- 修改完成后，**必须同步**到 `scripts/michen_xkx.lua`
 - 同步方式：直接复制文件内容（注意 `scripts/michen_xkx.lua` 不在 git 跟踪中，是本地配置）
 - 同步时机：在子模块提交前完成同步，确保本地测试环境使用最新的加载清单
 
