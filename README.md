@@ -35,21 +35,70 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 
 ### 安装 Rust
 
-```bash
-# 国内服务器（推荐，使用中科大镜像）
-export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
-export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
-curl --proto '=https' --tlsv1.2 -sSf https://mirrors.ustc.edu.cn/rust-static/rustup/rustup-init.sh | sh -s -- -y
+根据当前环境选择对应方案：
 
-# 海外服务器（使用官方源）
+<details>
+<summary><b>方案 A：全新安装</b>（没有 <code>~/.cargo</code> 残留，或不需要保留）</summary>
+
+```bash
+rm -f rustup-init-x86_64-unknown-linux-gnu
+rm -rf ~/.rustup ~/.cargo
+
+# 1. 下载官方 install.sh（仅几 KB）
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
+
+# 2. 将 RUSTUP_UPDATE_ROOT 改为清华镜像
+sed -i 's|static.rust-lang.org/rustup|mirrors.tuna.tsinghua.edu.cn/rustup/rustup|' rustup-init.sh
+
+# 3. 设 DIST_SERVER（管 toolchain 组件下载），然后执行
+RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup \
+sh rustup-init.sh -y
+```
+
+</details>
+
+<details>
+<summary><b>方案 B：保留 cargo 已安装工具</b>（重装 rustup，保留 <code>~/.cargo</code>）</summary>
+
+```bash
+rm -f rustup-init-x86_64-unknown-linux-gnu
+rm -rf ~/.rustup                              # 只清 rustup，保留 ~/.cargo 及其工具
+
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
+sed -i 's|static.rust-lang.org/rustup|mirrors.tuna.tsinghua.edu.cn/rustup/rustup|' rustup-init.sh
+RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup \
+sh rustup-init.sh -y
+```
+
+</details>
+
+<details>
+<summary><b>海外服务器</b>（使用官方源，直连速度快）</summary>
+
+```bash
+rm -f rustup-init-x86_64-unknown-linux-gnu
+rm -rf ~/.rustup ~/.cargo
+
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ```
+
+</details>
 
 安装完成后刷新环境变量：
 
 ```bash
 source $HOME/.cargo/env
 ```
+
+> **注意**：编译时需要 C 编译器（`cc`），部分最小化安装的系统可能缺失。
+> 
+> ```bash
+> # Debian / Ubuntu
+> sudo apt install build-essential
+> 
+> # CentOS / RHEL / Fedora
+> sudo dnf groupinstall "Development Tools"
+> ```
 
 ### 配置 crates.io 镜像源
 
@@ -70,6 +119,13 @@ EOF
 配置完成后，后续 `cargo build` 将自动从 USTC 镜像拉取依赖，显著提升下载速度。
 
 > **可选镜像源**：除 USTC 外也可使用清华 TUNA 源（将上述 `ustc` 替换为 `tuna`，URL 改为 `https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/`）。
+
+### 克隆仓库
+
+```bash
+git clone https://github.com/llps112/RustLuaMud.git
+cd RustLuaMud
+```
 
 ### 编译
 
