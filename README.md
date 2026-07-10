@@ -33,17 +33,91 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 
 ## 快速开始
 
-### 安装 Rust
+选择哪种安装方式取决于你的场景：
+
+| 场景 | 推荐方式 |
+|------|---------|
+| x86_64 Linux，不想装 Rust 环境，直接跑 | [方式一：预编译二进制](#方式一下载预编译二进制推荐免编译) |
+| 想先用用看，不确定是否需要 | [方式一](#方式一下载预编译二进制推荐免编译)，`curl \| tar xz` 只需几秒 |
+| 需要最新修改但等不及发版 | [方式一 Nightly 版](#方式一下载预编译二进制推荐免编译)（自动构建 main 分支） |
+| ARM64 机器（树莓派、ARM 云服务器等） | [方式二：从源码编译](#方式二从源码编译)（暂未提供 ARM 预编译包） |
+| 需要修改客户端代码 | [方式二：从源码编译](#方式二从源码编译) |
+| 海外服务器，直连下载快 | 两种方式均可，编译时用官方源更快 |
+
+### 方式一：下载预编译二进制（推荐，免编译）
+
+静态编译的二进制包，不依赖系统 glibc 版本，下载解压即可运行。
+
+**稳定版** — 对应已发布的 tag 版本：
 
 ```bash
-# 国内服务器（推荐，使用中科大镜像）
-export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
-export RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
-curl --proto '=https' --tlsv1.2 -sSf https://mirrors.ustc.edu.cn/rust-static/rustup/rustup-init.sh | sh -s -- -y
+curl -L https://github.com/llps112/RustLuaMud/releases/latest/download/RustLuaMud-linux-x86_64.tar.gz | tar xz
+./RustLuaMud
+```
 
-# 海外服务器（使用官方源）
+**Nightly 版** — main 分支最新提交（自动构建，可能不稳定）：
+
+```bash
+curl -L https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-linux-x86_64.tar.gz | tar xz
+./RustLuaMud
+```
+
+> `nightly` 标签会在每次 push 到 main 分支时自动更新，由 [nightly.yml](.github/workflows/nightly.yml) 工作流构建。
+>
+> ARM64 机器暂需[从源码编译](#方式二从源码编译)。
+
+### 方式二：从源码编译
+
+#### 安装 Rust
+
+根据当前环境选择对应方案：
+
+<details>
+<summary><b>方案 A：全新安装</b>（没有 <code>~/.cargo</code> 残留，或不需要保留）</summary>
+
+```bash
+rm -f rustup-init-x86_64-unknown-linux-gnu
+rm -rf ~/.rustup ~/.cargo
+
+# 1. 下载官方 install.sh（仅几 KB）
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
+
+# 2. 将 RUSTUP_UPDATE_ROOT 改为清华镜像
+sed -i 's|static.rust-lang.org/rustup|mirrors.tuna.tsinghua.edu.cn/rustup/rustup|' rustup-init.sh
+
+# 3. 设 DIST_SERVER（管 toolchain 组件下载），然后执行
+RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup \
+sh rustup-init.sh -y
+```
+
+</details>
+
+<details>
+<summary><b>方案 B：保留 cargo 已安装工具</b>（重装 rustup，保留 <code>~/.cargo</code>）</summary>
+
+```bash
+rm -f rustup-init-x86_64-unknown-linux-gnu
+rm -rf ~/.rustup                              # 只清 rustup，保留 ~/.cargo 及其工具
+
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
+sed -i 's|static.rust-lang.org/rustup|mirrors.tuna.tsinghua.edu.cn/rustup/rustup|' rustup-init.sh
+RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup \
+sh rustup-init.sh -y
+```
+
+</details>
+
+<details>
+<summary><b>海外服务器</b>（使用官方源，直连速度快）</summary>
+
+```bash
+rm -f rustup-init-x86_64-unknown-linux-gnu
+rm -rf ~/.rustup ~/.cargo
+
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ```
+
+</details>
 
 安装完成后刷新环境变量：
 
@@ -51,7 +125,17 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source $HOME/.cargo/env
 ```
 
-### 配置 crates.io 镜像源
+> **注意**：编译时需要 C 编译器（`cc`），部分最小化安装的系统可能缺失。
+> 
+> ```bash
+> # Debian / Ubuntu
+> sudo apt install build-essential
+> 
+> # CentOS / RHEL / Fedora
+> sudo dnf groupinstall "Development Tools"
+> ```
+
+#### 配置 crates.io 镜像源
 
 国内首次编译依赖下载缓慢，推荐配置中科大 USTC 镜像：
 
@@ -71,7 +155,14 @@ EOF
 
 > **可选镜像源**：除 USTC 外也可使用清华 TUNA 源（将上述 `ustc` 替换为 `tuna`，URL 改为 `https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/`）。
 
-### 编译
+#### 克隆仓库
+
+```bash
+git clone https://github.com/llps112/RustLuaMud.git
+cd RustLuaMud
+```
+
+#### 编译
 
 ```bash
 cargo build --release
@@ -79,7 +170,7 @@ cargo build --release
 
 编译产物位于 `target/release/RustLuaMud`。
 
-### 配置
+#### 配置
 
 在 `profiles/` 目录下创建角色配置文件（如 `mychar.toml`）：
 
@@ -124,13 +215,13 @@ socks5_password = "pass"   # 可选
 
 程序启动时会自动扫描 `profiles/` 目录，加载所有 `.toml` 配置文件（`example.toml` 除外），按文件名排序依次连接。
 
-### 运行
+#### 运行
 
 ```bash
 ./target/release/RustLuaMud
 ```
 
-#### 多实例运行
+##### 多实例运行
 
 如需运行多个客户端实例（使用不同的角色配置），可使用 `--profiles` 参数指定不同的配置目录：
 
@@ -144,7 +235,7 @@ socks5_password = "pass"   # 可选
 
 每个实例将加载指定目录下的角色配置文件，实现完全独立的多实例运行。
 
-### 文档
+#### 文档
 
 详细文档请见 [help/](help/README.md) 目录，涵盖 Lua API 接口、CLUI 操作指南等。
 
@@ -497,7 +588,8 @@ export RUST_BACKTRACE=1
 项目使用 GitHub Actions 实现自动化工作流：
 
 - **CI** — 每次 push/PR 自动运行测试、clippy 检查、fmt 格式化验证
-- **Release** — 打 tag 后自动构建并发布二进制
+- **Release** — 打 tag 后自动构建并发布二进制（musl 静态编译）
+- **Nightly** — 每次 push main 自动构建 musl 静态二进制并更新 [nightly release](https://github.com/llps112/RustLuaMud/releases/tag/nightly)
 - **Audit** — 每周自动进行依赖安全审计
 - **Dependabot** — 依赖自动更新 PR
 

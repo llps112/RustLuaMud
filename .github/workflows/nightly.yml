@@ -1,0 +1,48 @@
+name: Nightly Build
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (x86_64-musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get install -y musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --target x86_64-unknown-linux-musl --release
+
+      - name: Package binary
+        run: |
+          mkdir -p release
+          cp target/x86_64-unknown-linux-musl/release/RustLuaMud release/
+          tar czf release/RustLuaMud-linux-x86_64.tar.gz -C release RustLuaMud
+
+      - name: Upload to Nightly Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: nightly
+          name: Nightly Build
+          body: "自动构建于 main 分支最新提交。\n\n```\ncurl -L https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-linux-x86_64.tar.gz | tar xz\n```"
+          prerelease: true
+          allowUpdates: true
+          replacesArtifacts: true
+          artifacts: "release/RustLuaMud-linux-x86_64.tar.gz"
+          token: ${{ secrets.GITHUB_TOKEN }}

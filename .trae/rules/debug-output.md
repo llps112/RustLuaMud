@@ -41,3 +41,34 @@ print(string.format("hp: %s/%s", hp.qi, hp.maxqi))
 - 无中间临时字符串，GC 友好
 - 格式整齐，一眼可读
 - 和 C 的 `printf` 习惯一致，迁移成本低
+
+## Lua debug 模块不可用
+
+**Lua `debug` 库未加载**，禁止使用 `debug.traceback()`、`debug.getinfo()` 等函数，会报错：
+```
+attempt to index global 'debug' (a nil value)
+```
+
+### 替代方案：`pcall(error, ..., 3)` 获取调用位置
+
+Lua 的 `error(msg, level)` 内置了调用位置标注功能（不依赖 `debug` 库），`level` 参数指定向上追溯的调用层级。搭配 `pcall` 捕获错误消息，即可定位调用者：
+
+```lua
+function alias.checkche()
+    local _, err = pcall(error, "", 3)
+    Note("[DEBUG checkche] 被调用, "..tostring(err):gsub("%s+$", ""))
+    -- ...
+end
+```
+
+输出示例：
+```
+[DEBUG checkche] 被调用, [string "scripts/class/michen_yb.lua"]:567:
+```
+
+`level=3` 的溯源逻辑：`pcall(error, "", 3)` 中，`error` 内部 → 第1层 → `pcall`（C 函数跳过） → 第2层 → 当前函数（如 `checkche`） → 第3层 → **调用者位置**（目标）。
+
+与 `caller` 参数标记法相比，此方案：
+- 无需修改每个调用点传参
+- 对闭包/协程友好（`wait.time` 延迟调用也能正确显示）
+- 适合临时 debug，清理时只需删 `checkche` 内的两行即可
