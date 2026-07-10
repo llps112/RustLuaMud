@@ -529,10 +529,39 @@ impl App {
                 if session_id == self.manager.foreground_id {
                     self.update_status_bar()?;
                 }
+                // 重置退避计时
+                if let Some(session) = self.manager.get_mut_by_id(session_id) {
+                    let base = session.reconnect_delay_secs;
+                    session.reconnect_backoff_secs = base;
+                }
             }
             Err(e) => {
                 let msg = format!("[系统] 重连 {} ({}) 失败: {}", display_pos, name, e);
                 self.terminal.append_output(&msg)?;
+                // 状态回退到 Disconnected
+                if let Some(session) = self.manager.get_mut_by_id(session_id) {
+                    session.state = crate::connection::SessionState::Disconnected;
+                }
+                // 计算下次退避延迟（翻倍，上限 300 秒）
+                let (backoff, auto_reconnect) = self
+                    .manager
+                    .get_by_id(session_id)
+                    .map(|s| (s.reconnect_backoff_secs, s.auto_reconnect))
+                    .unwrap_or((5, false));
+                if auto_reconnect {
+                    let next_backoff = (backoff * 2).min(300);
+                    if let Some(session) = self.manager.get_mut_by_id(session_id) {
+                        session.reconnect_backoff_secs = next_backoff;
+                    }
+                    self.terminal.append_output(&format!(
+                        "[系统] {} 秒后再次尝试重连 {}...", backoff, name
+                    ))?;
+                    let tx = self.reconnect_tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(backoff)).await;
+                        let _ = tx.send(ReconnectRequest { session_id }).await;
+                    });
+                }
             }
         }
         Ok(())

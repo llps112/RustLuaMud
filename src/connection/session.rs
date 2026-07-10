@@ -62,6 +62,8 @@ pub struct Session {
     pub encoding: Encoding,
     pub auto_reconnect: bool,
     pub reconnect_delay_secs: u64,
+    /// 当前重连退避秒数（失败后翻倍，成功后重置为 reconnect_delay_secs）
+    pub reconnect_backoff_secs: u64,
     pub state: SessionState,
 
     /// 该连接的输出缓冲区（前台切换时恢复用）
@@ -185,6 +187,7 @@ impl Session {
             encoding,
             auto_reconnect: config.auto_reconnect,
             reconnect_delay_secs: config.reconnect_delay_secs,
+            reconnect_backoff_secs: config.reconnect_delay_secs,
             state: SessionState::Disconnected,
             output_lines: Vec::new(),
             input_state: crate::ui::terminal::InputState::default(),
@@ -218,6 +221,7 @@ impl Session {
         let use_socks5 =
             self.socks5_enable && self.socks5_host.as_ref().is_some_and(|h| !h.is_empty());
 
+        let connect_timeout = std::time::Duration::from_secs(10);
         let tokio_stream: TcpStream = if use_socks5 {
             // 通过 SOCKS5 代理连接
             let proxy_addr = format!(
@@ -231,24 +235,27 @@ impl Session {
                 if !username.is_empty() {
                     // 带认证的连接
                     let password = self.socks5_password.as_deref().unwrap_or("");
-                    Socks5Stream::connect_with_password(
+                    tokio::time::timeout(connect_timeout, Socks5Stream::connect_with_password(
                         proxy_addr.as_str(),
                         target_addr.as_str(),
                         username,
                         password,
-                    )
+                    ))
                     .await
+                    .map_err(|_| format!("SOCKS5 代理连接 {} 超时（10秒）", proxy_addr))?
                     .map_err(|e| format!("SOCKS5 代理连接 {} 失败: {}", proxy_addr, e))?
                 } else {
                     // 无认证的连接
-                    Socks5Stream::connect(proxy_addr.as_str(), target_addr.as_str())
+                    tokio::time::timeout(connect_timeout, Socks5Stream::connect(proxy_addr.as_str(), target_addr.as_str()))
                         .await
+                        .map_err(|_| format!("SOCKS5 代理连接 {} 超时（10秒）", proxy_addr))?
                         .map_err(|e| format!("SOCKS5 代理连接 {} 失败: {}", proxy_addr, e))?
                 }
             } else {
                 // 无认证的连接
-                Socks5Stream::connect(proxy_addr.as_str(), target_addr.as_str())
+                tokio::time::timeout(connect_timeout, Socks5Stream::connect(proxy_addr.as_str(), target_addr.as_str()))
                     .await
+                    .map_err(|_| format!("SOCKS5 代理连接 {} 超时（10秒）", proxy_addr))?
                     .map_err(|e| format!("SOCKS5 代理连接 {} 失败: {}", proxy_addr, e))?
             };
 
@@ -256,8 +263,9 @@ impl Session {
             proxy_stream.into_inner()
         } else {
             // 直连
-            TcpStream::connect(&addr)
+            tokio::time::timeout(connect_timeout, TcpStream::connect(&addr))
                 .await
+                .map_err(|_| format!("连接 {} 超时（10秒）", addr))?
                 .map_err(|e| format!("连接 {} 失败: {}", addr, e))?
         };
 
