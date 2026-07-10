@@ -46,7 +46,7 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 
 ### 方式一：下载预编译二进制（推荐，免编译）
 
-预编译的二进制包（基于 Ubuntu 20.04 构建，链接 glibc 2.31），下载解压即可运行。
+预编译的二进制包（基于 Ubuntu 22.04 构建，链接 glibc 2.35），下载解压即可运行。
 
 **稳定版** — 对应已发布的 tag 版本：
 
@@ -625,7 +625,7 @@ export RUST_BACKTRACE=1
 项目使用 GitHub Actions 实现自动化工作流：
 
 - **CI** — 每次 push/PR 自动运行测试、clippy 检查、fmt 格式化验证
-- **Release** — 打 tag 后自动构建并发布二进制（基于 Ubuntu 20.04，glibc 2.31）
+- **Release** — 打 tag 后自动构建并发布二进制（基于 Ubuntu 22.04，glibc 2.35）
 - **Nightly** — 每次 push main 自动构建并更新 [nightly release](https://github.com/llps112/RustLuaMud/releases/tag/nightly)
 - **Audit** — 每周自动进行依赖安全审计
 - **Dependabot** — 依赖自动更新 PR
