@@ -680,9 +680,9 @@ impl App {
                     }
                 }
 
-                self.manager
-                    .get_mut_by_id(session_id)
-                    .map(|s| s.lua_engine = Some(engine));
+                if let Some(s) = self.manager.get_mut_by_id(session_id) {
+                    s.lua_engine = Some(engine);
+                }
                 // 同步连接状态：session.connect() 在创建事件通道前已设置 state，
                 // 初始 Connected 状态不会通过 StateChange 事件到达 engine，
                 // 此处手动同步，确保 engine 知道当前已连接并触发 alias.atconnect()
@@ -789,7 +789,7 @@ impl App {
                 // / 开头的命令作为 Lua 代码执行
                 // 去掉前导 /
                 self.logger.log_lua(&name, lua_code);
-                if let Some(ref engine) = self
+                if let Some(engine) = self
                     .manager
                     .get_by_id(session_id)
                     .and_then(|s| s.lua_engine.as_ref())
@@ -811,7 +811,7 @@ impl App {
                 }
             } else if depth < max_depth {
                 // 非 / 开头的命令：先尝试别名匹配（与 MUSHclient Execute 行为一致）
-                let alias_handled = if let Some(ref engine) = self
+                let alias_handled = if let Some(engine) = self
                     .manager
                     .get_by_id(session_id)
                     .and_then(|s| s.lua_engine.as_ref())
@@ -899,7 +899,7 @@ impl App {
             self.drain_lua_logs(session_id)?;
         }
         // 空闲心跳检测：服务器静默超过 30 秒时发送 IAC NOP
-        if let Some(ref engine) = self
+        if let Some(engine) = self
             .manager
             .get_by_id(session_id)
             .and_then(|s| s.lua_engine.as_ref())
@@ -1530,7 +1530,7 @@ impl App {
                     match value.parse::<u64>() {
                         Ok(ms) => {
                             // 限制范围：[50, 10000]ms
-                            let clamped = ms.max(50).min(10000);
+                            let clamped = ms.clamp(50, 10000);
                             let is_realtime = self
                                 .manager
                                 .get_by_id(fg_id)
@@ -1859,7 +1859,7 @@ impl App {
                 // 触发器处理（所有连接都触发，不仅仅是前台）
                 {
                     let mut pending_lua_logs = Vec::new();
-                    let trigger_commands = if let Some(ref engine) = self
+                    let trigger_commands = if let Some(engine) = self
                         .manager
                         .get_by_id(id)
                         .and_then(|s| s.lua_engine.as_ref())
@@ -2096,7 +2096,7 @@ impl App {
                         .get_by_id(sid)
                         .map(|s| s.name.clone())
                         .unwrap_or_default();
-                    if let Some(ref engine) = self
+                    if let Some(engine) = self
                         .manager
                         .get_by_id(sid)
                         .and_then(|s| s.lua_engine.as_ref())

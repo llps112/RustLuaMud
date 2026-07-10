@@ -122,7 +122,7 @@ impl ConnectionManager {
     pub async fn connect_session(&mut self, session_id: SessionId) -> Result<(), String> {
         let session = self
             .get_mut_by_id(session_id)
-            .ok_or_else(|| format!("连接不存在"))?;
+            .ok_or_else(|| "连接不存在".to_string())?;
         let mut event_rx = session.connect().await?;
 
         let event_tx = self.event_tx.clone();

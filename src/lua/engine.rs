@@ -837,7 +837,7 @@ impl LuaEngine {
         // SendPkt(data) — MushClient API: 发送原始数据包到 MUD
         let state_rc_pkt = state_rc.clone();
         let send_pkt_fn =
-            lua.create_function_mut(move |_, data: mlua::String| -> LuaResult<i64> {
+            lua.create_function_mut(move |_, data: mlua::LuaString| -> LuaResult<i64> {
                 let bytes = data.as_bytes().to_vec();
                 // 限制单包大小，防止恶意或错误脚本导致内存暴涨
                 if bytes.len() > 65536 {
