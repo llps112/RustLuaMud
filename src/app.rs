@@ -1026,10 +1026,10 @@ impl App {
             // 如果是前台连接，也在终端显示（保留 ANSI 码以显示颜色）
             if is_foreground {
                 if buffer {
-                    self.manager.get_mut_by_id(session_id).map(|s| {
+                    if let Some(s) = self.manager.get_mut_by_id(session_id) {
                         s.pending_data.push(format!("\x1b[36m[Lua] {}\x1b[0m", msg));
                         s.render_dirty = true;
-                    });
+                    }
                 } else {
                     self.terminal
                         .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
@@ -1132,7 +1132,7 @@ impl App {
                     for single_cmd in commands {
                         // 先尝试别名匹配
                         let fg_id = self.manager.foreground_id;
-                        let alias_handled = if let Some(ref engine) = self
+                        let alias_handled = if let Some(engine) = self
                             .manager
                             .get_by_id(fg_id)
                             .and_then(|s| s.lua_engine.as_ref())
@@ -1485,7 +1485,7 @@ impl App {
                     .map(|s| s.name.clone())
                     .unwrap_or_default();
                 self.logger.log_lua(&name, &code);
-                if let Some(ref engine) = self
+                if let Some(engine) = self
                     .manager
                     .get_by_id(fg_id)
                     .and_then(|s| s.lua_engine.as_ref())
