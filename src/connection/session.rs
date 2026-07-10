@@ -235,28 +235,37 @@ impl Session {
                 if !username.is_empty() {
                     // 带认证的连接
                     let password = self.socks5_password.as_deref().unwrap_or("");
-                    tokio::time::timeout(connect_timeout, Socks5Stream::connect_with_password(
-                        proxy_addr.as_str(),
-                        target_addr.as_str(),
-                        username,
-                        password,
-                    ))
+                    tokio::time::timeout(
+                        connect_timeout,
+                        Socks5Stream::connect_with_password(
+                            proxy_addr.as_str(),
+                            target_addr.as_str(),
+                            username,
+                            password,
+                        ),
+                    )
                     .await
                     .map_err(|_| format!("SOCKS5 代理连接 {} 超时（10秒）", proxy_addr))?
                     .map_err(|e| format!("SOCKS5 代理连接 {} 失败: {}", proxy_addr, e))?
                 } else {
                     // 无认证的连接
-                    tokio::time::timeout(connect_timeout, Socks5Stream::connect(proxy_addr.as_str(), target_addr.as_str()))
-                        .await
-                        .map_err(|_| format!("SOCKS5 代理连接 {} 超时（10秒）", proxy_addr))?
-                        .map_err(|e| format!("SOCKS5 代理连接 {} 失败: {}", proxy_addr, e))?
-                }
-            } else {
-                // 无认证的连接
-                tokio::time::timeout(connect_timeout, Socks5Stream::connect(proxy_addr.as_str(), target_addr.as_str()))
+                    tokio::time::timeout(
+                        connect_timeout,
+                        Socks5Stream::connect(proxy_addr.as_str(), target_addr.as_str()),
+                    )
                     .await
                     .map_err(|_| format!("SOCKS5 代理连接 {} 超时（10秒）", proxy_addr))?
                     .map_err(|e| format!("SOCKS5 代理连接 {} 失败: {}", proxy_addr, e))?
+                }
+            } else {
+                // 无认证的连接
+                tokio::time::timeout(
+                    connect_timeout,
+                    Socks5Stream::connect(proxy_addr.as_str(), target_addr.as_str()),
+                )
+                .await
+                .map_err(|_| format!("SOCKS5 代理连接 {} 超时（10秒）", proxy_addr))?
+                .map_err(|e| format!("SOCKS5 代理连接 {} 失败: {}", proxy_addr, e))?
             };
 
             // 从 Socks5Stream 提取底层 TcpStream

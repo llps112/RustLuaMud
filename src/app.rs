@@ -554,7 +554,8 @@ impl App {
                         session.reconnect_backoff_secs = next_backoff;
                     }
                     self.terminal.append_output(&format!(
-                        "[系统] {} 秒后再次尝试重连 {}...", backoff, name
+                        "[系统] {} 秒后再次尝试重连 {}...",
+                        backoff, name
                     ))?;
                     let tx = self.reconnect_tx.clone();
                     tokio::spawn(async move {
