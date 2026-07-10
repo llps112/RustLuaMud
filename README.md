@@ -137,23 +137,60 @@ source $HOME/.cargo/env
 
 #### 配置 crates.io 镜像源
 
-国内首次编译依赖下载缓慢，推荐配置中科大 USTC 镜像：
+国内首次编译依赖下载缓慢，推荐配置国内镜像。根据网络环境选择合适源：
+
+| 镜像 | 配置名 | Registry URL | 备注 |
+|------|--------|-------------|------|
+| **中科大 USTC** | `ustc` | `sparse+https://mirrors.ustc.edu.cn/crates.io-index/` | 老牌稳定 |
+| **上海交大 SJTUG** | `sjtug` | `sparse+https://mirrors.sjtug.sjtu.edu.cn/crates.io-index/` | **阿里云推荐** |
+| **清华 TUNA** | `tuna` | `sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/` | 稳定 |
+| **南京大学 NJU** | `nju` | `sparse+https://mirror.nju.edu.cn/crates.io-index/` | / |
+| **华为云** | `huawei` | `sparse+https://repo.huaweicloud.com/repository/cargo/` | 阿里云也可以用 |
 
 ```bash
 mkdir -p ~/.cargo
-cat >> ~/.cargo/config.toml << 'EOF'
+
+# 以下二选一即可 ↓
+# 选项 1：直接写死一个源（如 SJTUG）
+cat > ~/.cargo/config.toml << 'EOF'
+[build]
+jobs = 2
 
 [source.crates-io]
-replace-with = "ustc"
+replace-with = "sjtug"
 
-[source.ustc]
+[source.sjtug]
+registry = "sparse+https://mirrors.sjtug.sjtu.edu.cn/crates.io-index/"
+EOF
+
+# 选项 2：多源 fallback（一个挂了自动切下一个）
+cat > ~/.cargo/config.toml << 'EOF'
+[build]
+jobs = 2
+
+[source.crates-io]
+replace-with = "mirror"
+
+[source.mirror]
+directory = "/nonexistent"  # 占位用，实际不会用到
+
+[source.mirror-alias]
+registry = "sparse+https://mirrors.sjtug.sjtu.edu.cn/crates.io-index/"
+
+[source.mirror-alias-1]
 registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+
+[source.mirror-alias-2]
+registry = "sparse+https://repo.huaweicloud.com/repository/cargo/"
+
+[source.mirror-alias-3]
+registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
 EOF
 ```
 
-配置完成后，后续 `cargo build` 将自动从 USTC 镜像拉取依赖，显著提升下载速度。
-
-> **可选镜像源**：除 USTC 外也可使用清华 TUNA 源（将上述 `ustc` 替换为 `tuna`，URL 改为 `https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/`）。
+> **注意**：`sparse+` 协议需要 cargo 1.68+（当前 stable 已默认支持）。
+>
+> 部分镜像可能间歇性抽风（如 rsproxy 已失效），建议 USTC 或 SJTUG 优先。
 
 #### 克隆仓库
 
