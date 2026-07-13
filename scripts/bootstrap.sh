@@ -13,6 +13,12 @@ set -e
 
 DATA_DIR="$HOME/RustLuaMud"
 
+# 如果存在同名文件（如之前误下载的二进制），先删掉
+if [ -f "$DATA_DIR" ]; then
+    echo "==> 删除同名文件: $DATA_DIR（与目录名冲突）"
+    rm -f "$DATA_DIR"
+fi
+
 echo "==> 创建数据目录: $DATA_DIR"
 mkdir -p "$DATA_DIR"/{profiles,scripts,logs}
 
