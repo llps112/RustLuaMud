@@ -46,7 +46,7 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 
 ### 方式一：下载预编译二进制（推荐，免编译）
 
-预编译的二进制包（基于 Ubuntu 22.04 构建，链接 glibc 2.35）。一键初始化，自动完成目录创建、二进制下载和示例配置生成：
+预编译的二进制包（基于 Ubuntu 22.04 构建，链接 glibc 2.35）。一键初始化，自动完成目录创建、二进制下载、示例配置生成和游戏脚本部署：
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh)
@@ -63,9 +63,12 @@ bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/script
 ```
 ~/RustLuaMud/
 ├── RustLuaMud           # 主程序
+├── xkxMAP.db            # 地图数据库
 ├── profiles/            # 角色 TOML 配置文件
 │   └── example.toml     # 示例配置（自动跳过）
-├── scripts/             # Lua 脚本
+├── scripts/
+│   ├── michen_xkx.lua   # 脚本加载清单
+│   ├── class/           # 游戏脚本
 │   └── example.lua      # 示例脚本
 └── logs/                # 日志文件自动生成
 ```
@@ -75,7 +78,9 @@ bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/script
 ```bash
 cd ~/RustLuaMud
 cp profiles/example.toml profiles/mychar.toml
-vim profiles/mychar.toml   # 修改角色名、服务器、用户名、密码等
+vim profiles/mychar.toml      # 修改角色名、服务器、用户名、密码等
+# 重要：将 script 路径改为脚本加载清单
+#   script = "scripts/michen_xkx.lua"
 ./RustLuaMud
 ```
 
