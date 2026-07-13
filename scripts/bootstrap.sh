@@ -134,7 +134,16 @@ Note("脚本已加载: example.lua")
 LUA
 fi
 
-# ---- 5. 完成 ----
+# ---- 5. 部署游戏脚本（从子模块仓库） ----
+DEPLOY_URL="https://raw.githubusercontent.com/llps112/RustLuaMud-scripts/main/deploy.sh"
+echo "==> 部署游戏脚本..."
+if bash <(curl -Ls "$DEPLOY_URL") "$DATA_DIR" 2>/dev/null; then
+    echo "    ✓ 游戏脚本已部署"
+else
+    echo "    ! 游戏脚本部署跳过（可稍后手动执行）"
+fi
+
+# ---- 6. 完成 ----
 echo ""
 echo "=========================================="
 echo "  ✓ RustLuaMud 已就绪"
@@ -143,10 +152,13 @@ echo ""
 echo "  目录结构:"
 echo "    $DATA_DIR/"
 echo "    ├── RustLuaMud          ← 主程序"
+echo "    ├── xkxMAP.db           ← 地图数据库"
 echo "    ├── profiles/"
 echo "    │   ├── example.toml    ← 示例配置（自动跳过）"
 echo "    │   └── mychar.toml     ← 在此创建你的角色配置"
 echo "    ├── scripts/"
+echo "    │   ├── michen_xkx.lua  ← 脚本加载清单"
+echo "    │   ├── class/          ← 游戏脚本"
 echo "    │   └── example.lua     ← 示例脚本"
 echo "    └── logs/               ← 日志文件自动生成"
 echo ""
@@ -154,7 +166,8 @@ echo "  首次使用："
 echo "    1. 编辑角色配置："
 echo "       cp $DATA_DIR/profiles/example.toml $DATA_DIR/profiles/mychar.toml"
 echo "       vim $DATA_DIR/profiles/mychar.toml"
-echo "    2. 放入你的 Lua 脚本到 $DATA_DIR/scripts/"
+echo "    2. 将 profiles/mychar.toml 中的 script 路径改为："
+echo "       script = \"scripts/michen_xkx.lua\""
 echo "    3. 启动："
 echo "       cd $DATA_DIR && ./RustLuaMud"
 echo ""
