@@ -46,40 +46,40 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 
 ### 方式一：下载预编译二进制（推荐，免编译）
 
-预编译的二进制包（基于 Ubuntu 22.04 构建，链接 glibc 2.35），下载解压即可运行。
-
-所有数据（角色配置、脚本、日志）统一放在 `~/RustLuaMud/` 目录下。首次使用先运行初始化脚本：
+预编译的二进制包（基于 Ubuntu 22.04 构建，链接 glibc 2.35）。一键初始化，自动完成目录创建、二进制下载和示例配置生成：
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh)
+```
+
+Nightly 版（main 分支最新构建，可能不稳定）：
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh) --nightly
 ```
 
 初始化后目录结构如下：
 
 ```
 ~/RustLuaMud/
-├── profiles/           # 在此创建角色 TOML 配置文件
-│   └── example.toml    # 示例配置（程序自动跳过，不会加载）
-├── scripts/            # 在此放入 Lua 脚本
-│   └── example.lua     # 示例脚本
-└── logs/               # 日志文件自动生成
+├── RustLuaMud           # 主程序
+├── profiles/            # 角色 TOML 配置文件
+│   └── example.toml     # 示例配置（自动跳过）
+├── scripts/             # Lua 脚本
+│   └── example.lua      # 示例脚本
+└── logs/                # 日志文件自动生成
 ```
 
-> 参考 `profiles/example.toml`，在 `profiles/` 下创建你的角色配置文件（如 `mychar.toml`），将 Lua 脚本放入 `scripts/`。详细配置项说明见下方[配置](#配置)章节。
-
-**稳定版** — 对应已发布的 tag 版本：
+编辑角色配置，然后启动：
 
 ```bash
-curl -L https://github.com/llps112/RustLuaMud/releases/latest/download/RustLuaMud-linux-x86_64.tar.gz | tar xz -C ~/RustLuaMud/
-cd ~/RustLuaMud && ./RustLuaMud
+cd ~/RustLuaMud
+cp profiles/example.toml profiles/mychar.toml
+vim profiles/mychar.toml   # 修改角色名、服务器、用户名、密码等
+./RustLuaMud
 ```
 
-**Nightly 版** — main 分支最新提交（自动构建，可能不稳定）：
-
-```bash
-curl -L https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-linux-x86_64.tar.gz | tar xz -C ~/RustLuaMud/
-cd ~/RustLuaMud && ./RustLuaMud
-```
+> 详细配置项说明见下方[配置](#配置)章节。
 
 > `nightly` 标签会在每次 push 到 main 分支时自动更新，由 [nightly.yml](.github/workflows/nightly.yml) 工作流构建。
 >
