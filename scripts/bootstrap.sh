@@ -46,15 +46,10 @@ echo "==> 创建数据目录: $DATA_DIR"
 mkdir -p "$DATA_DIR"/{profiles,scripts,logs}
 
 # ---- 2. 下载并解压二进制 ----
-BIN_PATH="$DATA_DIR/RustLuaMud"
-if [ -f "$BIN_PATH" ]; then
-    echo "==> 二进制已存在，跳过下载: $BIN_PATH"
-else
-    echo "==> 下载 $CHANNEL_LABEL 版二进制..."
-    echo "    $BINARY_URL"
-    curl -L "$BINARY_URL" 2>/dev/null | tar xz -C "$DATA_DIR"
-    echo "    ✓ 解压完成"
-fi
+echo "==> 下载 $CHANNEL_LABEL 版二进制..."
+echo "    $BINARY_URL"
+curl -L "$BINARY_URL" 2>/dev/null | tar xz -C "$DATA_DIR"
+echo "    ✓ 解压完成"
 
 # ---- 3. 创建示例角色配置 ----
 EXAMPLE_TOML="$DATA_DIR/profiles/example.toml"
