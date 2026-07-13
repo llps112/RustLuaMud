@@ -48,18 +48,37 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 
 预编译的二进制包（基于 Ubuntu 22.04 构建，链接 glibc 2.35），下载解压即可运行。
 
+所有数据（角色配置、脚本、日志）统一放在 `~/RustLuaMud/` 目录下。首次使用先运行初始化脚本：
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh)
+```
+
+初始化后目录结构如下：
+
+```
+~/RustLuaMud/
+├── profiles/           # 在此创建角色 TOML 配置文件
+│   └── example.toml    # 示例配置（程序自动跳过，不会加载）
+├── scripts/            # 在此放入 Lua 脚本
+│   └── example.lua     # 示例脚本
+└── logs/               # 日志文件自动生成
+```
+
+> 参考 `profiles/example.toml`，在 `profiles/` 下创建你的角色配置文件（如 `mychar.toml`），将 Lua 脚本放入 `scripts/`。详细配置项说明见下方[配置](#配置)章节。
+
 **稳定版** — 对应已发布的 tag 版本：
 
 ```bash
-curl -L https://github.com/llps112/RustLuaMud/releases/latest/download/RustLuaMud-linux-x86_64.tar.gz | tar xz
-./RustLuaMud
+curl -L https://github.com/llps112/RustLuaMud/releases/latest/download/RustLuaMud-linux-x86_64.tar.gz | tar xz -C ~/RustLuaMud/
+cd ~/RustLuaMud && ./RustLuaMud
 ```
 
 **Nightly 版** — main 分支最新提交（自动构建，可能不稳定）：
 
 ```bash
-curl -L https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-linux-x86_64.tar.gz | tar xz
-./RustLuaMud
+curl -L https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-linux-x86_64.tar.gz | tar xz -C ~/RustLuaMud/
+cd ~/RustLuaMud && ./RustLuaMud
 ```
 
 > `nightly` 标签会在每次 push 到 main 分支时自动更新，由 [nightly.yml](.github/workflows/nightly.yml) 工作流构建。
@@ -290,7 +309,15 @@ socks5_password = "pass"   # 可选
 | `Ctrl+C` / `Ctrl+D` | 退出程序 |
 | `↑` / `↓` | 浏览命令历史 |
 | `PageUp` / `PageDown` | 向上/向下滚动查看历史输出（每次滚动半屏） |
+| `Home` | 光标移到输入框行首 |
 | `End` | 输入框为空时回到输出底部，有内容时光标移到行尾 |
+| `Ctrl+A` | 跳到输入框行首（同 Home） |
+| `Ctrl+E` | 跳到输入框行尾 |
+| `Backspace` | 删除光标前一个字符 |
+| `Delete` | 删除光标后一个字符 |
+| `Ctrl+U` | 清除从行首到光标的全部内容 |
+| `Ctrl+K` | 清除从光标到行尾的全部内容 |
+| `Ctrl+W` | 删除光标前的一个单词（含前导空格） |
 
 ---
 
