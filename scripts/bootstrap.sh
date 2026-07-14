@@ -47,8 +47,15 @@ mkdir -p "$DATA_DIR"/{profiles,scripts,logs}
 
 # ---- 2. 下载并解压二进制 ----
 echo "==> 下载 $CHANNEL_LABEL 版二进制..."
-echo "    $BINARY_URL"
-curl -L "$BINARY_URL" 2>/dev/null | tar xz -C "$DATA_DIR"
+echo "    地址: $BINARY_URL"
+TMP_TAR=$(mktemp)
+if ! curl -fsSL -o "$TMP_TAR" "$BINARY_URL"; then
+    echo "!! 下载失败，请检查网络连接或确认 Release 是否存在"
+    rm -f "$TMP_TAR"
+    exit 1
+fi
+tar xzf "$TMP_TAR" -C "$DATA_DIR"
+rm -f "$TMP_TAR"
 echo "    ✓ 解压完成"
 
 # ---- 3. 创建示例角色配置 ----
