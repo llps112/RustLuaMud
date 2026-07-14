@@ -775,6 +775,7 @@ impl LuaEngine {
             script_dir,
             log_dir,
             pending_on_connect: None,
+            connect_delay_ms: 0,
         };
         engine.register_api()?;
         Ok(engine)

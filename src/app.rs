@@ -505,15 +505,24 @@ impl App {
                     .map(|s| s.lua_engine.is_some())
                     .unwrap_or(false);
                 if has_engine {
-                    // 先排空 OnConnect() 产生的命令和日志，再发送
+                    let connect_delay_ms = self
+                        .manager
+                        .get_by_id(session_id)
+                        .map(|s| s.connect_delay_ms)
+                        .unwrap_or(0);
                     let queued_cmds = {
                         let engine = self
                             .manager
                             .get_mut_by_id(session_id)
                             .and_then(|s| s.lua_engine.as_mut())
                             .unwrap();
+                        engine.set_connect_delay(connect_delay_ms);
                         engine.set_connected(true);
-                        engine.drain_commands()
+                        if connect_delay_ms == 0 {
+                            engine.drain_commands()
+                        } else {
+                            Vec::new()
+                        }
                     };
                     for cmd in &queued_cmds {
                         self.logger.log_command(&name, cmd);
@@ -693,6 +702,11 @@ impl App {
                         .map(|s| matches!(s.state, crate::connection::SessionState::Connected))
                         .unwrap_or(false);
                     if is_connected {
+                        let connect_delay_ms = self
+                            .manager
+                            .get_by_id(session_id)
+                            .map(|s| s.connect_delay_ms)
+                            .unwrap_or(0);
                         let queued_cmds = {
                             match self
                                 .manager
@@ -700,8 +714,13 @@ impl App {
                                 .and_then(|s| s.lua_engine.as_mut())
                             {
                                 Some(eng) => {
+                                    eng.set_connect_delay(connect_delay_ms);
                                     eng.set_connected(true);
-                                    eng.drain_commands()
+                                    if connect_delay_ms == 0 {
+                                        eng.drain_commands()
+                                    } else {
+                                        Vec::new()
+                                    }
                                 }
                                 None => Vec::new(),
                             }
@@ -873,6 +892,34 @@ impl App {
             return Ok(());
         }
         let mut any_fired = false;
+
+        // 检查延迟 OnConnect 是否到期
+        {
+            let on_connect_fired = self
+                .manager
+                .get_mut_by_id(session_id)
+                .and_then(|s| s.lua_engine.as_mut())
+                .map(|engine| engine.check_pending_on_connect())
+                .unwrap_or(false);
+            if on_connect_fired {
+                any_fired = true;
+            }
+        }
+        if any_fired {
+            let commands = self
+                .manager
+                .get_by_id(session_id)
+                .and_then(|s| s.lua_engine.as_ref())
+                .map(|engine| engine.drain_commands())
+                .unwrap_or_default();
+            if !commands.is_empty() {
+                self.send_lua_commands(session_id, commands)?;
+            }
+            // 处理 SendPkt 压入的原始数据包
+            self.send_lua_raw(session_id)?;
+            self.drain_lua_logs(session_id)?;
+        }
+
         loop {
             // 先检查是否有到期的定时器，确保 engine 引用在调用 self 方法前被释放
             let should_fire = self

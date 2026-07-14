@@ -282,6 +282,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         }
     }
 
