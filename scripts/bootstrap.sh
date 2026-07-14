@@ -49,7 +49,7 @@ mkdir -p "$DATA_DIR"/{profiles,scripts,logs}
 echo "==> 下载 $CHANNEL_LABEL 版二进制..."
 echo "    地址: $BINARY_URL"
 TMP_TAR=$(mktemp)
-if ! curl -fsSL -o "$TMP_TAR" "$BINARY_URL"; then
+if ! curl -fsSL --http1.1 --retry 3 -o "$TMP_TAR" "$BINARY_URL"; then
     echo "!! 下载失败，请检查网络连接或确认 Release 是否存在"
     rm -f "$TMP_TAR"
     exit 1
