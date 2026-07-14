@@ -1202,6 +1202,7 @@ impl App {
                     log_rotation_count: None,
                     render_interval: 1000,
                     realtime: false,
+                    connect_delay_ms: 1000,
                 };
 
                 let session_id = match self.manager.add_connection_dynamic(&conn_config) {

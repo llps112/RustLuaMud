@@ -102,6 +102,8 @@ pub struct Session {
     pub pending_data: Vec<String>,
     /// 是否有待渲染的数据
     pub render_dirty: bool,
+    /// 连接建立后延迟执行 OnConnect 的毫秒数
+    pub connect_delay_ms: u64,
 
     // 发送命令的通道
     send_tx: Option<mpsc::Sender<String>>,
@@ -205,6 +207,7 @@ impl Session {
             realtime: config.realtime,
             pending_data: Vec::new(),
             render_dirty: false,
+            connect_delay_ms: config.connect_delay_ms,
             send_tx: None,
             send_raw_tx: None,
             cancel_tx: None,
@@ -684,6 +687,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(1), &config);
         assert_eq!(session.name, "test");
@@ -714,6 +718,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 2000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(1), &config);
         assert_eq!(session.render_interval, 2000);
@@ -742,6 +747,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.send("hello").is_err());
@@ -768,6 +774,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let mut session = Session::new(SessionId(1), &config);
         session.disconnect();
@@ -795,6 +802,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(2), &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -821,6 +829,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(3), &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -847,6 +856,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(5), &config);
         assert_eq!(session.script_path, Some("/path/to/script.lua".to_string()));
@@ -873,6 +883,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(6), &config);
         assert_eq!(session.username, Some("player".to_string()));
@@ -900,6 +911,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(7), &config);
         assert!(session.auto_connect);
@@ -928,6 +940,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(8), &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -954,6 +967,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(9), &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -1028,6 +1042,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.output_lines.is_empty());
@@ -1054,6 +1069,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.lua_engine.is_none());
@@ -1080,6 +1096,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let mut session = Session::new(SessionId(1), &config);
         session.disconnect();
@@ -1115,6 +1132,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(!session.socks5_enable);
@@ -1143,6 +1161,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1171,6 +1190,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1202,6 +1222,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1230,6 +1251,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1258,6 +1280,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         }
     }
 
@@ -1281,6 +1304,7 @@ mod tests {
             log_rotation_count: None,
             render_interval: 1000,
             realtime: false,
+            connect_delay_ms: 1000,
         }
     }
 

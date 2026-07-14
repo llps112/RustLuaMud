@@ -633,6 +633,10 @@ pub struct LuaEngine {
     script_path: Rc<RefCell<Option<String>>>,
     script_dir: Rc<RefCell<Option<String>>>,
     log_dir: Rc<RefCell<Option<String>>>,
+    /// 延迟触发 OnConnect 的目标时间（None 表示无待触发）
+    pending_on_connect: Option<std::time::Instant>,
+    /// 连接建立后延迟执行 OnConnect 的毫秒数
+    connect_delay_ms: u64,
 }
 
 // ============================================================
@@ -770,6 +774,7 @@ impl LuaEngine {
             script_path,
             script_dir,
             log_dir,
+            pending_on_connect: None,
         };
         engine.register_api()?;
         Ok(engine)
@@ -3711,15 +3716,51 @@ impl LuaEngine {
         // 连接刚建立时，调用 OnConnect() 抽象接口
         // Lua 脚本可通过覆盖 OnConnect() 实现连接后的初始化逻辑
         if connected && !was_connected {
-            let lua_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                if let Err(e) = self.eval_code("OnConnect()") {
-                    self.log_error(&format!("OnConnect() 执行失败: {}", e));
+            // 延迟触发机制：由定时器轮询检查并执行
+            // 延迟时间从 Session 配置获取，通过 set_connect_delay 设置
+            // 若未设置延迟（delay_ms == 0），则立即执行
+            if self.connect_delay_ms == 0 {
+                let lua_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Err(e) = self.eval_code("OnConnect()") {
+                        self.log_error(&format!("OnConnect() 执行失败: {}", e));
+                    }
+                }));
+                if lua_result.is_err() {
+                    self.log_error("OnConnect() 执行中发生 panic，已捕获以防止崩溃");
                 }
-            }));
-            if lua_result.is_err() {
-                self.log_error("OnConnect() 执行中发生 panic，已捕获以防止崩溃");
+            } else {
+                // 设置延迟触发时间
+                self.pending_on_connect = Some(std::time::Instant::now()
+                    + std::time::Duration::from_millis(self.connect_delay_ms));
+            }
+        } else if !connected && was_connected {
+            // 连接断开时，清除待触发标记
+            self.pending_on_connect = None;
+        }
+    }
+
+    /// 设置 OnConnect 延迟触发时间（毫秒）
+    pub fn set_connect_delay(&mut self, delay_ms: u64) {
+        self.connect_delay_ms = delay_ms;
+    }
+
+    /// 检查延迟 OnConnect 是否到期，到期则执行并返回 true
+    pub fn check_pending_on_connect(&mut self) -> bool {
+        if let Some(target_time) = self.pending_on_connect {
+            if std::time::Instant::now() >= target_time {
+                self.pending_on_connect = None;
+                let lua_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Err(e) = self.eval_code("OnConnect()") {
+                        self.log_error(&format!("OnConnect() 延迟执行失败: {}", e));
+                    }
+                }));
+                if lua_result.is_err() {
+                    self.log_error("OnConnect() 延迟执行中发生 panic，已捕获以防止崩溃");
+                }
+                return true;
             }
         }
+        false
     }
     #[allow(dead_code)]
     /// 取出连接请求标志（一次性消费）

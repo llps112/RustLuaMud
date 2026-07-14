@@ -88,6 +88,10 @@ pub struct ConnectionConfig {
     /// 实时渲染开关，true 时忽略 render_interval 直接实时渲染，默认 false
     #[serde(default)]
     pub realtime: bool,
+    /// 连接建立后延迟执行 OnConnect 的毫秒数，默认 1000ms
+    /// 防止连接瞬间批量发送指令触发服务器反 flood 机制
+    #[serde(default = "default_connect_delay")]
+    pub connect_delay_ms: u64,
 }
 
 fn default_true() -> bool {
@@ -101,6 +105,9 @@ fn default_reconnect_delay() -> u64 {
 }
 fn default_socks5_port() -> u16 {
     1080
+}
+fn default_connect_delay() -> u64 {
+    1000
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -520,5 +527,40 @@ port = 6000"#
         "#;
         let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.render_interval, 0);
+    }
+
+    #[test]
+    fn test_connect_delay_ms_default() {
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.connect_delay_ms, 1000);
+    }
+
+    #[test]
+    fn test_connect_delay_ms_custom() {
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+            connect_delay_ms = 2000
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.connect_delay_ms, 2000);
+    }
+
+    #[test]
+    fn test_connect_delay_ms_zero() {
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+            connect_delay_ms = 0
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.connect_delay_ms, 0);
     }
 }

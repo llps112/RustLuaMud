@@ -247,6 +247,11 @@ auto_connect = true
 auto_reconnect = true
 reconnect_delay_secs = 5
 
+# 连接后延迟执行 OnConnect 的毫秒数，默认 1000
+# 防止连接瞬间批量发送指令触发服务器反 flood 机制
+# 设置为 0 可恢复立即执行（不推荐）
+# connect_delay_ms = 1000
+
 # 登录凭证（启动时自动注入 Lua 变量 char_name / char_password）
 # 留空则不注入，需手动输入或通过 Lua 脚本设置
 username = "your_character_name"
@@ -660,6 +665,10 @@ export RUST_BACKTRACE=1
 ---
 
 ## 版本历史
+
+### v0.1.5 (2026-07-14)
+
+- 新增 `connect_delay_ms` 配置项，连接建立后延迟执行 OnConnect，防止瞬间批量发送指令触发服务器反 flood 机制（默认延迟 1000ms）
 
 ### v0.1.4 (2026-06-22)
 

@@ -390,6 +390,68 @@ impl TerminalState {
                 Some(cmd)
             }
 
+            // Ctrl+U: 清除从行首到光标的全部内容
+            (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
+                self.clear_on_next_key = false;
+                self.text_selected = false;
+                let cursor_byte = char_pos_to_byte_pos(&self.input_buffer, self.input_cursor);
+                self.input_buffer.drain(..cursor_byte);
+                self.input_cursor = 0;
+                None
+            }
+
+            // Ctrl+K: 清除从光标到行尾的全部内容
+            (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
+                self.clear_on_next_key = false;
+                self.text_selected = false;
+                let cursor_byte = char_pos_to_byte_pos(&self.input_buffer, self.input_cursor);
+                self.input_buffer.truncate(cursor_byte);
+                None
+            }
+
+            // Ctrl+W: 删除光标前的一个单词（先跳过非空格字符，再跳过空格，与 readline unix-word-rubout 行为一致）
+            (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
+                self.clear_on_next_key = false;
+                self.text_selected = false;
+                if self.input_cursor > 0 {
+                    let mut pos = self.input_cursor;
+                    while pos > 0
+                        && self
+                            .input_buffer
+                            .chars()
+                            .nth(pos - 1)
+                            .map(|c| c != ' ')
+                            .unwrap_or(false)
+                    {
+                        pos -= 1;
+                    }
+                    while pos > 0 && self.input_buffer.chars().nth(pos - 1) == Some(' ') {
+                        pos -= 1;
+                    }
+                    let start_byte = char_pos_to_byte_pos(&self.input_buffer, pos);
+                    let end_byte = char_pos_to_byte_pos(&self.input_buffer, self.input_cursor);
+                    self.input_buffer.drain(start_byte..end_byte);
+                    self.input_cursor = pos;
+                }
+                None
+            }
+
+            // Ctrl+A: 跳到行首（同 Home）
+            (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
+                self.clear_on_next_key = false;
+                self.text_selected = false;
+                self.input_cursor = 0;
+                None
+            }
+
+            // Ctrl+E: 跳到行尾（同 End）
+            (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
+                self.clear_on_next_key = false;
+                self.text_selected = false;
+                self.input_cursor = self.input_buffer.chars().count();
+                None
+            }
+
             (KeyModifiers::NONE, KeyCode::Backspace) => {
                 self.clear_on_next_key = false;
                 if self.text_selected {
@@ -558,6 +620,12 @@ impl TerminalState {
                 let scroll_amount = (self.output_height() / 2) as usize;
                 self.scroll_offset = self.scroll_offset.saturating_sub(scroll_amount);
                 None
+            }
+
+            // 兜底：某些终端/tmux 下 backspace 可能以原始字节形式传入
+            (KeyModifiers::NONE, KeyCode::Char('\x08'))
+            | (KeyModifiers::NONE, KeyCode::Char('\x7f')) => {
+                self.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
             }
 
             (KeyModifiers::SHIFT, KeyCode::Char(c)) | (KeyModifiers::NONE, KeyCode::Char(c)) => {
@@ -2103,5 +2171,128 @@ mod tests {
         ts2.restore_input_state(&saved);
         assert!(ts2.input_buffer.is_empty());
         assert_eq!(ts2.input_cursor, 0);
+    }
+
+    #[test]
+    fn test_state_handle_key_ctrl_u_clear_to_start() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello world".to_string();
+        state.input_cursor = 5; // 光标在 'hello' 之后
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(state.input_buffer, " world");
+        assert_eq!(state.input_cursor, 0);
+    }
+
+    #[test]
+    fn test_state_handle_key_ctrl_u_at_start() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 0;
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(state.input_buffer, "hello");
+        assert_eq!(state.input_cursor, 0);
+    }
+
+    #[test]
+    fn test_state_handle_key_ctrl_k_clear_to_end() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello world".to_string();
+        state.input_cursor = 5; // 光标在 'hello' 之后
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(state.input_buffer, "hello");
+        assert_eq!(state.input_cursor, 5);
+    }
+
+    #[test]
+    fn test_state_handle_key_ctrl_k_at_end() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 5;
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(state.input_buffer, "hello");
+        assert_eq!(state.input_cursor, 5);
+    }
+
+    #[test]
+    fn test_state_handle_key_ctrl_w_delete_word() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello world".to_string();
+        state.input_cursor = 11;
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(state.input_buffer, "hello");
+        assert_eq!(state.input_cursor, 5);
+    }
+
+    #[test]
+    fn test_state_handle_key_ctrl_w_with_spaces() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello   world".to_string();
+        state.input_cursor = 13;
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        // 先跳过空格再跳过 'hello'，所以应删除 '   world'
+        assert_eq!(state.input_buffer, "hello");
+        assert_eq!(state.input_cursor, 5);
+    }
+
+    #[test]
+    fn test_state_handle_key_ctrl_w_at_start() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 0;
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(state.input_buffer, "hello");
+        assert_eq!(state.input_cursor, 0);
+    }
+
+    #[test]
+    fn test_state_handle_key_ctrl_a_home() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 3;
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(state.input_cursor, 0);
+    }
+
+    #[test]
+    fn test_state_handle_key_ctrl_e_end() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "hello".to_string();
+        state.input_cursor = 0;
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(state.input_cursor, 5);
+    }
+
+    #[test]
+    fn test_state_handle_key_raw_backspace_fallback() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "ab".to_string();
+        state.input_cursor = 2;
+        // \x08 (BS) 应等同于 Backspace
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('\x08'), KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "a");
+        assert_eq!(state.input_cursor, 1);
+    }
+
+    #[test]
+    fn test_state_handle_key_raw_del_fallback() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "ab".to_string();
+        state.input_cursor = 0;
+        // \x7f (DEL) 应等同于 Backspace（删除光标前字符，但光标在行首所以无操作）
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('\x7f'), KeyModifiers::NONE));
+        // 光标在行首，backspace 无操作
+        assert_eq!(state.input_buffer, "ab");
+        assert_eq!(state.input_cursor, 0);
+    }
+
+    #[test]
+    fn test_state_handle_key_raw_del_fallback_with_content() {
+        let mut state = TerminalState::new(80, 24);
+        state.input_buffer = "ab".to_string();
+        state.input_cursor = 2;
+        // \x7f (DEL) 在光标末尾应等同于 Backspace
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char('\x7f'), KeyModifiers::NONE));
+        assert_eq!(state.input_buffer, "a");
+        assert_eq!(state.input_cursor, 1);
     }
 }
