@@ -3730,8 +3730,10 @@ impl LuaEngine {
                 }
             } else {
                 // 设置延迟触发时间
-                self.pending_on_connect = Some(std::time::Instant::now()
-                    + std::time::Duration::from_millis(self.connect_delay_ms));
+                self.pending_on_connect = Some(
+                    std::time::Instant::now()
+                        + std::time::Duration::from_millis(self.connect_delay_ms),
+                );
             }
         } else if !connected && was_connected {
             // 连接断开时，清除待触发标记
