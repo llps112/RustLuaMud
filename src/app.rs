@@ -531,6 +531,7 @@ impl App {
                         }
                     }
                     self.drain_lua_logs(session_id)?;
+                    self.send_lua_raw(session_id)?;
                 } else {
                     self.init_lua_for_session(session_id)?;
                 }
@@ -732,6 +733,7 @@ impl App {
                             }
                         }
                         self.drain_lua_logs(session_id)?;
+                        self.send_lua_raw(session_id)?;
                     }
                 }
                 // 启动定时器
