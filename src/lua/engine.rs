@@ -637,6 +637,10 @@ pub struct LuaEngine {
     pending_on_connect: Option<std::time::Instant>,
     /// 连接建立后延迟执行 OnConnect 的毫秒数
     connect_delay_ms: u64,
+    /// 延迟排空期内暂存的命令队列
+    /// OnConnect() 的 Execute() 和 trigger 的 Execute() 在延迟期内先暂存于此，
+    /// 避免被 process_output_inner 的清零操作摧毁。
+    delayed_commands: std::cell::RefCell<Vec<String>>,
 }
 
 // ============================================================
@@ -776,6 +780,7 @@ impl LuaEngine {
             log_dir,
             pending_on_connect: None,
             connect_delay_ms: 0,
+            delayed_commands: std::cell::RefCell::new(Vec::new()),
         };
         engine.register_api()?;
         Ok(engine)
@@ -3741,6 +3746,10 @@ impl LuaEngine {
                 if lua_result.is_err() {
                     self.log_error("OnConnect() 执行中发生 panic，已捕获以防止崩溃");
                 }
+                // 将 OnConnect 产生的命令移入延迟队列，避免被 process_output_inner 清空
+                self.delayed_commands
+                    .borrow_mut()
+                    .extend(self.state.borrow_mut().pending_commands.drain(..));
                 // 设置命令排空的延迟触发时间
                 self.pending_on_connect = Some(
                     std::time::Instant::now()
@@ -3748,8 +3757,9 @@ impl LuaEngine {
                 );
             }
         } else if !connected && was_connected {
-            // 连接断开时，清除待触发标记
+            // 连接断开时，清除待触发标记及延迟命令队列
             self.pending_on_connect = None;
+            self.delayed_commands.borrow_mut().clear();
         }
     }
 
@@ -3769,6 +3779,25 @@ impl LuaEngine {
         }
         false
     }
+
+    /// 是否有待处理的延迟 OnConnect 排空（延迟期尚未结束）
+    pub fn has_pending_delayed_on_connect(&self) -> bool {
+        self.pending_on_connect.is_some()
+    }
+
+    /// 将当前 pending_commands 移入延迟队列（延迟期内 trigger 命令暂存）
+    pub fn drain_commands_to_delayed(&self) {
+        let cmds: Vec<String> = self.state.borrow_mut().pending_commands.drain(..).collect();
+        if !cmds.is_empty() {
+            self.delayed_commands.borrow_mut().extend(cmds);
+        }
+    }
+
+    /// 取出延迟队列中的所有命令
+    pub fn drain_delayed_commands(&self) -> Vec<String> {
+        self.delayed_commands.borrow_mut().drain(..).collect()
+    }
+
     #[allow(dead_code)]
     /// 取出连接请求标志（一次性消费）
     pub fn take_connect_requested(&self) -> bool {
@@ -6095,7 +6124,7 @@ mod tests {
 
         // set_connected(false) 应清除 pending_on_connect
         engine.set_connected(false);
-        // 重新连接（不应再触发 on_connect_called，因为已清除）
+        // 清除标志后重新连接，OnConnect 应再次触发
         exec(&engine, "on_connect_called = false").unwrap();
         engine.set_connected(true);
         assert!(

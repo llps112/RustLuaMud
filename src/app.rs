@@ -912,7 +912,11 @@ impl App {
                 .manager
                 .get_by_id(session_id)
                 .and_then(|s| s.lua_engine.as_ref())
-                .map(|engine| engine.drain_commands())
+                .map(|engine| {
+                    let mut cmds = engine.drain_commands();
+                    cmds.extend(engine.drain_delayed_commands());
+                    cmds
+                })
                 .unwrap_or_default();
             if !commands.is_empty() {
                 self.send_lua_commands(session_id, commands)?;
@@ -1920,7 +1924,12 @@ impl App {
                             let trimmed = part.trim_end_matches(['\r', '\n']);
                             if !trimmed.is_empty() {
                                 engine.process_output(trimmed);
-                                all_cmds.extend(engine.drain_commands());
+                                // 延迟期内 trigger 命令放入延迟队列，等到期后统一发送
+                                if engine.has_pending_delayed_on_connect() {
+                                    engine.drain_commands_to_delayed();
+                                } else {
+                                    all_cmds.extend(engine.drain_commands());
+                                }
                             }
                         }
                         // 收集 Lua 日志（写入文件 + 暂存待终端输出）
