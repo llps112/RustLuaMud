@@ -29,7 +29,7 @@ jobs:
           cp target/release/RustLuaMud release/
           tar czf release/RustLuaMud-linux-x86_64.tar.gz -C release RustLuaMud
 
-      - name: Upload to Nightly Release
+      - name: Upload to Nightly Release (GitHub)
         uses: ncipollo/release-action@v1
         with:
           tag: nightly
@@ -40,3 +40,43 @@ jobs:
           replacesArtifacts: true
           artifacts: "release/RustLuaMud-linux-x86_64.tar.gz"
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync to Gitee Release
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          set -e
+          OWNER="bai-yifei180"
+          REPO="RustLuaMud"
+          TAG="nightly"
+          FILE="release/RustLuaMud-linux-x86_64.tar.gz"
+
+          # 获取或创建 Release
+          RESP=$(curl -s -H "Authorization: token ${GITEE_TOKEN}" \
+            "https://gitee.com/api/v5/repos/${OWNER}/${REPO}/releases/tags/${TAG}")
+          RELEASE_ID=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+
+          if [ -z "$RELEASE_ID" ]; then
+            echo "==> Creating Gitee Release (tag: ${TAG})..."
+            RESP=$(curl -s -X POST -H "Content-Type: application/json" \
+              -H "Authorization: token ${GITEE_TOKEN}" \
+              -d "{\"tag_name\":\"${TAG}\",\"name\":\"Nightly Build\",\"body\":\"自动构建于 main 分支最新提交。\\n\\n下载地址：\\n\`\`\`\\ncurl -L https://gitee.com/${OWNER}/${REPO}/releases/download/${TAG}/RustLuaMud-linux-x86_64.tar.gz | tar xz\\n\`\`\`\",\"prerelease\":true}" \
+              "https://gitee.com/api/v5/repos/${OWNER}/${REPO}/releases")
+            RELEASE_ID=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))")
+            echo "   Created release ID: ${RELEASE_ID}"
+          else
+            echo "==> Found existing Gitee Release (ID: ${RELEASE_ID})"
+          fi
+
+          if [ -n "$RELEASE_ID" ]; then
+            echo "==> Uploading artifact to Gitee Release..."
+            curl -s -X POST \
+              -H "Authorization: token ${GITEE_TOKEN}" \
+              -F "file=@${FILE}" \
+              "https://gitee.com/api/v5/repos/${OWNER}/${REPO}/releases/${RELEASE_ID}/attach_files" \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print('   Uploaded:', d.get('name',''))"
+            echo "==> Gitee Release sync complete."
+          else
+            echo "!! Failed to get or create Gitee Release"
+            exit 1
+          fi

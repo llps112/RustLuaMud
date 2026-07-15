@@ -4,7 +4,9 @@
 #
 # 用法：
 #   bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh)
-#   bash <(curl -Ls ...) --nightly    # 下载 nightly 版
+#   bash <(curl -Ls ...) --nightly              # 下载 nightly 版
+#   bash <(curl -Ls ...) --gitee                # 从 Gitee 镜像下载
+#   bash <(curl -Ls ...) --nightly --gitee      # 从 Gitee 下载 nightly
 #
 #   或从仓库内执行：
 #   bash scripts/bootstrap.sh
@@ -14,20 +16,31 @@ set -e
 
 # --- 参数解析 ---
 RELEASE_CHANNEL="stable"
-if [ "$1" = "--nightly" ]; then
-    RELEASE_CHANNEL="nightly"
-fi
+USE_GITEE=false
+for arg in "$@"; do
+    case "$arg" in
+        --nightly) RELEASE_CHANNEL="nightly" ;;
+        --gitee)   USE_GITEE=true ;;
+    esac
+done
 
 DATA_DIR="$HOME/RustLuaMud"
 ARCH="linux-x86_64"
 
-# 根据 channel 决定下载 URL
-if [ "$RELEASE_CHANNEL" = "nightly" ]; then
-    BINARY_URL="https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-${ARCH}.tar.gz"
-    CHANNEL_LABEL="nightly"
+# 根据 channel 和镜像源决定下载 URL
+if [ "$USE_GITEE" = true ]; then
+    # Gitee 镜像（仅 nightly 同步到 Gitee Release）
+    RELEASE_CHANNEL="nightly"
+    BINARY_URL="https://gitee.com/bai-yifei180/RustLuaMud/releases/download/nightly/RustLuaMud-${ARCH}.tar.gz"
+    CHANNEL_LABEL="nightly (Gitee)"
 else
-    BINARY_URL="https://github.com/llps112/RustLuaMud/releases/latest/download/RustLuaMud-${ARCH}.tar.gz"
-    CHANNEL_LABEL="stable"
+    if [ "$RELEASE_CHANNEL" = "nightly" ]; then
+        BINARY_URL="https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-${ARCH}.tar.gz"
+        CHANNEL_LABEL="nightly"
+    else
+        BINARY_URL="https://github.com/llps112/RustLuaMud/releases/latest/download/RustLuaMud-${ARCH}.tar.gz"
+        CHANNEL_LABEL="stable"
+    fi
 fi
 
 echo "=========================================="

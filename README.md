@@ -44,6 +44,8 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 | 需要修改客户端代码 | [方式二：从源码编译](#方式二从源码编译) |
 | 海外服务器，直连下载快 | 两种方式均可，编译时用官方源更快 |
 
+> **国内网络优化**：本项目已同步至 Gitee 镜像仓库 [bai-yifei180/RustLuaMud](https://gitee.com/bai-yifei180/RustLuaMud)（自动同步）。GitHub Actions 构建后自动同步 nightly 二进制到 Gitee Release，国内用户可使用 `--gitee` 参数从 Gitee 镜像下载。
+
 ### 方式一：下载预编译二进制（推荐，免编译）
 
 预编译的二进制包（基于 Ubuntu 22.04 构建，链接 glibc 2.35）。一键初始化，自动完成目录创建、二进制下载和示例配置生成：
@@ -57,6 +59,12 @@ Nightly 版（main 分支最新构建，可能不稳定）：
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh) --nightly
 ```
+
+> **Gitee 镜像**（国内用户使用，GitHub Actions 构建后自动同步 nightly 版到 Gitee Release）：
+>
+> ```bash
+> bash <(curl -Ls https://gitee.com/bai-yifei180/RustLuaMud/raw/main/scripts/bootstrap.sh) --gitee
+> ```
 
 初始化后目录结构如下：
 
@@ -214,7 +222,12 @@ EOF
 #### 克隆仓库
 
 ```bash
+# GitHub（海外服务器推荐）
 git clone https://github.com/llps112/RustLuaMud.git
+
+# Gitee 镜像（国内访问更快）
+git clone https://gitee.com/bai-yifei180/RustLuaMud.git
+
 cd RustLuaMud
 ```
 
@@ -654,6 +667,8 @@ export RUST_BACKTRACE=1
 
 ## CI/CD
 
+### GitHub Actions
+
 项目使用 GitHub Actions 实现自动化工作流：
 
 - **CI** — 每次 push/PR 自动运行测试、clippy 检查、fmt 格式化验证
@@ -661,6 +676,22 @@ export RUST_BACKTRACE=1
 - **Nightly** — 每次 push main 自动构建并更新 [nightly release](https://github.com/llps112/RustLuaMud/releases/tag/nightly)
 - **Audit** — 每周自动进行依赖安全审计
 - **Dependabot** — 依赖自动更新 PR
+
+### Gitee Release 同步
+
+Nightly 构建完成后，GitHub Actions 会自动将二进制同步到 [Gitee Release](https://gitee.com/bai-yifei180/RustLuaMud/releases)，方便国内用户下载。
+
+#### 配置方法
+
+1. 在 [Gitee 个人设置 - 私人令牌](https://gitee.com/profile/personal_access_tokens) 创建一个令牌，勾选 `projects` 权限
+2. 在 GitHub 仓库的 **Settings → Secrets and variables → Actions → Repository secrets** 中添加 `GITEE_TOKEN`，值填入上一步生成的令牌
+3. 之后每次 push 到 main 分支，GitHub Actions 会自动构建并同步 nightly 二进制到 Gitee Release
+
+### Gitee Go 流水线（备选方案）
+
+如果希望完全脱离 GitHub，在 Gitee 上完成 CI/CD，可以参考 `.gitee/workflows/nightly.yml` 在 Gitee 仓库中配置流水线。
+
+> **注意**：Gitee Go 个人版暂无原生 Rust 构建插件，上述参考配置使用 GCC 构建环境手动安装 Rust 工具链。首次构建因依赖下载较慢，后续会缓存加速。
 
 ---
 

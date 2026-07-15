@@ -1,0 +1,84 @@
+# Gitee Go 流水线配置（Nightly 自动构建）
+#
+# 使用方法：
+# 1. 在 Gitee 仓库页面进入「流水线」→「新建流水线」
+# 2. 选择「代码源」为本仓库 main 分支
+# 3. 在「任务编排」中切换到「代码视图」
+# 4. 将本文件内容粘贴覆盖
+# 5. 保存并执行
+#
+# 注意：Gitee Go 个人版暂无原生 Rust 构建插件，
+#       以下方案用 GCC 环境手动安装 Rust 来编译。
+#       首次构建因下载依赖会较慢，后续会缓存加速。
+
+stages:
+  - name: build
+    displayName: 构建
+    strategy: naturally
+    trigger: auto
+    steps:
+      # 使用 GCC 构建环境（提供 Linux 容器）
+      - step: build@gcc
+        name: build_rust
+        displayName: Rust 构建
+        gccVersion: 'latest'
+        # 在 GCC 容器中安装 Rust 工具链并编译
+        commands: |
+          set -e
+          echo "==> 安装 Rust 工具链..."
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source $HOME/.cargo/env
+
+          # 配置国内镜像加速依赖下载
+          cat > ~/.cargo/config.toml << 'CARGO_EOF'
+          [source.crates-io]
+          replace-with = "ustc"
+          [source.ustc]
+          registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+          CARGO_EOF
+
+          echo "==> 编译 release 版..."
+          cargo build --release
+
+          echo "==> 打包二进制..."
+          mkdir -p release
+          cp target/release/RustLuaMud release/
+          tar czf release/RustLuaMud-linux-x86_64.tar.gz -C release RustLuaMud
+          echo "==> 构建完成"
+        # 暂存构建物，供下游步骤使用
+        artifacts:
+          - name: RLM_RELEASE
+            path:
+              - release/RustLuaMud-linux-x86_64.tar.gz
+        # 缓存 cargo 依赖，加速后续构建
+        caches:
+          - /root/.cargo/git
+          - /root/.cargo/registry
+
+  - name: release
+    displayName: 发版
+    strategy: naturally
+    trigger: auto
+    steps:
+      # 发布到 Gitee Release（nightly tag）
+      - step: release@gitee
+        name: release_gitee
+        displayName: Gitee Release
+        tagName: nightly
+        releaseName: Nightly Build
+        description: |
+          自动构建于 main 分支最新提交。
+
+          下载地址（从 Gitee Release 获取）：
+          ```
+          curl -L https://gitee.com/bai-yifei180/RustLuaMud/releases/download/nightly/RustLuaMud-linux-x86_64.tar.gz | tar xz
+          ```
+        # 引用上游构建产物
+        upstreamArtifact:
+          - RLM_RELEASE
+        # 附件文件列表（相对于工作目录）
+        assertFiles:
+          - release/RustLuaMud-linux-x86_64.tar.gz
+        # 标记为预发布（允许覆盖同一 tag）
+        prerelease: true
+        allowUpdate: true
