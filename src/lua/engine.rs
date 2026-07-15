@@ -3730,7 +3730,18 @@ impl LuaEngine {
                     self.log_error("OnConnect() 执行中发生 panic，已捕获以防止崩溃");
                 }
             } else {
-                // 设置延迟触发时间
+                // 延迟路径：先立即执行 OnConnect() 以设置 accessing=1、重建触发器等 Lua 状态
+                // 确保后续服务器数据到达时 trigger 能正确判断（如 accessing>0）
+                // 命令（Execute 压入的 pending_commands）留到延迟到期后再排空发送
+                let lua_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Err(e) = self.eval_code("OnConnect()") {
+                        self.log_error(&format!("OnConnect() 执行失败: {}", e));
+                    }
+                }));
+                if lua_result.is_err() {
+                    self.log_error("OnConnect() 执行中发生 panic，已捕获以防止崩溃");
+                }
+                // 设置命令排空的延迟触发时间
                 self.pending_on_connect = Some(
                     std::time::Instant::now()
                         + std::time::Duration::from_millis(self.connect_delay_ms),
@@ -3747,19 +3758,12 @@ impl LuaEngine {
         self.connect_delay_ms = delay_ms;
     }
 
-    /// 检查延迟 OnConnect 是否到期，到期则执行并返回 true
+    /// 检查延迟排空是否到期，到期则返回 true
+    /// OnConnect() 已在 set_connected(true) 中立即执行，此处只触发命令排空
     pub fn check_pending_on_connect(&mut self) -> bool {
         if let Some(target_time) = self.pending_on_connect {
             if std::time::Instant::now() >= target_time {
                 self.pending_on_connect = None;
-                let lua_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if let Err(e) = self.eval_code("OnConnect()") {
-                        self.log_error(&format!("OnConnect() 延迟执行失败: {}", e));
-                    }
-                }));
-                if lua_result.is_err() {
-                    self.log_error("OnConnect() 延迟执行中发生 panic，已捕获以防止崩溃");
-                }
                 return true;
             }
         }
@@ -6058,6 +6062,46 @@ mod tests {
         exec(&engine, "Disconnect()").unwrap();
         assert!(engine.take_disconnect_requested());
         assert!(!engine.take_disconnect_requested());
+    }
+
+    #[test]
+    fn test_set_connected_delay_calls_on_connect_immediately() {
+        let mut engine = LuaEngine::new().unwrap();
+        exec(
+            &engine,
+            r#"
+            on_connect_called = false
+            OnConnect = function()
+                on_connect_called = true
+            end
+            "#,
+        )
+        .unwrap();
+
+        // 设置延迟 500ms，验证 OnConnect 被立即执行
+        engine.set_connect_delay(500);
+        engine.set_connected(true);
+        assert!(
+            eval::<bool>(&engine, "return on_connect_called").unwrap(),
+            "set_connected(true) with delay should still call OnConnect immediately"
+        );
+
+        // pending_on_connect 已设置，check_pending_on_connect 不应重新执行 OnConnect
+        exec(&engine, "on_connect_called = false").unwrap();
+        let fired = engine.check_pending_on_connect();
+        // 500ms 未到期，不应触发
+        assert!(!fired);
+        assert!(!eval::<bool>(&engine, "return on_connect_called").unwrap());
+
+        // set_connected(false) 应清除 pending_on_connect
+        engine.set_connected(false);
+        // 重新连接（不应再触发 on_connect_called，因为已清除）
+        exec(&engine, "on_connect_called = false").unwrap();
+        engine.set_connected(true);
+        assert!(
+            eval::<bool>(&engine, "return on_connect_called").unwrap(),
+            "reconnect should call OnConnect again"
+        );
     }
 
     #[test]
