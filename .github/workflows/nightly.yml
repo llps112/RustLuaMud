@@ -50,19 +50,45 @@ jobs:
           REPO="RustLuaMud"
           TAG="nightly"
           FILE="release/RustLuaMud-linux-x86_64.tar.gz"
+          AUTH="access_token=${GITEE_TOKEN}"
+          BASE="https://gitee.com/api/v5/repos/${OWNER}/${REPO}"
 
-          # 获取或创建 Release
-          RESP=$(curl -s -H "Authorization: token ${GITEE_TOKEN}" \
-            "https://gitee.com/api/v5/repos/${OWNER}/${REPO}/releases/tags/${TAG}")
-          RELEASE_ID=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+          # 获取或创建 Release（access_token 作为 query 参数）
+          echo "==> Checking existing release..."
+          RESP=$(curl -sS "${BASE}/releases/tags/${TAG}?${AUTH}")
+          RELEASE_ID=$(echo "$RESP" | python3 -c "
+import sys,json
+try:
+    d=json.load(sys.stdin)
+    print(d.get('id',''))
+except: print('')
+" 2>/dev/null || echo "")
 
           if [ -z "$RELEASE_ID" ]; then
             echo "==> Creating Gitee Release (tag: ${TAG})..."
-            RESP=$(curl -s -X POST -H "Content-Type: application/json" \
-              -H "Authorization: token ${GITEE_TOKEN}" \
-              -d "{\"tag_name\":\"${TAG}\",\"name\":\"Nightly Build\",\"body\":\"自动构建于 main 分支最新提交。\\n\\n下载地址：\\n\`\`\`\\ncurl -L https://gitee.com/${OWNER}/${REPO}/releases/download/${TAG}/RustLuaMud-linux-x86_64.tar.gz | tar xz\\n\`\`\`\",\"prerelease\":true}" \
-              "https://gitee.com/api/v5/repos/${OWNER}/${REPO}/releases")
-            RELEASE_ID=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))")
+            # 用 python 构造完整 JSON payload，避免 bash 转义问题
+            PAYLOAD=$(python3 -c "
+import json
+payload = {
+    'tag_name': '${TAG}',
+    'target_commitish': 'main',
+    'name': 'Nightly Build',
+    'body': '自动构建于 main 分支最新提交。\n\n下载地址：\n\`\`\`\ncurl -L https://gitee.com/${OWNER}/${REPO}/releases/download/${TAG}/RustLuaMud-linux-x86_64.tar.gz | tar xz\n\`\`\`',
+    'prerelease': True,
+}
+print(json.dumps(payload))
+")
+            RESP=$(curl -sS -X POST -H "Content-Type: application/json" \
+              -d "${PAYLOAD}" \
+              "${BASE}/releases?${AUTH}")
+            echo "   API response: $(echo "$RESP" | head -c 300)"
+            RELEASE_ID=$(echo "$RESP" | python3 -c "
+import sys,json
+try:
+    d=json.load(sys.stdin)
+    print(d.get('id',''))
+except: print('')
+" 2>/dev/null || echo "")
             echo "   Created release ID: ${RELEASE_ID}"
           else
             echo "==> Found existing Gitee Release (ID: ${RELEASE_ID})"
@@ -70,11 +96,10 @@ jobs:
 
           if [ -n "$RELEASE_ID" ]; then
             echo "==> Uploading artifact to Gitee Release..."
-            curl -s -X POST \
-              -H "Authorization: token ${GITEE_TOKEN}" \
+            UPLOAD_RESP=$(curl -sS -X POST \
               -F "file=@${FILE}" \
-              "https://gitee.com/api/v5/repos/${OWNER}/${REPO}/releases/${RELEASE_ID}/attach_files" \
-              | python3 -c "import sys,json; d=json.load(sys.stdin); print('   Uploaded:', d.get('name',''))"
+              "${BASE}/releases/${RELEASE_ID}/attach_files?${AUTH}")
+            echo "   Upload response: $(echo "$UPLOAD_RESP" | head -c 300)"
             echo "==> Gitee Release sync complete."
           else
             echo "!! Failed to get or create Gitee Release"
