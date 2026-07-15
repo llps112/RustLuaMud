@@ -43,7 +43,7 @@ jobs:
 
       - name: Sync to Gitee Release
         env:
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_TOKEN: ${{ secrets.GITEE_CI }}
         run: |
           set -e
           OWNER="bai-yifei180"
