@@ -260,9 +260,10 @@ auto_connect = true
 auto_reconnect = true
 reconnect_delay_secs = 5
 
-# 连接后延迟执行 OnConnect 的毫秒数，默认 1000
+# 连接建立后延迟发送命令的毫秒数，默认 1000
+# OnConnect() 仍立即执行，仅延迟后续命令的发送
 # 防止连接瞬间批量发送指令触发服务器反 flood 机制
-# 设置为 0 可恢复立即执行（不推荐）
+# 设置为 0 可恢复立即发送（不推荐）
 # connect_delay_ms = 1000
 
 # 登录凭证（启动时自动注入 Lua 变量 char_name / char_password）
@@ -697,9 +698,40 @@ Nightly 构建完成后，GitHub Actions 会自动将二进制同步到 [Gitee R
 
 ## 版本历史
 
+### v0.2.1 (2026-07-14)
+
+- 修复 `connect_delay_ms` 延迟触发机制，确保在定时器中正确检查并执行待触发的 OnConnect
+
+### v0.2.0 (2026-07-14)
+
+- `bootstrap.sh` 改为一键初始化脚本，自动完成目录创建、二进制下载和示例配置生成
+- 新增游戏脚本自动部署步骤，支持从私有仓库同步 Lua 脚本
+- 修复 `$HOME/RustLuaMud` 已存在为文件时的冲突处理
+
+### v0.1.9 (2026-07-14)
+
+- 修复服务器宕机时客户端因 TCP 无超时而完全冻结无响应的问题
+- 添加 nightly 自动构建工作流，切换 musl 静态编译（后回退到 glibc）
+
+### v0.1.8 (2026-07-14)
+
+- 实现可配置的渲染频率功能（`render_interval` 和 `realtime` 配置项）
+- 修复节流模式下 Lua 日志与 MUD 数据不同步的问题
+
+### v0.1.7 (2026-07-14)
+
+- 实现 `AddTriggerEx`/`AddTrigger`/`AddAlias` 的 Replace 标志（1024），支持同名替换
+- 新增 `GetStyle`/`RGBColourToName` API，触发器回调支持颜色样式信息
+
+### v0.1.6 (2026-07-14)
+
+- 状态栏 UI 改进：选中 session tab 改为粗体白字蓝底，图标移入选 tab 内部
+- 日志文件名添加日期后缀（YYMMDD_HH），正确滚动保留最近 24 个文件
+- 新增 `/reconnect` 命令，开放 `/all` 命令白名单
+
 ### v0.1.5 (2026-07-14)
 
-- 新增 `connect_delay_ms` 配置项，连接建立后延迟执行 OnConnect，防止瞬间批量发送指令触发服务器反 flood 机制（默认延迟 1000ms）
+- 新增 `connect_delay_ms` 配置项，连接建立后延迟发送命令（OnConnect 立即执行），防止瞬间批量发送指令触发服务器反 flood 机制（默认延迟 1000ms）
 
 ### v0.1.4 (2026-06-22)
 
