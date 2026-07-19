@@ -741,7 +741,7 @@ fn json_to_lua_value(lua: &mlua::Lua, val: &serde_json::Value) -> mlua::Result<m
         serde_json::Value::Bool(b) => Ok(mlua::Value::Boolean(*b)),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(mlua::Value::Integer(i))
+                Ok(mlua::Value::Integer(i64_to_lua_integer(i)))
             } else if let Some(f) = n.as_f64() {
                 Ok(mlua::Value::Number(f))
             } else {
