@@ -37,7 +37,7 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 
 | 场景 | 推荐方式 |
 |------|---------|
-| x86_64 Linux，不想装 Rust 环境，直接跑 | [方式一：预编译二进制](#方式一下载预编译二进制推荐免编译) |
+| x86_64 / i686 Linux，不想装 Rust 环境，直接跑 | [方式一：预编译二进制](#方式一下载预编译二进制推荐免编译) |
 | 想先用用看，不确定是否需要 | [方式一](#方式一下载预编译二进制推荐免编译)，`curl \| tar xz` 只需几秒 |
 | 需要最新修改但等不及发版 | [方式一 Nightly 版](#方式一下载预编译二进制推荐免编译)（自动构建 main 分支） |
 | ARM64 机器（树莓派、ARM 云服务器等） | [方式二：从源码编译](#方式二从源码编译)（暂未提供 ARM 预编译包） |
@@ -48,7 +48,7 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 
 ### 方式一：下载预编译二进制（推荐，免编译）
 
-预编译的二进制包（基于 Ubuntu 22.04 构建，链接 glibc 2.35）。一键初始化，自动完成目录创建、二进制下载和示例配置生成：
+预编译的二进制包（基于 Ubuntu 22.04 构建，链接 glibc 2.35），支持 **x86_64** 和 **i686 (32-bit)** 两种架构。`bootstrap.sh` 会自动检测 CPU 架构，下载对应的版本。一键初始化，自动完成目录创建、二进制下载和示例配置生成：
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh)
@@ -89,7 +89,7 @@ vim profiles/mychar.toml   # 修改角色名、服务器、用户名、密码等
 
 > 详细配置项说明见下方[配置](#配置)章节。
 
-> `nightly` 标签会在每次 push 到 main 分支时自动更新，由 [nightly.yml](.github/workflows/nightly.yml) 工作流构建。
+> `nightly` 标签会在每次 push 到 main 分支时自动更新，由 [nightly.yml](.github/workflows/nightly.yml) 工作流构建。Nightly 版同步提供 x86_64 和 i686 两种架构的预编译二进制。
 >
 > ARM64 机器暂需[从源码编译](#方式二从源码编译)。
 
