@@ -8,6 +8,29 @@ use regex::bytes::Regex as BytesRegex;
 use regex::Regex;
 use rusqlite::{types::Value as SqlValue, Connection};
 
+/// mlua::Integer 在 64 位平台是 i64，在 32 位平台（如 i686）是 i32。
+/// 内部逻辑统一使用 i64，在与 mlua 交互的边界点做转换。
+///
+/// # 32 位平台截断行为
+///
+/// 在 32 位平台上，`i64_to_lua_integer` 会截断高位（`i64 as i32`）。
+/// 这是预期行为：MUD 脚本中的数值（经验值、HP、标志位等）不会超过 2^31，
+/// 因此截断不会影响实际功能。
+#[inline]
+fn i64_to_lua_integer(v: i64) -> mlua::Integer {
+    v as mlua::Integer
+}
+
+/// 将 mlua::Integer 转换为 i64。
+///
+/// 在 32 位平台是安全的扩展转换（i32→i64），在 64 位平台是同类型转换（i64→i64），
+/// 两种情况都不会丢失数据。
+#[inline]
+#[allow(clippy::unnecessary_cast)]
+fn lua_integer_to_i64(v: mlua::Integer) -> i64 {
+    v as i64
+}
+
 /// SQLite 连接包装（Lua 用户数据）
 struct LuaDb {
     conn: Arc<Mutex<Connection>>,
@@ -114,7 +137,9 @@ impl UserData for LuaDb {
                 for (col_name, val) in row_data {
                     let lua_val = match val {
                         rusqlite::types::Value::Null => mlua::Value::Nil,
-                        rusqlite::types::Value::Integer(n) => mlua::Value::Integer(*n),
+                        rusqlite::types::Value::Integer(n) => {
+                            mlua::Value::Integer(i64_to_lua_integer(*n))
+                        }
                         rusqlite::types::Value::Real(f) => mlua::Value::Number(*f),
                         rusqlite::types::Value::Text(s) => {
                             mlua::Value::String(lua.create_string(s)?)
@@ -183,7 +208,9 @@ impl UserData for LuaStmt {
                     let val = match row.get_ref(i) {
                         Ok(r) => match r {
                             rusqlite::types::ValueRef::Null => mlua::Value::Nil,
-                            rusqlite::types::ValueRef::Integer(n) => mlua::Value::Integer(n),
+                            rusqlite::types::ValueRef::Integer(n) => {
+                                mlua::Value::Integer(i64_to_lua_integer(n))
+                            }
                             rusqlite::types::ValueRef::Real(f) => mlua::Value::Number(f),
                             rusqlite::types::ValueRef::Text(s) => {
                                 // 尝试 UTF-8，失败则从 GBK 转码
@@ -538,7 +565,7 @@ fn count_long_bracket_close(bytes: &[u8]) -> usize {
 /// 将 Lua Value 强制转换为 i64（兼容整数、浮点数和可解析的字符串）
 fn coerce_to_i64(value: mlua::Value) -> mlua::Result<i64> {
     match value {
-        mlua::Value::Integer(i) => Ok(i),
+        mlua::Value::Integer(i) => Ok(lua_integer_to_i64(i)),
         mlua::Value::Number(n) => Ok(n as i64),
         mlua::Value::String(s) => {
             let str_val = s.to_str()?;
@@ -652,7 +679,7 @@ fn lua_value_to_json(val: &mlua::Value) -> serde_json::Value {
     match val {
         mlua::Value::Nil => serde_json::Value::Null,
         mlua::Value::Boolean(b) => serde_json::Value::Bool(*b),
-        mlua::Value::Integer(i) => serde_json::Value::Number((*i).into()),
+        mlua::Value::Integer(i) => serde_json::Value::Number(lua_integer_to_i64(*i).into()),
         mlua::Value::Number(n) => {
             serde_json::Value::Number(serde_json::Number::from_f64(*n).unwrap_or(0.into()))
         }
@@ -663,7 +690,7 @@ fn lua_value_to_json(val: &mlua::Value) -> serde_json::Value {
         mlua::Value::Table(t) => {
             // 判断是 array 还是 map
             let mut is_array = true;
-            let mut i = 1;
+            let mut i: mlua::Integer = 1;
             for pair in t.clone().pairs::<mlua::Value, mlua::Value>() {
                 if let Ok((k, _)) = pair {
                     match k {
@@ -683,7 +710,7 @@ fn lua_value_to_json(val: &mlua::Value) -> serde_json::Value {
             if is_array && i > 1 {
                 // 数组
                 let mut arr = Vec::new();
-                for (_, v) in t.clone().pairs::<i64, mlua::Value>().flatten() {
+                for (_, v) in t.clone().pairs::<mlua::Integer, mlua::Value>().flatten() {
                     arr.push(lua_value_to_json(&v));
                 }
                 serde_json::Value::Array(arr)
@@ -1364,10 +1391,10 @@ impl LuaEngine {
                             if t.enabled {
                                 flags |= 1;
                             }
-                            Ok(Value::Integer(flags))
+                            Ok(Value::Integer(i64_to_lua_integer(flags)))
                         }
                         5 => Ok(Value::Integer(0)),
-                        6 => Ok(Value::Integer(t.sequence as i64)),
+                        6 => Ok(Value::Integer(i64_to_lua_integer(t.sequence as i64))),
                         7 => Ok(Value::Boolean(true)), // Keep evaluating (MushClient 默认 true)
                         8 => Ok(Value::Boolean(t.enabled)),
                         9 => Ok(Value::String(lua.create_string(&match &t.pattern {
@@ -1638,9 +1665,9 @@ impl LuaEngine {
                         15 => Ok(Value::Boolean(false)),
                         16 => Ok(Value::String(lua.create_string(&a.group)?)),
                         17 => Ok(Value::String(lua.create_string("")?)),
-                        18 => Ok(Value::Integer(a.send_to)),
+                        18 => Ok(Value::Integer(i64_to_lua_integer(a.send_to))),
                         19 => Ok(Value::Integer(1)),
-                        20 => Ok(Value::Integer(a.sequence as i64)),
+                        20 => Ok(Value::Integer(i64_to_lua_integer(a.sequence as i64))),
                         21 => Ok(Value::Boolean(true)),
                         22 => Ok(Value::Boolean(false)),
                         23 => Ok(Value::Integer(0)),
@@ -1699,7 +1726,7 @@ impl LuaEngine {
                         }
                         "send_to" => {
                             if let Value::Integer(n) = value {
-                                a.send_to = n;
+                                a.send_to = lua_integer_to_i64(n);
                             } else if let Value::Number(n) = value {
                                 a.send_to = n as i64;
                             }
@@ -2135,7 +2162,7 @@ impl LuaEngine {
             204 => {
                 // MushClient: GetInfo(204) = Packets received
                 let count = state_rc_gi.borrow().packet_count;
-                Ok(Value::Integer(count as i64))
+                Ok(Value::Integer(i64_to_lua_integer(count as i64)))
             }
             _ => Ok(Value::String(lua.create_string("")?)),
         })?;
@@ -2222,7 +2249,9 @@ impl LuaEngine {
         let get_unique_number_fn = lua.create_function_mut(move |_, ()| {
             let mut state = state_rc28.borrow_mut();
             state.unique_counter += 1;
-            Ok(Value::Integer(state.unique_counter as i64))
+            Ok(Value::Integer(i64_to_lua_integer(
+                state.unique_counter as i64,
+            )))
         })?;
         globals.set("GetUniqueNumber", get_unique_number_fn)?;
 
@@ -4082,6 +4111,71 @@ fn regex_escape(s: &str) -> String {
 mod tests {
     #![allow(clippy::approx_constant)]
     use super::*;
+
+    // ================================================================
+    // i64_to_lua_integer / lua_integer_to_i64 类型转换测试
+    // ================================================================
+
+    #[test]
+    fn test_i64_to_lua_integer_zero() {
+        assert_eq!(i64_to_lua_integer(0), 0);
+    }
+
+    #[test]
+    fn test_i64_to_lua_integer_positive() {
+        assert_eq!(i64_to_lua_integer(42), 42);
+        assert_eq!(i64_to_lua_integer(1_000_000), 1_000_000);
+    }
+
+    #[test]
+    fn test_i64_to_lua_integer_negative() {
+        assert_eq!(i64_to_lua_integer(-1), -1);
+        assert_eq!(i64_to_lua_integer(-999), -999);
+    }
+
+    #[test]
+    fn test_lua_integer_to_i64_zero() {
+        assert_eq!(lua_integer_to_i64(0), 0);
+    }
+
+    #[test]
+    fn test_lua_integer_to_i64_positive() {
+        assert_eq!(lua_integer_to_i64(42), 42);
+        assert_eq!(lua_integer_to_i64(1_000_000), 1_000_000);
+    }
+
+    #[test]
+    fn test_lua_integer_to_i64_negative() {
+        assert_eq!(lua_integer_to_i64(-1), -1);
+        assert_eq!(lua_integer_to_i64(-999), -999);
+    }
+
+    #[test]
+    fn test_roundtrip_conversion() {
+        // 测试往返转换在小值范围内是恒等的
+        for v in [0, 1, -1, 100, -100, 10000, -10000] {
+            assert_eq!(lua_integer_to_i64(i64_to_lua_integer(v)), v);
+        }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn test_large_values_64bit() {
+        // 64位平台上大值不会截断
+        let large = i64::MAX;
+        assert_eq!(i64_to_lua_integer(large), large);
+        assert_eq!(lua_integer_to_i64(large), large);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "32")]
+    fn test_large_values_32bit_truncation() {
+        // 32位平台上超过i32范围的值会截断（预期行为）
+        let large = i64::MAX;
+        let converted = i64_to_lua_integer(large);
+        // 在32位平台上，mlua::Integer是i32，i64::MAX会截断为-1
+        assert_eq!(converted, -1);
+    }
 
     // ================================================================
     // fix_lua_escape_sequences 预处理测试

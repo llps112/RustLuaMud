@@ -13,32 +13,65 @@ env:
 
 jobs:
   build:
-    name: Build (x86_64)
+    name: Build (${{ matrix.arch }})
     runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-gnu
+          - arch: i686
+            target: i686-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install 32-bit dependencies
+        if: matrix.arch == 'i686'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib g++-multilib
+
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package binary
         run: |
           mkdir -p release
-          cp target/release/RustLuaMud release/
-          tar czf release/RustLuaMud-linux-x86_64.tar.gz -C release RustLuaMud
+          cp target/${{ matrix.target }}/release/RustLuaMud release/
+          tar czf release/RustLuaMud-linux-${{ matrix.arch }}.tar.gz -C release RustLuaMud
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-lua-mud-nightly-${{ matrix.arch }}
+          path: release/RustLuaMud-linux-${{ matrix.arch }}.tar.gz
+
+  release:
+    name: Upload to Nightly Release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
 
       - name: Upload to Nightly Release (GitHub)
         uses: ncipollo/release-action@v1
         with:
           tag: nightly
           name: Nightly Build
-          body: "自动构建于 main 分支最新提交。\n\n```\ncurl -L https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-linux-x86_64.tar.gz | tar xz\n```"
+          body: "自动构建于 main 分支最新提交。\n\n```\n# x86_64\ncurl -L https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-linux-x86_64.tar.gz | tar xz\n\n# i686 (32-bit)\ncurl -L https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-linux-i686.tar.gz | tar xz\n```"
           prerelease: true
           allowUpdates: true
           replacesArtifacts: true
-          artifacts: "release/RustLuaMud-linux-x86_64.tar.gz"
+          artifacts: "release/*.tar.gz"
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Sync to Gitee Release
@@ -49,7 +82,6 @@ jobs:
           OWNER="bai-yifei180"
           REPO="RustLuaMud"
           TAG="nightly"
-          FILE="release/RustLuaMud-linux-x86_64.tar.gz"
           AUTH="access_token=${GITEE_TOKEN}"
           BASE="https://gitee.com/api/v5/repos/${OWNER}/${REPO}"
 
@@ -73,7 +105,7 @@ jobs:
               'tag_name': '${TAG}',
               'target_commitish': 'main',
               'name': 'Nightly Build',
-              'body': '自动构建于 main 分支最新提交。\n\n下载地址：\n\`\`\`\ncurl -L https://gitee.com/${OWNER}/${REPO}/releases/download/${TAG}/RustLuaMud-linux-x86_64.tar.gz | tar xz\n\`\`\`',
+              'body': '自动构建于 main 分支最新提交。\n\n下载地址：\n\`\`\`\n# x86_64\ncurl -L https://gitee.com/${OWNER}/${REPO}/releases/download/${TAG}/RustLuaMud-linux-x86_64.tar.gz | tar xz\n\n# i686 (32-bit)\ncurl -L https://gitee.com/${OWNER}/${REPO}/releases/download/${TAG}/RustLuaMud-linux-i686.tar.gz | tar xz\n\`\`\`',
               'prerelease': True,
           }
           print(json.dumps(payload))
@@ -96,11 +128,14 @@ jobs:
           fi
 
           if [ -n "$RELEASE_ID" ]; then
-            echo "==> Uploading artifact to Gitee Release..."
-            UPLOAD_RESP=$(curl -sS -X POST \
-              -F "file=@${FILE}" \
-              "${BASE}/releases/${RELEASE_ID}/attach_files?${AUTH}")
-            echo "   Upload response: $(echo "$UPLOAD_RESP" | head -c 300)"
+            echo "==> Uploading artifacts to Gitee Release..."
+            for FILE in release/*.tar.gz; do
+              echo "   Uploading: $FILE"
+              UPLOAD_RESP=$(curl -sS -X POST \
+                -F "file=@${FILE}" \
+                "${BASE}/releases/${RELEASE_ID}/attach_files?${AUTH}")
+              echo "   Upload response: $(echo "$UPLOAD_RESP" | head -c 300)"
+            done
             echo "==> Gitee Release sync complete."
           else
             echo "!! Failed to get or create Gitee Release"

@@ -25,7 +25,23 @@ for arg in "$@"; do
 done
 
 DATA_DIR="$HOME/RustLuaMud"
-ARCH="linux-x86_64"
+
+# 自动检测架构
+detect_arch() {
+    local machine=$(uname -m)
+    case "$machine" in
+        x86_64|amd64)   echo "linux-x86_64" ;;
+        i686|i386)      echo "linux-i686" ;;
+        aarch64|arm64)  echo "linux-aarch64" ;;
+        *)
+            echo "!! 不支持的架构: $machine"
+            echo "   支持的架构: x86_64, i686, aarch64"
+            exit 1
+            ;;
+    esac
+}
+
+ARCH=$(detect_arch)
 
 # 根据 channel 和镜像源决定下载 URL
 if [ "$USE_GITEE" = true ]; then

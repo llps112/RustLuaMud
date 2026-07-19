@@ -80,3 +80,20 @@ jobs:
             git commit -m "style: auto-fix formatting [skip ci]"
             git push
           }
+
+  build-i686:
+    name: Build (i686)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install 32-bit dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib g++-multilib
+      - name: Build (i686)
+        run: cargo build --target i686-unknown-linux-gnu

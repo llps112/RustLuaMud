@@ -650,10 +650,28 @@ let result = engine.eval_to_string("return json_decode('{\"key\":\"value\"}')");
 | 项目 | 要求 |
 |------|------|
 | 操作系统 | Linux（已测试）/ macOS / Windows（理论上支持） |
-| CPU | x86_64 或 aarch64（LuaJIT 需要 JIT 支持的平台） |
+| CPU | x86_64、i686 或 aarch64（LuaJIT 需要 JIT 支持的平台） |
 | 内存 | 最低 512MB（基础使用），2GB 推荐（10 连接） |
 | 终端 | 支持 UTF-8 和 ANSI 转义序列的终端（如 xterm、GNOME Terminal、iTerm2、Windows Terminal） |
 | Rust | 1.70+（edition 2021） |
+
+### 32 位平台 (i686)
+
+预编译二进制已支持 i686 架构。从源码编译时：
+
+1. 安装 32 位开发工具链：
+   ```bash
+   sudo dpkg --add-architecture i386
+   sudo apt update
+   sudo apt install gcc-multilib g++-multilib
+   ```
+
+2. 使用构建脚本：
+   ```bash
+   scripts/build.sh --arch i686
+   ```
+
+> **注意**：32 位平台的 LuaJIT 整数上限为 2^31（约 21 亿），超过此值的整数运算会截断。MUD 脚本中的经验值、HP 等数值不受影响。
 
 ## 故障排查
 
