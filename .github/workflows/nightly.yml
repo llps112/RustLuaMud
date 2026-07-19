@@ -98,8 +98,17 @@ jobs:
           " 2>/dev/null || echo "")
 
           if [ -z "$RELEASE_ID" ]; then
-            echo "==> Creating Gitee Release (tag: ${TAG})..."
-            PAYLOAD=$(python3 -c "
+            echo "==> No existing Gitee Release found for tag ${TAG}."
+          else
+            echo "==> Deleting existing Gitee Release (ID: ${RELEASE_ID})..."
+            DELETE_RESP=$(curl -sS -X DELETE \
+              "${BASE}/releases/${RELEASE_ID}?${AUTH}")
+            echo "   Delete response: $(echo "$DELETE_RESP" | head -c 200)"
+            # 删除后 tag 也会被删除，后续创建会重新创建 tag
+          fi
+
+          echo "==> Creating Gitee Release (tag: ${TAG})..."
+          PAYLOAD=$(python3 -c "
           import json
           payload = {
               'tag_name': '${TAG}',
@@ -110,11 +119,11 @@ jobs:
           }
           print(json.dumps(payload))
           ")
-            RESP=$(curl -sS -X POST -H "Content-Type: application/json" \
-              -d "${PAYLOAD}" \
-              "${BASE}/releases?${AUTH}")
-            echo "   API response: $(echo "$RESP" | head -c 300)"
-            RELEASE_ID=$(echo "$RESP" | python3 -c "
+          RESP=$(curl -sS -X POST -H "Content-Type: application/json" \
+            -d "${PAYLOAD}" \
+            "${BASE}/releases?${AUTH}")
+          echo "   API response: $(echo "$RESP" | head -c 300)"
+          RELEASE_ID=$(echo "$RESP" | python3 -c "
           import sys, json
           try:
               d = json.load(sys.stdin)
@@ -122,10 +131,7 @@ jobs:
           except:
               print('')
           " 2>/dev/null || echo "")
-            echo "   Created release ID: ${RELEASE_ID}"
-          else
-            echo "==> Found existing Gitee Release (ID: ${RELEASE_ID})"
-          fi
+          echo "   Created release ID: ${RELEASE_ID}"
 
           if [ -n "$RELEASE_ID" ]; then
             echo "==> Uploading artifacts to Gitee Release..."
