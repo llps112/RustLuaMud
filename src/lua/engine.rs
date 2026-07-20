@@ -331,7 +331,7 @@ pub struct Alias {
 pub struct TimerDef {
     pub name: String,
     pub interval_millis: u64,
-    pub callback: Function,
+    pub callback: Option<Function>,
     pub enabled: bool,
     pub group: String,
     pub one_shot: bool,
@@ -1748,7 +1748,7 @@ impl LuaEngine {
         // MushClient API 兼容：参数5是字符串(response_text)，参数7是字符串(script_name)
         // sec 参数支持浮点数（如 0.10 秒）和 nil（默认 0）
         let state_rc19 = state_rc.clone();
-        let add_timer_fn = lua.create_function_mut(move |lua, args: mlua::MultiValue| {
+        let add_timer_fn = lua.create_function_mut(move |_lua, args: mlua::MultiValue| {
             let args: Vec<mlua::Value> = args.into_vec();
 
             // 至少需要6个参数: name, hour, min, sec, response_text, flags
@@ -1790,9 +1790,6 @@ impl LuaEngine {
             let one_shot = (flags & 4) != 0;
             let at_time = (flags & 2) != 0;
 
-            // 将脚本作为 send_text 存储，在 fire_timer 时执行
-            let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
-
             // 决定 send_text 内容（按优先级）：
             // 1. script_name 非空 → 作为 Lua 代码执行
             // 2. response_text 非空且 send_to=0 → 作为 MUD 命令发送
@@ -1830,7 +1827,7 @@ impl LuaEngine {
             state_rc19.borrow_mut().timers.push(TimerDef {
                 name,
                 interval_millis: interval_millis_u64,
-                callback,
+                callback: None,
                 enabled: timer_enabled,
                 group: String::new(),
                 one_shot,
@@ -1844,7 +1841,7 @@ impl LuaEngine {
 
         // DoAfter(seconds, text) — 一次性临时定时器，发送文本到 MUD (send_to=0)
         let state_rc_da = state_rc.clone();
-        let doafter_fn = lua.create_function_mut(move |lua, (seconds, text): (f64, String)| {
+        let doafter_fn = lua.create_function_mut(move |_lua, (seconds, text): (f64, String)| {
             if !(0.1..=86399.0).contains(&seconds) {
                 return Ok(Value::Integer(1)); // eTimeInvalid
             }
@@ -1853,13 +1850,12 @@ impl LuaEngine {
             let timer_name = format!("__doafter_{}", state.unique_counter);
             let interval_millis = (seconds * 1000.0) as u64;
 
-            let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
             let send_text = format!("Execute([[{}]])", text);
 
             state.timers.push(TimerDef {
                 name: timer_name,
                 interval_millis,
-                callback,
+                callback: None,
                 enabled: true,
                 group: String::new(),
                 one_shot: true,
@@ -1874,7 +1870,7 @@ impl LuaEngine {
         // DoAfterNote(seconds, text) — 一次性临时定时器，输出文本到窗口 (send_to=2)
         let state_rc_dn = state_rc.clone();
         let doafter_note_fn =
-            lua.create_function_mut(move |lua, (seconds, text): (f64, String)| {
+            lua.create_function_mut(move |_lua, (seconds, text): (f64, String)| {
                 if !(0.1..=86399.0).contains(&seconds) {
                     return Ok(Value::Integer(1)); // eTimeInvalid
                 }
@@ -1883,13 +1879,12 @@ impl LuaEngine {
                 let timer_name = format!("__doafter_note_{}", state.unique_counter);
                 let interval_millis = (seconds * 1000.0) as u64;
 
-                let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
                 let send_text = format!("Note([[{}]])", text);
 
                 state.timers.push(TimerDef {
                     name: timer_name,
                     interval_millis,
-                    callback,
+                    callback: None,
                     enabled: true,
                     group: String::new(),
                     one_shot: true,
@@ -1904,7 +1899,7 @@ impl LuaEngine {
         // DoAfterSpecial(seconds, text, send_to) — 可指定目标位置
         let state_rc_ds = state_rc.clone();
         let doafter_special_fn =
-            lua.create_function_mut(move |lua, (seconds, text, send_to): (f64, String, i64)| {
+            lua.create_function_mut(move |_lua, (seconds, text, send_to): (f64, String, i64)| {
                 if !(0.1..=86399.0).contains(&seconds) {
                     return Ok(Value::Integer(1)); // eTimeInvalid
                 }
@@ -1916,7 +1911,6 @@ impl LuaEngine {
                 let timer_name = format!("__doafter_special_{}", state.unique_counter);
                 let interval_millis = (seconds * 1000.0) as u64;
 
-                let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
                 let send_text = match send_to {
                     0 | 10 | 13 => format!("Execute([[{}]])", text), // World / Execute / Immediate
                     2 => format!("Note([[{}]])", text),              // Output window
@@ -1929,7 +1923,7 @@ impl LuaEngine {
                 state.timers.push(TimerDef {
                     name: timer_name,
                     interval_millis,
-                    callback,
+                    callback: None,
                     enabled: true,
                     group: String::new(),
                     one_shot: true,
@@ -1944,7 +1938,7 @@ impl LuaEngine {
         // DoAfterSpeedWalk(seconds, text) — speedwalk 定时器 (send_to=11)
         let state_rc_dw = state_rc.clone();
         let doafter_sw_fn =
-            lua.create_function_mut(move |lua, (seconds, text): (f64, String)| {
+            lua.create_function_mut(move |_lua, (seconds, text): (f64, String)| {
                 if !(0.1..=86399.0).contains(&seconds) {
                     return Ok(Value::Integer(1)); // eTimeInvalid
                 }
@@ -1953,13 +1947,12 @@ impl LuaEngine {
                 let timer_name = format!("__doafter_sw_{}", state.unique_counter);
                 let interval_millis = (seconds * 1000.0) as u64;
 
-                let callback: Function = lua.create_function(|_, _: ()| Ok(()))?;
                 let send_text = format!("Execute([[{}]])", text);
 
                 state.timers.push(TimerDef {
                     name: timer_name,
                     interval_millis,
-                    callback,
+                    callback: None,
                     enabled: true,
                     group: String::new(),
                     one_shot: true,
@@ -2937,7 +2930,7 @@ impl LuaEngine {
                 state_rc35.borrow_mut().timers.push(TimerDef {
                     name: String::new(),
                     interval_millis: interval_secs * 1000,
-                    callback,
+                    callback: Some(callback),
                     enabled: true,
                     group: String::new(),
                     one_shot: false,
@@ -3567,16 +3560,18 @@ impl LuaEngine {
                 }
             };
 
-        // 步骤3: 调用回调
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = callback.call::<()>(());
-        }))
-        .is_err()
-        {
-            self.log_error(&format!(
-                "[Lua] 定时器 '{}' 回调中发生 panic，已捕获以防止崩溃",
-                timer_name
-            ));
+        // 步骤3: 调用回调（如果存在）
+        if let Some(cb) = callback {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = cb.call::<()>(());
+            }))
+            .is_err()
+            {
+                self.log_error(&format!(
+                    "[Lua] 定时器 '{}' 回调中发生 panic，已捕获以防止崩溃",
+                    timer_name
+                ));
+            }
         }
 
         // 步骤4: 执行 send_text
