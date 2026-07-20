@@ -23,6 +23,13 @@ fn main() {
 
     let config = AppConfig::load_default(&profiles_dir);
 
+    // 初始化 panic hook，将 panic 信息和 backtrace 写入日志文件
+    log::panic_hook::init_panic_hook(
+        &config.general.log_dir,
+        config.general.log_rotation_size_mb,
+        config.general.log_rotation_count,
+    );
+
     let rt = tokio::runtime::Runtime::new().expect("无法创建 tokio runtime");
 
     rt.block_on(async {

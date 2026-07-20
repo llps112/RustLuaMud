@@ -18,6 +18,8 @@ pub enum LogCategory {
     Lua,
     /// 调试信息
     Debug,
+    /// Rust panic 信息
+    Panic,
 }
 
 impl LogCategory {
@@ -27,6 +29,7 @@ impl LogCategory {
             LogCategory::Command => "CMD",
             LogCategory::Lua => "LUA",
             LogCategory::Debug => "DBG",
+            LogCategory::Panic => "PNC",
         }
     }
 }
@@ -142,6 +145,26 @@ impl Logger {
     /// 记录调试信息
     pub fn log_debug(&self, session_name: &str, msg: &str) {
         self.log_cat(session_name, LogCategory::Debug, msg);
+    }
+
+    /// 记录 panic 信息（带 backtrace）
+    /// 不执行 cleanup_old_logs，避免在 panic hook 中触发新的 panic
+    pub fn log_panic(&self, session_name: &str, panic_msg: &str, backtrace: &str) {
+        let path = self.log_path(session_name);
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+            let timestamp = Local::now().format("%H:%M:%S%.3f");
+            let tag = LogCategory::Panic.tag();
+            let _ = writeln!(
+                file,
+                "[{}] [{}] Rust panic: {}",
+                timestamp,
+                tag,
+                panic_msg.trim_end()
+            );
+            for line in backtrace.lines() {
+                let _ = writeln!(file, "[{}] [{}] {}", timestamp, tag, line);
+            }
+        }
     }
 }
 

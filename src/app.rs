@@ -2100,6 +2100,8 @@ impl App {
         // 预提取 display_pos 和 foreground_name，避免后续与 terminal 借用冲突
         let display_pos = self.manager.display_number_of(session_id);
         let fg_name = self.manager.foreground_name().to_string();
+        // 更新 panic hook 上下文中的 session name，使 panic 信息写入正确的日志文件
+        crate::log::panic_hook::set_current_session(&fg_name);
         // 拆分借用：manager（不可变）和 terminal（可变）是 App 的不同字段
         let empty = Vec::new();
         let output: &[String] = self
