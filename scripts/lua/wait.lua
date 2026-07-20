@@ -150,7 +150,9 @@ function wait.trigger_resume (name, line, wildcards, styles)
 
        ColourNote ("deeppink", "black", "Error raised in trigger function (in wait module)")
 
-       ColourNote ("darkorange", "black", tostring(err))
+       -- 获取调用栈（debug 库不可用，使用 pcall + error 替代）
+       local _, trace = pcall(error, "", 3)
+       ColourNote ("darkorange", "black", string.format("%s\n%s", tostring(err), tostring(trace):gsub("%s+$", "")))
 
        error (err)
 
@@ -158,7 +160,7 @@ function wait.trigger_resume (name, line, wildcards, styles)
 
   end -- if
 
-end -- function trigger_resume 
+end -- function trigger_resume
 
 
 
