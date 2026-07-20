@@ -19,7 +19,7 @@ A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless opera
 - **SQLite3 集成** — Lua 脚本可直接操作 SQLite3 数据库，支持 GBK 文本解码
 - **触发器 w[0] 兼容** — 触发器回调的 `wildcards` 表包含 `w[0]`（完整匹配文本），与 MUSHclient 行为完全一致
 - **自动重连** — 断线自动重连，可配置延迟
-- **日志系统** — 按连接分文件记录，按小时分割，24 小时滚动覆盖，保留数量可单独配置
+- **日志系统** — 按连接分文件记录，按小时分割，24 小时滚动覆盖，保留数量可单独配置；Rust panic 自动捕获写入日志
 - **Profile 管理** — 从 `profiles/` 目录加载角色配置（TOML），自动注入登录凭证
 - **终端设置持久化** — `keep_command` 等终端选项自动保存到 JSON 文件
 - **状态栏** — 实时显示角色名、连接状态、版本号等信息（SetStatus API）
@@ -593,7 +593,8 @@ socks5_password = "pass"   # 可选
 │   │   ├── input.rs       # 输入处理
 │   │   └── ansi.rs        # ANSI SGR 解析器
 │   ├── log/               # 日志系统
-│   │   └── logger.rs      # 按连接分文件、大小轮转
+│   │   ├── logger.rs      # 按连接分文件、大小轮转
+│   │   └── panic_hook.rs  # panic 日志捕获（崩溃信息写入日志）
 │   └── lua/               # Lua 脚本引擎
 │       └── engine.rs      # LuaJIT 引擎、MUSHclient API 实现
 ├── .github/               # GitHub Actions CI/CD
@@ -675,7 +676,7 @@ let result = engine.eval_to_string("return json_decode('{\"key\":\"value\"}')");
 
 ## 故障排查
 
-开发阶段已硬编码启用 `RUST_BACKTRACE=1`，panic 时会自动打印堆栈信息。正式版发布前会移除此设置，届时如需调试可手动设置：
+开发阶段已硬编码启用 `RUST_BACKTRACE=1`，panic 时会自动打印堆栈信息并写入对应连接日志文件（`[PNC]` 前缀）。正式版发布前会移除此设置，届时如需调试可手动设置：
 
 ```bash
 export RUST_BACKTRACE=1
