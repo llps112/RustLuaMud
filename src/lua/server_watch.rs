@@ -17,7 +17,7 @@
 //! # 参数设置说明
 //!
 //! 当前默认参数（`warn_timeout=2.0s`, `pause_timeout=2.5s`,
-//! `check_interval=0.5s`, `max_wait_time=30s`）仅作为推荐值。
+//! `check_interval=0.5s`）仅作为推荐值。
 //! 不同 MUD 的限速参数不同，需根据实际情况调整：
 //!
 //! 以客户端限速窗口上限为 `R` 条/秒为例，`pause_timeout` 的推荐计算方法：
@@ -52,13 +52,8 @@ pub struct ServerWatchConfig {
 
     /// 暂停后，重新检查服务器就绪状态的间隔
     ///
-    /// 设为 0.5s：在暂停期间每隔 0.5s 重新检查一次，平衡响应速度和 CPU 开销。
+    /// 设为 0.5s：在暂停期间每隔 0.5s 发送一次探针并重新检查。
     pub check_interval: Duration,
-
-    /// 最大等待时间：超过此时间清空队列，防止永久卡死
-    ///
-    /// 设为 30.0s：超过此值认为服务器已断连或严重故障，放弃堆积的指令。
-    pub max_wait_time: Duration,
 
     /// DEBUG 日志输出间隔（秒），防止刷屏
     pub debug_interval: Duration,
@@ -70,7 +65,6 @@ impl Default for ServerWatchConfig {
             warn_timeout: Duration::from_millis(2000),
             pause_timeout: Duration::from_millis(2500),
             check_interval: Duration::from_millis(500),
-            max_wait_time: Duration::from_secs(30),
             debug_interval: Duration::from_secs(5),
         }
     }
@@ -79,10 +73,8 @@ impl Default for ServerWatchConfig {
 /// 服务器响应追踪器统计信息
 #[derive(Debug, Clone, Default)]
 pub struct ServerWatchStats {
-    /// 总暂停次数
-    pub total_paused: u64,
-    /// 总放弃次数（超时清空队列）
-    pub total_aborted: u64,
+    /// 探针发送次数（服务器未就绪时发送 hp 探针）
+    pub total_probes: u64,
 }
 
 /// 服务器响应追踪器
@@ -208,14 +200,9 @@ impl ServerWatch {
         }
     }
 
-    /// 记录一次暂停事件（由调用方在暂停发送时调用）
-    pub fn record_pause(&mut self) {
-        self.stats.total_paused += 1;
-    }
-
-    /// 记录一次放弃事件（由调用方在清空队列时调用）
-    pub fn record_abort(&mut self) {
-        self.stats.total_aborted += 1;
+    /// 记录一次探针发送事件（由调用方在发送 hp 探针时调用）
+    pub fn record_probe(&mut self) {
+        self.stats.total_probes += 1;
     }
 
     /// 重置状态（用于断连重连后）
@@ -243,7 +230,6 @@ impl ServerWatch {
         warn_timeout: Option<Duration>,
         pause_timeout: Option<Duration>,
         check_interval: Option<Duration>,
-        max_wait_time: Option<Duration>,
         debug_interval: Option<Duration>,
     ) {
         if let Some(v) = warn_timeout {
@@ -254,9 +240,6 @@ impl ServerWatch {
         }
         if let Some(v) = check_interval {
             self.config.check_interval = v;
-        }
-        if let Some(v) = max_wait_time {
-            self.config.max_wait_time = v;
         }
         if let Some(v) = debug_interval {
             self.config.debug_interval = v;
@@ -314,22 +297,19 @@ impl ServerWatchLog {
 mod tests {
     use super::*;
 
-    /// 测试默认配置值是否符合 LPC 限速机制的要求
+    /// 测试默认配置值
     #[test]
-    fn test_default_config_matches_lpc_limits() {
+    fn test_default_config() {
         let config = ServerWatchConfig::default();
 
-        // warn_timeout = 2.0s（提前 0.5s 预警）
+        // warn_timeout = 2.0s
         assert_eq!(config.warn_timeout, Duration::from_millis(2000));
 
-        // pause_timeout = 2.5s（推荐值，需根据 MUD 惩罚阈值调整）
+        // pause_timeout = 2.5s
         assert_eq!(config.pause_timeout, Duration::from_millis(2500));
 
         // check_interval = 0.5s
         assert_eq!(config.check_interval, Duration::from_millis(500));
-
-        // max_wait_time = 30s
-        assert_eq!(config.max_wait_time, Duration::from_secs(30));
 
         // debug_interval = 5s
         assert_eq!(config.debug_interval, Duration::from_secs(5));
@@ -436,37 +416,26 @@ mod tests {
         assert!(r2.log.is_some());
     }
 
-    /// 测试统计信息：暂停计数
+    /// 测试统计信息：探针计数
     #[test]
-    fn test_record_pause() {
+    fn test_record_probe() {
         let mut sw = ServerWatch::new();
-        assert_eq!(sw.stats().total_paused, 0);
-        sw.record_pause();
-        sw.record_pause();
-        assert_eq!(sw.stats().total_paused, 2);
-    }
-
-    /// 测试统计信息：放弃计数
-    #[test]
-    fn test_record_abort() {
-        let mut sw = ServerWatch::new();
-        assert_eq!(sw.stats().total_aborted, 0);
-        sw.record_abort();
-        assert_eq!(sw.stats().total_aborted, 1);
+        assert_eq!(sw.stats().total_probes, 0);
+        sw.record_probe();
+        sw.record_probe();
+        assert_eq!(sw.stats().total_probes, 2);
     }
 
     /// 测试重置：清空统计和时间戳
     #[test]
     fn test_reset_clears_state() {
         let mut sw = ServerWatch::new();
-        sw.record_pause();
-        sw.record_abort();
+        sw.record_probe();
         sw.last_output = Instant::now() - Duration::from_secs(10);
 
         sw.reset();
 
-        assert_eq!(sw.stats().total_paused, 0);
-        assert_eq!(sw.stats().total_aborted, 0);
+        assert_eq!(sw.stats().total_probes, 0);
         assert!(sw.is_ready().is_ready);
     }
 
@@ -477,7 +446,7 @@ mod tests {
         let original_pause = sw.config().pause_timeout;
         let original_check = sw.config().check_interval;
 
-        sw.set_config(Some(Duration::from_millis(3000)), None, None, None, None);
+        sw.set_config(Some(Duration::from_millis(3000)), None, None, None);
 
         assert_eq!(sw.config().warn_timeout, Duration::from_millis(3000));
         assert_eq!(sw.config().pause_timeout, original_pause);
@@ -492,14 +461,12 @@ mod tests {
             Some(Duration::from_millis(1500)),
             Some(Duration::from_millis(2000)),
             Some(Duration::from_millis(300)),
-            Some(Duration::from_secs(60)),
             Some(Duration::from_secs(10)),
         );
 
         assert_eq!(sw.config().warn_timeout, Duration::from_millis(1500));
         assert_eq!(sw.config().pause_timeout, Duration::from_millis(2000));
         assert_eq!(sw.config().check_interval, Duration::from_millis(300));
-        assert_eq!(sw.config().max_wait_time, Duration::from_secs(60));
         assert_eq!(sw.config().debug_interval, Duration::from_secs(10));
     }
 
@@ -562,7 +529,7 @@ mod tests {
         assert!(sw.is_ready().is_ready);
 
         // 将 pause_timeout 调整为 0.5s，1s 前的输出应该触发暂停
-        sw.set_config(None, Some(Duration::from_millis(500)), None, None, None);
+        sw.set_config(None, Some(Duration::from_millis(500)), None, None);
         assert!(!sw.is_ready().is_ready);
     }
 

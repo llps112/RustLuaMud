@@ -3010,6 +3010,7 @@ impl LuaEngine {
     /// - `server_watch.get_config() -> table`
     /// - `server_watch.set_config(opts) -> nil`
     /// - `server_watch.get_stats() -> table`
+    /// - `server_watch.record_probe() -> nil`
     /// - `server_watch.reset() -> nil`
     ///
     /// 日志输出通过 `state_rc` 的 `pending_logs` 写入，由主循环统一输出到终端。
@@ -3059,7 +3060,6 @@ impl LuaEngine {
             t.set("warn_timeout", config.warn_timeout.as_secs_f64())?;
             t.set("pause_timeout", config.pause_timeout.as_secs_f64())?;
             t.set("check_interval", config.check_interval.as_secs_f64())?;
-            t.set("max_wait_time", config.max_wait_time.as_secs_f64())?;
             t.set("debug_interval", config.debug_interval.as_secs_f64())?;
             Ok(t)
         })?;
@@ -3079,19 +3079,10 @@ impl LuaEngine {
             let check_interval = opts
                 .get::<Option<f64>>("check_interval")?
                 .map(Duration::from_secs_f64);
-            let max_wait_time = opts
-                .get::<Option<f64>>("max_wait_time")?
-                .map(Duration::from_secs_f64);
             let debug_interval = opts
                 .get::<Option<f64>>("debug_interval")?
                 .map(Duration::from_secs_f64);
-            sw.set_config(
-                warn_timeout,
-                pause_timeout,
-                check_interval,
-                max_wait_time,
-                debug_interval,
-            );
+            sw.set_config(warn_timeout, pause_timeout, check_interval, debug_interval);
             Ok(())
         })?;
         sw_table.set("set_config", set_config_fn)?;
@@ -3102,29 +3093,19 @@ impl LuaEngine {
             let sw = sw_for_stats.borrow();
             let stats = sw.stats();
             let t = lua.create_table()?;
-            t.set("total_paused", stats.total_paused)?;
-            t.set("total_aborted", stats.total_aborted)?;
+            t.set("total_probes", stats.total_probes)?;
             Ok(t)
         })?;
         sw_table.set("get_stats", get_stats_fn)?;
 
-        // record_pause() -> nil
-        // 由 Lua 侧在暂停发送时调用，用于统计
-        let sw_for_pause = sw_rc.clone();
-        let record_pause_fn = lua.create_function_mut(move |_, ()| {
-            sw_for_pause.borrow_mut().record_pause();
+        // record_probe() -> nil
+        // 由 Lua 侧在发送 hp 探针时调用，用于统计
+        let sw_for_probe = sw_rc.clone();
+        let record_probe_fn = lua.create_function_mut(move |_, ()| {
+            sw_for_probe.borrow_mut().record_probe();
             Ok(())
         })?;
-        sw_table.set("record_pause", record_pause_fn)?;
-
-        // record_abort() -> nil
-        // 由 Lua 侧在放弃队列时调用，用于统计
-        let sw_for_abort = sw_rc.clone();
-        let record_abort_fn = lua.create_function_mut(move |_, ()| {
-            sw_for_abort.borrow_mut().record_abort();
-            Ok(())
-        })?;
-        sw_table.set("record_abort", record_abort_fn)?;
+        sw_table.set("record_probe", record_probe_fn)?;
 
         // reset() -> nil
         let sw_for_reset = sw_rc;
