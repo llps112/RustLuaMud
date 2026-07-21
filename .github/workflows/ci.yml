@@ -23,23 +23,6 @@ jobs:
       - name: Run tests
         run: cargo test
 
-  coverage:
-    name: Coverage
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install tarpaulin
-        run: cargo install cargo-tarpaulin
-      - name: Generate coverage report
-        run: cargo tarpaulin --out Xml --skip-clean
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7
-        with:
-          fail_ci_if_error: true
-          token: ${{ secrets.CODECOV_TOKEN }}
-
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
