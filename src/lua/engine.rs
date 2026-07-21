@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -677,6 +677,8 @@ pub struct LuaEngine {
     exec_start: Arc<AtomicU64>,
     /// 当前正在执行的定时器名称（供看门狗输出诊断信息）
     exec_timer_name: Arc<Mutex<Option<String>>>,
+    /// 看门狗线程停止信号
+    watchdog_stop: Arc<AtomicBool>,
     /// 看门狗线程句柄
     watchdog_handle: Option<thread::JoinHandle<()>>,
 }
@@ -813,6 +815,7 @@ impl LuaEngine {
         // 创建看门狗共享状态
         let exec_start = Arc::new(AtomicU64::new(0));
         let exec_timer_name = Arc::new(Mutex::new(None::<String>));
+        let watchdog_stop = Arc::new(AtomicBool::new(false));
 
         let mut engine = Self {
             lua,
@@ -825,11 +828,17 @@ impl LuaEngine {
             delayed_commands: std::cell::RefCell::new(Vec::new()),
             exec_start: exec_start.clone(),
             exec_timer_name: exec_timer_name.clone(),
+            watchdog_stop: watchdog_stop.clone(),
             watchdog_handle: None,
         };
 
         // 启动看门狗线程
-        engine.watchdog_handle = Some(Self::spawn_watchdog(exec_start, exec_timer_name, 30));
+        engine.watchdog_handle = Some(Self::spawn_watchdog(
+            exec_start,
+            exec_timer_name,
+            watchdog_stop,
+            30,
+        ));
 
         engine.register_api()?;
         Ok(engine)
@@ -3585,9 +3594,10 @@ impl LuaEngine {
         // 步骤3: 调用回调（如果存在）
         if let Some(cb) = callback {
             // 标记看门狗开始
-            if let Ok(mut guard) = self.exec_timer_name.lock() {
-                *guard = Some(timer_name.clone());
-            }
+            *self
+                .exec_timer_name
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(timer_name.clone());
             self.exec_start.store(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -3614,9 +3624,10 @@ impl LuaEngine {
         // 步骤4: 执行 send_text
         if !send_text.is_empty() {
             // 标记看门狗开始
-            if let Ok(mut guard) = self.exec_timer_name.lock() {
-                *guard = Some(timer_name.clone());
-            }
+            *self
+                .exec_timer_name
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(timer_name.clone());
             self.exec_start.store(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -3946,17 +3957,34 @@ impl LuaEngine {
     }
 
     // ---- 看门狗 ----
+}
 
+/// 确保 LuaEngine 析构时优雅停止看门狗线程
+impl Drop for LuaEngine {
+    fn drop(&mut self) {
+        self.watchdog_stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.watchdog_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl LuaEngine {
     /// 启动看门狗线程，监控 Lua exec() 执行是否超时
     fn spawn_watchdog(
         exec_start: Arc<AtomicU64>,
         exec_timer_name: Arc<Mutex<Option<String>>>,
+        watchdog_stop: Arc<AtomicBool>,
         timeout_secs: u64,
     ) -> thread::JoinHandle<()> {
         thread::Builder::new()
             .name("lua-watchdog".to_string())
             .spawn(move || {
                 loop {
+                    // 检查停止信号（LuaEngine 被 drop 时触发）
+                    if watchdog_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                     thread::sleep(Duration::from_secs(5));
 
                     let start_ns = exec_start.load(Ordering::Relaxed);
