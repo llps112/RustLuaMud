@@ -681,9 +681,6 @@ pub struct LuaEngine {
     watchdog_stop: Arc<AtomicBool>,
     /// 看门狗线程句柄
     watchdog_handle: Option<thread::JoinHandle<()>>,
-
-    /// 服务器响应追踪器（每行服务器输出时更新，用于检测服务器无响应状态）
-    server_watch: Rc<RefCell<crate::lua::server_watch::ServerWatch>>,
 }
 
 // ============================================================
@@ -833,7 +830,6 @@ impl LuaEngine {
             exec_timer_name: exec_timer_name.clone(),
             watchdog_stop: watchdog_stop.clone(),
             watchdog_handle: None,
-            server_watch: Rc::new(RefCell::new(crate::lua::server_watch::ServerWatch::new())),
         };
 
         // 启动看门狗线程
@@ -2993,131 +2989,6 @@ impl LuaEngine {
         })?;
         globals.set("set", set_fn)?;
 
-        // ============================================================
-        // 服务器响应追踪器 API
-        // ============================================================
-        // 暴露 `server_watch` 全局表给 Lua，供 `michen_system.run()` 等模块调用
-        self.register_server_watch_api(lua, state_rc.clone())?;
-
-        Ok(())
-    }
-
-    /// 注册服务器响应追踪器的 Lua API
-    ///
-    /// 暴露的 API：
-    /// - `server_watch.is_ready() -> bool`
-    /// - `server_watch.get_elapsed_time() -> number`
-    /// - `server_watch.get_config() -> table`
-    /// - `server_watch.set_config(opts) -> nil`
-    /// - `server_watch.get_stats() -> table`
-    /// - `server_watch.record_probe() -> nil`
-    /// - `server_watch.reset() -> nil`
-    ///
-    /// 日志输出通过 `state_rc` 的 `pending_logs` 写入，由主循环统一输出到终端。
-    fn register_server_watch_api(
-        &self,
-        lua: &Lua,
-        state_rc: Rc<RefCell<ScriptState>>,
-    ) -> LuaResult<()> {
-        let sw_rc = self.server_watch.clone();
-
-        // 创建 server_watch 表
-        let sw_table = lua.create_table()?;
-
-        // is_ready() -> bool
-        // 同时将待输出的日志（如果有）写入 pending_logs
-        let sw_for_ready = sw_rc.clone();
-        let state_for_ready = state_rc.clone();
-        let is_ready_fn = lua.create_function_mut(move |_, ()| {
-            let mut sw = sw_for_ready.borrow_mut();
-            let readiness = sw.is_ready();
-            if let Some(log) = &readiness.log {
-                let msg = log.format();
-                if let Ok(mut state) = state_for_ready.try_borrow_mut() {
-                    state
-                        .pending_logs
-                        .push(format!("[Lua] {}", crate::ui::AnsiParser::strip_ansi(&msg)));
-                }
-            }
-            Ok(readiness.is_ready)
-        })?;
-        sw_table.set("is_ready", is_ready_fn)?;
-
-        // get_elapsed_time() -> number
-        let sw_for_elapsed = sw_rc.clone();
-        let get_elapsed_fn = lua.create_function(move |_, ()| {
-            let sw = sw_for_elapsed.borrow();
-            Ok(sw.get_elapsed().as_secs_f64())
-        })?;
-        sw_table.set("get_elapsed_time", get_elapsed_fn)?;
-
-        // get_config() -> table
-        let sw_for_config = sw_rc.clone();
-        let get_config_fn = lua.create_function(move |lua, ()| {
-            let sw = sw_for_config.borrow();
-            let config = sw.config();
-            let t = lua.create_table()?;
-            t.set("warn_timeout", config.warn_timeout.as_secs_f64())?;
-            t.set("pause_timeout", config.pause_timeout.as_secs_f64())?;
-            t.set("check_interval", config.check_interval.as_secs_f64())?;
-            t.set("debug_interval", config.debug_interval.as_secs_f64())?;
-            Ok(t)
-        })?;
-        sw_table.set("get_config", get_config_fn)?;
-
-        // set_config(opts) -> nil
-        // opts 中的字段为可选，传入 nil/未设置表示保持原值
-        let sw_for_set_config = sw_rc.clone();
-        let set_config_fn = lua.create_function_mut(move |_, opts: mlua::Table| {
-            let mut sw = sw_for_set_config.borrow_mut();
-            let warn_timeout = opts
-                .get::<Option<f64>>("warn_timeout")?
-                .map(Duration::from_secs_f64);
-            let pause_timeout = opts
-                .get::<Option<f64>>("pause_timeout")?
-                .map(Duration::from_secs_f64);
-            let check_interval = opts
-                .get::<Option<f64>>("check_interval")?
-                .map(Duration::from_secs_f64);
-            let debug_interval = opts
-                .get::<Option<f64>>("debug_interval")?
-                .map(Duration::from_secs_f64);
-            sw.set_config(warn_timeout, pause_timeout, check_interval, debug_interval);
-            Ok(())
-        })?;
-        sw_table.set("set_config", set_config_fn)?;
-
-        // get_stats() -> table
-        let sw_for_stats = sw_rc.clone();
-        let get_stats_fn = lua.create_function(move |lua, ()| {
-            let sw = sw_for_stats.borrow();
-            let stats = sw.stats();
-            let t = lua.create_table()?;
-            t.set("total_probes", stats.total_probes)?;
-            Ok(t)
-        })?;
-        sw_table.set("get_stats", get_stats_fn)?;
-
-        // record_probe() -> nil
-        // 由 Lua 侧在发送 hp 探针时调用，用于统计
-        let sw_for_probe = sw_rc.clone();
-        let record_probe_fn = lua.create_function_mut(move |_, ()| {
-            sw_for_probe.borrow_mut().record_probe();
-            Ok(())
-        })?;
-        sw_table.set("record_probe", record_probe_fn)?;
-
-        // reset() -> nil
-        let sw_for_reset = sw_rc;
-        let reset_fn = lua.create_function_mut(move |_, ()| {
-            sw_for_reset.borrow_mut().reset();
-            Ok(())
-        })?;
-        sw_table.set("reset", reset_fn)?;
-
-        // 暴露为全局变量
-        lua.globals().set("server_watch", sw_table)?;
-
         Ok(())
     }
 
@@ -3339,10 +3210,6 @@ impl LuaEngine {
             state.last_server_data = std::time::Instant::now();
             state.packet_count += 1;
         }
-
-        // 更新服务器响应追踪器：每行服务器输出都刷新时间戳
-        // 用于检测服务器间歇性无响应，避免指令堆积触发限速惩罚
-        self.server_watch.borrow_mut().on_output();
 
         // 剥离 ANSI 码用于匹配，并去除行末 \r
         let clean_line = crate::ui::AnsiParser::strip_ansi(line);
