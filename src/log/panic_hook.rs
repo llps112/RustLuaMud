@@ -169,13 +169,14 @@ mod tests {
     #[test]
     fn test_init_panic_hook_safe_to_call() {
         let _guard = PANIC_HOOK_TEST_LOCK.lock().unwrap();
-        let dir = TempDir::new().unwrap();
 
         // 保存当前的 panic hook，测试后恢复
         let old_hook = std::panic::take_hook();
 
         // init_panic_hook 应该能安全调用
-        init_panic_hook(dir.path().to_str().unwrap(), 10, 5);
+        // 使用与 test_panic_hook_writes_log_on_panic 相同的路径
+        // 避免 OnceLock 被不同路径的 logger 锁定后，后续测试无法使用正确路径
+        init_panic_hook("/tmp/rustluamud_panic_hook_test", 10, 5);
 
         // 恢复原来的 panic hook，避免影响其他测试
         std::panic::set_hook(old_hook);
