@@ -3211,6 +3211,17 @@ impl LuaEngine {
             state.packet_count += 1;
         }
 
+        // 更新 server_watch.last_output_time（服务器响应追踪器）
+        // 每行服务器输出都会更新此时间戳，用于判断服务器是否响应正常
+        // 解决服务器间歇性无响应时指令堆积导致雷劈的问题
+        if let Ok(server_watch) = self.lua.globals().get::<mlua::Table>("server_watch") {
+            if let Ok(clock_fn) = self.lua.globals().get::<mlua::Function>("os.clock") {
+                if let Ok(clock_time) = clock_fn.call::<f64>(()) {
+                    let _ = server_watch.set("last_output_time", clock_time);
+                }
+            }
+        }
+
         // 剥离 ANSI 码用于匹配，并去除行末 \r
         let clean_line = crate::ui::AnsiParser::strip_ansi(line);
         let clean_line = clean_line.trim_end_matches('\r').to_string();
