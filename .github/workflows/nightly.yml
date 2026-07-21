@@ -87,7 +87,7 @@ jobs:
 
           # 获取或创建 Release
           echo "==> Checking existing release..."
-          RESP=$(curl -sS "${BASE}/releases/tags/${TAG}?${AUTH}")
+          RESP=$(curl -sS --retry 3 --retry-delay 10 "${BASE}/releases/tags/${TAG}?${AUTH}")
           RELEASE_ID=$(echo "$RESP" | python3 -c "
           import sys, json
           try:
@@ -101,7 +101,7 @@ jobs:
             echo "==> No existing Gitee Release found for tag ${TAG}."
           else
             echo "==> Deleting existing Gitee Release (ID: ${RELEASE_ID})..."
-            DELETE_RESP=$(curl -sS -X DELETE \
+            DELETE_RESP=$(curl -sS -X DELETE --retry 3 --retry-delay 10 \
               "${BASE}/releases/${RELEASE_ID}?${AUTH}")
             echo "   Delete response: $(echo "$DELETE_RESP" | head -c 200)"
             # 删除后 tag 也会被删除，后续创建会重新创建 tag
@@ -119,7 +119,7 @@ jobs:
           }
           print(json.dumps(payload))
           ")
-          RESP=$(curl -sS -X POST -H "Content-Type: application/json" \
+          RESP=$(curl -sS -X POST -H "Content-Type: application/json" --retry 3 --retry-delay 10 \
             -d "${PAYLOAD}" \
             "${BASE}/releases?${AUTH}")
           echo "   API response: $(echo "$RESP" | head -c 300)"
@@ -137,7 +137,7 @@ jobs:
             echo "==> Uploading artifacts to Gitee Release..."
             for FILE in release/*.tar.gz; do
               echo "   Uploading: $FILE"
-              UPLOAD_RESP=$(curl -sS -X POST \
+              UPLOAD_RESP=$(curl -sS -X POST --retry 5 --retry-delay 30 --max-time 180 \
                 -F "file=@${FILE}" \
                 "${BASE}/releases/${RELEASE_ID}/attach_files?${AUTH}")
               echo "   Upload response: $(echo "$UPLOAD_RESP" | head -c 300)"
