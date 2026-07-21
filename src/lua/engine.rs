@@ -1,7 +1,10 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mlua::{Function, Lua, Result as LuaResult, Table, UserData, Value};
 use regex::bytes::Regex as BytesRegex;
@@ -668,6 +671,14 @@ pub struct LuaEngine {
     /// OnConnect() 的 Execute() 和 trigger 的 Execute() 在延迟期内先暂存于此，
     /// 避免被 process_output_inner 的清零操作摧毁。
     delayed_commands: std::cell::RefCell<Vec<String>>,
+
+    // ---- 看门狗字段 ----
+    /// Lua exec() 开始执行的系统时间戳（纳秒），0 表示未在执行
+    exec_start: Arc<AtomicU64>,
+    /// 当前正在执行的定时器名称（供看门狗输出诊断信息）
+    exec_timer_name: Arc<Mutex<Option<String>>>,
+    /// 看门狗线程句柄
+    watchdog_handle: Option<thread::JoinHandle<()>>,
 }
 
 // ============================================================
@@ -799,6 +810,10 @@ impl LuaEngine {
         let script_path = Rc::new(RefCell::new(None::<String>));
         let log_dir = Rc::new(RefCell::new(None::<String>));
 
+        // 创建看门狗共享状态
+        let exec_start = Arc::new(AtomicU64::new(0));
+        let exec_timer_name = Arc::new(Mutex::new(None::<String>));
+
         let mut engine = Self {
             lua,
             state,
@@ -808,7 +823,14 @@ impl LuaEngine {
             pending_on_connect: None,
             connect_delay_ms: 0,
             delayed_commands: std::cell::RefCell::new(Vec::new()),
+            exec_start: exec_start.clone(),
+            exec_timer_name: exec_timer_name.clone(),
+            watchdog_handle: None,
         };
+
+        // 启动看门狗线程
+        engine.watchdog_handle = Some(Self::spawn_watchdog(exec_start, exec_timer_name, 30));
+
         engine.register_api()?;
         Ok(engine)
     }
@@ -3562,6 +3584,18 @@ impl LuaEngine {
 
         // 步骤3: 调用回调（如果存在）
         if let Some(cb) = callback {
+            // 标记看门狗开始
+            if let Ok(mut guard) = self.exec_timer_name.lock() {
+                *guard = Some(timer_name.clone());
+            }
+            self.exec_start.store(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64,
+                Ordering::Relaxed,
+            );
+
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _ = cb.call::<()>(());
             }))
@@ -3572,10 +3606,25 @@ impl LuaEngine {
                     timer_name
                 ));
             }
+
+            // 标记看门狗结束
+            self.exec_start.store(0, Ordering::Relaxed);
         }
 
         // 步骤4: 执行 send_text
         if !send_text.is_empty() {
+            // 标记看门狗开始
+            if let Ok(mut guard) = self.exec_timer_name.lock() {
+                *guard = Some(timer_name.clone());
+            }
+            self.exec_start.store(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64,
+                Ordering::Relaxed,
+            );
+
             let send_text_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // send_text 是 MUSHclient 的 script 参数
                 // 判断是函数名还是 Lua 代码：
@@ -3601,6 +3650,10 @@ impl LuaEngine {
                 };
                 result
             }));
+
+            // 标记看门狗结束
+            self.exec_start.store(0, Ordering::Relaxed);
+
             match send_text_result {
                 Ok(Err(lua_err)) => {
                     self.log_error(&format!(
@@ -3890,6 +3943,72 @@ impl LuaEngine {
     /// 获取定时器数量
     pub fn timer_count(&self) -> usize {
         self.state.borrow().timers.len()
+    }
+
+    // ---- 看门狗 ----
+
+    /// 启动看门狗线程，监控 Lua exec() 执行是否超时
+    fn spawn_watchdog(
+        exec_start: Arc<AtomicU64>,
+        exec_timer_name: Arc<Mutex<Option<String>>>,
+        timeout_secs: u64,
+    ) -> thread::JoinHandle<()> {
+        thread::Builder::new()
+            .name("lua-watchdog".to_string())
+            .spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_secs(5));
+
+                    let start_ns = exec_start.load(Ordering::Relaxed);
+                    if start_ns == 0 {
+                        continue; // 当前无 Lua 执行
+                    }
+
+                    let now_ns = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as u64;
+
+                    let elapsed_secs = (now_ns.saturating_sub(start_ns)) / 1_000_000_000;
+                    if elapsed_secs < timeout_secs {
+                        continue;
+                    }
+
+                    // 超时！获取诊断信息
+                    let timer = exec_timer_name
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                        .unwrap_or_else(|| "<unknown>".to_string());
+
+                    let panic_msg = format!(
+                        "Lua execution watchdog timeout - timer '{}' exceeded {}s, forcing abort",
+                        timer, timeout_secs
+                    );
+                    eprintln!("{}", panic_msg);
+
+                    // 尝试通过全局 PANIC_CONTEXT 写入日志
+                    if let Some(ctx) = crate::log::panic_hook::get_context() {
+                        let session = ctx
+                            .session_name
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone();
+                        let session = if session.is_empty() {
+                            "watchdog"
+                        } else {
+                            &session
+                        };
+                        let backtrace = std::backtrace::Backtrace::capture();
+                        ctx.logger
+                            .log_panic(session, &panic_msg, &format!("{}", backtrace));
+                    }
+
+                    // 强制终止进程（确保日志刷新）
+                    std::process::abort();
+                }
+            })
+            .expect("failed to spawn watchdog thread")
     }
 }
 

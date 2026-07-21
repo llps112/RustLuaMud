@@ -3,12 +3,17 @@ use std::sync::{Mutex, OnceLock};
 use crate::log::logger::Logger;
 
 /// 全局日志上下文（panic hook 可访问）
-struct PanicContext {
-    logger: Logger,
-    session_name: Mutex<String>,
+pub struct PanicContext {
+    pub logger: Logger,
+    pub session_name: Mutex<String>,
 }
 
 static PANIC_CONTEXT: OnceLock<PanicContext> = OnceLock::new();
+
+/// 获取全局 PANIC_CONTEXT（供看门狗线程写入日志使用）
+pub fn get_context() -> Option<&'static PanicContext> {
+    PANIC_CONTEXT.get()
+}
 
 /// 初始化全局 panic 上下文（在 main 开头调用一次）
 pub fn init_panic_hook(log_dir: &str, max_size_mb: u64, max_files: usize) {
