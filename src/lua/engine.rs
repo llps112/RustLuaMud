@@ -4550,6 +4550,60 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_send_with_command_tx() {
+        with_engine(|engine| {
+            let (tx, mut rx) = mpsc::channel::<String>(256);
+            engine.set_command_sender(tx);
+            exec(engine, "send('look')").unwrap();
+            assert_eq!(rx.try_recv(), Ok("look".to_string()));
+            // 直发模式：pending_commands 应为空
+            let cmds = engine.drain_commands();
+            assert!(cmds.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_execute_with_command_tx() {
+        with_engine(|engine| {
+            let (tx, mut rx) = mpsc::channel::<String>(256);
+            engine.set_command_sender(tx);
+            let result: i64 = eval(engine, "return Execute('look')").unwrap();
+            assert_eq!(result, 0);
+            assert_eq!(rx.try_recv(), Ok("look".to_string()));
+            // 直发模式：pending_commands 应为空
+            let cmds = engine.drain_commands();
+            assert!(cmds.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_slash_prefix_pending_with_command_tx() {
+        with_engine(|engine| {
+            let (tx, mut rx) = mpsc::channel::<String>(256);
+            engine.set_command_sender(tx);
+            exec(engine, "Execute('/alias.xxx()')").unwrap();
+            // / 前缀命令走 pending_commands，不直发
+            assert!(rx.try_recv().is_err());
+            let cmds = engine.drain_commands();
+            assert_eq!(cmds, vec!["/alias.xxx()"]);
+        });
+    }
+
+    #[test]
+    fn test_command_tx_full_falls_back() {
+        with_engine(|engine| {
+            let (tx, _rx) = mpsc::channel::<String>(1);
+            // 填满通道使其 try_send 失败
+            tx.try_send("fill".to_string()).unwrap();
+            engine.set_command_sender(tx);
+            exec(engine, "send('look')").unwrap();
+            // 通道满时回退到 pending_commands
+            let cmds = engine.drain_commands();
+            assert_eq!(cmds, vec!["look"]);
+        });
+    }
+
     // ================================================================
     // 输出 API
     // ================================================================
