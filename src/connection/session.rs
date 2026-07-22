@@ -115,13 +115,6 @@ pub struct Session {
     pub timer_cancel_tx: Option<oneshot::Sender<()>>,
 }
 
-impl Session {
-    /// 获取命令直发通道的发送端（用于 Lua Execute() 直发）
-    pub fn command_sender(&self) -> Option<mpsc::Sender<String>> {
-        self.send_tx.clone()
-    }
-}
-
 /// 将 GBK 字节解码为 UTF-8 字符串
 fn decode_gbk(bytes: &[u8]) -> String {
     let (cow, _encoding_used, _had_errors) = encoding_rs::GBK.decode(bytes);
