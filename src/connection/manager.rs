@@ -283,6 +283,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         }
     }
 

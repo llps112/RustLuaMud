@@ -104,6 +104,8 @@ pub struct Session {
     pub render_dirty: bool,
     /// 连接建立后延迟执行 OnConnect 的毫秒数
     pub connect_delay_ms: u64,
+    /// 命令发送最小间隔（毫秒），范围 20~200ms
+    pub cmd_interval_ms: u64,
 
     // 发送命令的通道
     send_tx: Option<mpsc::Sender<String>>,
@@ -208,6 +210,7 @@ impl Session {
             pending_data: Vec::new(),
             render_dirty: false,
             connect_delay_ms: config.connect_delay_ms,
+            cmd_interval_ms: config.cmd_interval_ms.clamp(20, 200),
             send_tx: None,
             send_raw_tx: None,
             cancel_tx: None,
@@ -461,13 +464,26 @@ impl Session {
         // 写入任务：发送用户命令到服务器
         let event_tx_write = event_tx.clone();
         let write_encoding = self.encoding.clone();
+        let cmd_interval_ms = self.cmd_interval_ms;
+        // 命令发送速率限制：最小间隔（ms），默认 50ms ≈ 20 条/秒
+        // 这是最终的物理限速，独立于 Lua 侧的计数限速
+        // 可通过角色配置文件的 cmd_interval_ms 项调整
         tokio::spawn(async move {
             use tokio::select;
+            let mut last_cmd_time = std::time::Instant::now();
             loop {
                 select! {
                     maybe_cmd = send_rx.recv() => {
                         match maybe_cmd {
                             Some(cmd) => {
+                                // 限速：确保命令之间至少有 cmd_interval_ms 的间隔
+                                let elapsed = last_cmd_time.elapsed();
+                                let cmd_interval = std::time::Duration::from_millis(cmd_interval_ms);
+                                if elapsed < cmd_interval {
+                                    tokio::time::sleep(cmd_interval - elapsed).await;
+                                }
+                                last_cmd_time = std::time::Instant::now();
+
                                 // 根据编码将命令转为字节
                                 let bytes = match write_encoding {
                                     Encoding::Gbk => encode_gbk(&cmd),
@@ -688,6 +704,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(1), &config);
         assert_eq!(session.name, "test");
@@ -719,6 +736,7 @@ mod tests {
             render_interval: 2000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(1), &config);
         assert_eq!(session.render_interval, 2000);
@@ -748,6 +766,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.send("hello").is_err());
@@ -775,6 +794,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let mut session = Session::new(SessionId(1), &config);
         session.disconnect();
@@ -803,6 +823,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(2), &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -830,6 +851,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(3), &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -857,6 +879,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(5), &config);
         assert_eq!(session.script_path, Some("/path/to/script.lua".to_string()));
@@ -884,6 +907,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(6), &config);
         assert_eq!(session.username, Some("player".to_string()));
@@ -912,6 +936,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(7), &config);
         assert!(session.auto_connect);
@@ -941,6 +966,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(8), &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -968,6 +994,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(9), &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -1043,6 +1070,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.output_lines.is_empty());
@@ -1070,6 +1098,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.lua_engine.is_none());
@@ -1097,6 +1126,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let mut session = Session::new(SessionId(1), &config);
         session.disconnect();
@@ -1133,6 +1163,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(!session.socks5_enable);
@@ -1162,6 +1193,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1191,6 +1223,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1223,6 +1256,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1252,6 +1286,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1281,6 +1316,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         }
     }
 
@@ -1305,6 +1341,7 @@ mod tests {
             render_interval: 1000,
             realtime: false,
             connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
         }
     }
 

@@ -92,6 +92,11 @@ pub struct ConnectionConfig {
     /// 防止连接瞬间批量发送指令触发服务器反 flood 机制
     #[serde(default = "default_connect_delay")]
     pub connect_delay_ms: u64,
+    /// 命令发送最小间隔（毫秒），默认 50ms，范围 20~200ms
+    /// 控制发送到 MUD 服务器的物理速率，值越小发送越快
+    /// 推荐值：50ms（普通玩家）、80ms（轻度延迟）、120ms（保守安全）
+    #[serde(default = "default_cmd_interval_ms")]
+    pub cmd_interval_ms: u64,
 }
 
 fn default_true() -> bool {
@@ -108,6 +113,9 @@ fn default_socks5_port() -> u16 {
 }
 fn default_connect_delay() -> u64 {
     1000
+}
+fn default_cmd_interval_ms() -> u64 {
+    50
 }
 
 #[derive(Debug, Deserialize, Clone)]

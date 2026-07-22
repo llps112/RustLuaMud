@@ -1256,6 +1256,7 @@ impl App {
                     render_interval: 1000,
                     realtime: false,
                     connect_delay_ms: 1000,
+                    cmd_interval_ms: 50,
                 };
 
                 let session_id = match self.manager.add_connection_dynamic(&conn_config) {
