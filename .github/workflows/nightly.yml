@@ -136,11 +136,14 @@ jobs:
           if [ -n "$RELEASE_ID" ]; then
             echo "==> Uploading artifacts to Gitee Release..."
             for FILE in release/*.tar.gz; do
-              echo "   Uploading: $FILE"
-              UPLOAD_RESP=$(curl -sS -X POST --retry 5 --retry-delay 30 --max-time 180 \
+              echo "   Uploading: $FILE ($(du -h "$FILE" | cut -f1))"
+              UPLOAD_RESP=$(curl -sS -X POST --retry 3 --retry-delay 60 --connect-timeout 60 \
                 -F "file=@${FILE}" \
-                "${BASE}/releases/${RELEASE_ID}/attach_files?${AUTH}")
+                "${BASE}/releases/${RELEASE_ID}/attach_files?${AUTH}" 2>&1 || echo "UPLOAD_FAILED")
               echo "   Upload response: $(echo "$UPLOAD_RESP" | head -c 300)"
+              if [ "$UPLOAD_RESP" = "UPLOAD_FAILED" ]; then
+                echo "!! Upload failed, skipping Gitee sync"
+              fi
             done
             echo "==> Gitee Release sync complete."
           else
