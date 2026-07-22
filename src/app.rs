@@ -1990,6 +1990,22 @@ impl App {
                     if let Some(ref mut engine) = session.lua_engine {
                         engine.set_connected(matches!(state, SessionState::Connected));
                     }
+                    // 连接时挂载直发通道，断开时解除
+                    match &state {
+                        SessionState::Connected => {
+                            if let Some(tx) = session.command_sender() {
+                                if let Some(ref mut engine) = session.lua_engine {
+                                    engine.set_command_sender(tx);
+                                }
+                            }
+                        }
+                        SessionState::Disconnected => {
+                            if let Some(ref mut engine) = session.lua_engine {
+                                engine.clear_command_sender();
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 if id == self.manager.foreground_id {
                     self.update_status_bar()?;

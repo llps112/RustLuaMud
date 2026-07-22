@@ -10,6 +10,7 @@ use mlua::{Function, Lua, Result as LuaResult, Table, UserData, Value};
 use regex::bytes::Regex as BytesRegex;
 use regex::Regex;
 use rusqlite::{types::Value as SqlValue, Connection};
+use tokio::sync::mpsc;
 
 /// mlua::Integer 在 64 位平台是 i64，在 32 位平台（如 i686）是 i32。
 /// 内部逻辑统一使用 i64，在与 mlua 交互的边界点做转换。
@@ -357,6 +358,9 @@ struct ScriptState {
     timers: Vec<TimerDef>,
     variables: HashMap<String, String>,
     pending_commands: Vec<String>,
+    /// 直发通道：Session 已连接时，Execute()/send() 通过此通道直接发送命令到 TCP，
+    /// 绕过 pending_commands 缓冲区，避免批量化突发和随机清空导致的指令丢失。
+    command_tx: Option<mpsc::Sender<String>>,
     pending_raw: Vec<Vec<u8>>,
     pending_logs: Vec<String>,
     /// Tell/io.write 的行缓冲区，用于实现内联输出（如 tprint 的缩进）
@@ -790,6 +794,7 @@ impl LuaEngine {
             timers: Vec::new(),
             variables: HashMap::new(),
             pending_commands: Vec::new(),
+            command_tx: None,
             pending_raw: Vec::new(),
             pending_logs: Vec::new(),
             tell_buffer: String::new(),
@@ -882,7 +887,19 @@ impl LuaEngine {
         // send(command)
         let state_rc2 = state_rc.clone();
         let send_fn = lua.create_function_mut(move |_, cmd: String| {
-            state_rc2.borrow_mut().pending_commands.push(cmd);
+            let mut state = state_rc2.borrow_mut();
+            if cmd.starts_with('/') {
+                // / 前缀命令需要走现有管线（send_lua_commands 中的 eval_code）
+                state.pending_commands.push(cmd);
+            } else if let Some(tx) = &state.command_tx {
+                // 直发：直接推送到 Session 的 mpsc 通道
+                // 失败时回退到 pending_commands，避免静默丢失命令
+                if let Err(e) = tx.try_send(cmd) {
+                    state.pending_commands.push(e.into_inner());
+                }
+            } else {
+                state.pending_commands.push(cmd);
+            }
             Ok(())
         })?;
         globals.set("send", send_fn)?;
@@ -890,7 +907,19 @@ impl LuaEngine {
         // Execute(command) — MushClient API
         let state_rc3 = state_rc.clone();
         let execute_fn = lua.create_function_mut(move |_, cmd: String| {
-            state_rc3.borrow_mut().pending_commands.push(cmd);
+            let mut state = state_rc3.borrow_mut();
+            if cmd.starts_with('/') {
+                // / 前缀命令需要走现有管线（send_lua_commands 中的 eval_code）
+                state.pending_commands.push(cmd);
+            } else if let Some(tx) = &state.command_tx {
+                // 直发：直接推送到 Session 的 mpsc 通道
+                // 失败时回退到 pending_commands，避免静默丢失命令
+                if let Err(e) = tx.try_send(cmd) {
+                    state.pending_commands.push(e.into_inner());
+                }
+            } else {
+                state.pending_commands.push(cmd);
+            }
             Ok(0)
         })?;
         globals.set("Execute", execute_fn)?;
@@ -3206,7 +3235,6 @@ impl LuaEngine {
         // 一次性 borrow_mut 完成多项状态更新
         {
             let mut state = self.state.borrow_mut();
-            state.pending_commands.clear();
             state.last_server_data = std::time::Instant::now();
             state.packet_count += 1;
         }
@@ -3556,16 +3584,7 @@ impl LuaEngine {
     /// 正式发布前应简化为仅保留外层 catch_unwind（fire_timer / fire_timer_by_name），
     /// 步骤级 catch_unwind 在 panic 后继续执行后续步骤可能导致状态不一致。
     fn fire_timer_inner(&self, index: usize) {
-        // 步骤1: 清空待发送队列
-        let step1 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.state.borrow_mut().pending_commands.clear();
-        }));
-        if step1.is_err() {
-            self.log_error(&format!("fire_timer[{}] 步骤1(clear pending) panic", index));
-            return;
-        }
-
-        // 步骤2: 读取定时器信息
+        // 步骤1: 读取定时器信息
         let (callback, send_text, one_shot, timer_name) =
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let state = self.state.borrow();
@@ -3766,6 +3785,19 @@ impl LuaEngine {
     /// 设置角色名（供 GetInfo(3) 返回）
     pub fn set_char_name(&self, name: &str) {
         self.state.borrow_mut().char_name = name.to_string();
+    }
+
+    /// 设置命令直发通道（Session 连接后调用）
+    /// 设置后 Execute()/send() 将直接通过此通道发送非 / 前缀命令到 TCP，
+    /// 绕过 pending_commands 缓冲区以消除批量化突发和随机清空导致的指令丢失。
+    pub fn set_command_sender(&self, tx: mpsc::Sender<String>) {
+        self.state.borrow_mut().command_tx = Some(tx);
+    }
+
+    /// 解除命令直发通道（Session 断开时调用）
+    /// 断开后 Execute()/send() 回退到 pending_commands 暂存。
+    pub fn clear_command_sender(&self) {
+        self.state.borrow_mut().command_tx = None;
     }
 
     /// 设置 Lua 全局变量（脚本中可直接按名引用）
