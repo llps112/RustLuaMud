@@ -452,6 +452,14 @@ panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀
 
 ## 版本历史
 
+### v0.4.0 (2026-07-23)
+- Rust 侧命令发送物理限速（`cmd_interval_ms` 配置项），配合 Lua 侧 burst 控制形成双层限速保护
+- Gitee Release 自动同步
+- README 文档全面重构
+- panic 日志捕获功能，panic 写入日志文件
+- Lua 定时器看门狗线程，防止无限循环永久卡死
+- 移除 Lua 侧 server_watch 模块，服务器响应追踪迁移到 Rust 侧
+
 ### v0.3.0 (2026-07-22)
 - 新增 Rust 侧命令发送物理限速（`cmd_interval_ms` 配置项），配合 Lua 侧 burst 控制形成双层限速保护
 - 新增 Gitee Release 自动同步（Nightly 构建）
