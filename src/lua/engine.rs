@@ -3191,18 +3191,24 @@ impl LuaEngine {
     }
 
     /// 处理服务器输出，匹配触发器
-    pub fn process_output(&self, line: &str) {
+    /// 返回值：是否有匹配的触发器设置了 omit_from_output（调用方据此抑制显示）
+    pub fn process_output(&self, line: &str) -> bool {
         // 使用 catch_unwind 防止函数体内任何 panic 跨越 FFI 边界导致静默崩溃
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.process_output_inner(line);
+            self.process_output_inner(line)
         }));
-        if result.is_err() {
-            self.log_error("process_output 中发生 panic，已捕获以防止崩溃");
+        match result {
+            Ok(omit) => omit,
+            Err(_) => {
+                self.log_error("process_output 中发生 panic，已捕获以防止崩溃");
+                // panic 时保守返回 false，避免静默吞掉用户输出
+                false
+            }
         }
     }
 
     /// process_output 的内部实现
-    fn process_output_inner(&self, line: &str) {
+    fn process_output_inner(&self, line: &str) -> bool {
         // 一次性 borrow_mut 完成多项状态更新
         {
             let mut state = self.state.borrow_mut();
@@ -3362,6 +3368,16 @@ impl LuaEngine {
             mlua::Value::Nil
         };
 
+        // 计算是否有匹配的触发器设置了 omit_from_output
+        // 任一匹配触发器 omit 即抑制该行显示（符合 MUSHclient 语义）
+        // 注意：必须在消费 matches 的 for 循环之前计算
+        let any_omit = {
+            let state = self.state.borrow();
+            matches
+                .iter()
+                .any(|(idx, _, _, _)| state.triggers[*idx].omit_from_output)
+        };
+
         // 逐个触发
         for (idx, full_match, caps_list, _sr) in matches {
             let (callback, send_text, trigger_name) = {
@@ -3405,6 +3421,8 @@ impl LuaEngine {
                 self.state.borrow_mut().pending_commands.push(send_text);
             }
         }
+
+        any_omit
     }
 
     /// 处理用户输入，匹配别名
@@ -4213,7 +4231,7 @@ fn add_trigger_impl(
         sequence,
         multiline: false,
         lines_to_match: 1,
-        omit_from_output: false,
+        omit_from_output: (flags & 4) != 0,
         temporary: (flags & 4096) != 0,
         send_text: String::new(),
     };
@@ -7076,6 +7094,84 @@ mod tests {
             let logs = engine.drain_logs();
             // omit trigger should not produce Note output
             assert!(logs.is_empty() || !logs.iter().any(|l| l.contains("hide_me")));
+        });
+    }
+
+    #[test]
+    fn test_process_output_returns_omit_flag() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                "AddTrigger('omit_trig', 'hide_me', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
+            exec(
+                engine,
+                "SetTriggerOption('omit_trig', 'omit_from_output', true)",
+            )
+            .unwrap();
+            // 匹配行 → 返回 true
+            assert!(engine.process_output("hide_me"));
+            // 不匹配行 → 返回 false
+            assert!(!engine.process_output("visible line"));
+        });
+    }
+
+    #[test]
+    fn test_process_output_no_omit_when_flag_off() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                "AddTrigger('normal_trig', 'test', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
+            // 未设 omit → 即使匹配也返回 false
+            assert!(!engine.process_output("test"));
+        });
+    }
+
+    #[test]
+    fn test_process_output_any_omit_wins() {
+        with_engine(|engine| {
+            exec(engine, "AddTrigger('t1', 'foo', '', 1, 0, 0, '', '', 0, 0)").unwrap();
+            exec(engine, "AddTrigger('t2', 'foo', '', 1, 0, 0, '', '', 0, 0)").unwrap();
+            exec(engine, "SetTriggerOption('t2', 'omit_from_output', true)").unwrap();
+            // 两个触发器都匹配，其中 t2 omit → 返回 true
+            assert!(engine.process_output("foo"));
+        });
+    }
+
+    #[test]
+    fn test_process_output_omit_gbk_pattern() {
+        with_engine(|engine| {
+            // 验证 GBK 模式触发器也支持 omit（中文模式自动走 GBK 引擎）
+            exec(
+                engine,
+                "AddTrigger('gbk_omit', '你正忙着呢', '', 1, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
+            exec(
+                engine,
+                "SetTriggerOption('gbk_omit', 'omit_from_output', true)",
+            )
+            .unwrap();
+            assert!(engine.process_output("你正忙着呢"));
+            assert!(!engine.process_output("你现在不忙"));
+        });
+    }
+
+    #[test]
+    fn test_add_trigger_omit_from_output_flag_bit() {
+        with_engine(|engine| {
+            // flag 5 = 1(Enabled) + 4(eOmitFromOutput)，通过 flag 位直接设置 omit
+            exec(
+                engine,
+                "AddTrigger('flag_omit', 'hide_me', '', 5, 0, 0, '', '', 0, 0)",
+            )
+            .unwrap();
+            // 匹配行 → 返回 true（omit 经 flag bit 4 设置生效）
+            assert!(engine.process_output("hide_me"));
+            assert!(!engine.process_output("visible"));
         });
     }
 

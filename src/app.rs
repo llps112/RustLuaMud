@@ -1868,116 +1868,124 @@ impl App {
                 if self.manager.get_by_id(id).is_none() {
                     return Ok(());
                 }
-                // 将数据追加到对应连接的输出缓冲区
-                {
-                    let max_lines = self.config.general.scroll_buffer;
-                    if let Some(session) = self.manager.get_mut_by_id(id) {
-                        for part in data.split_inclusive('\n') {
-                            let trimmed = part.trim_end_matches(['\r', '\n']);
-                            if !trimmed.is_empty() {
-                                session.output_lines.push(trimmed.to_string());
-                            }
-                        }
-                        // 限制缓冲区大小
-                        if session.output_lines.len() > max_lines {
-                            let drain_count = session.output_lines.len() - max_lines;
-                            session.output_lines.drain(..drain_count);
-                        }
-                    }
-                }
-                // 仅渲染前台连接的数据
                 let is_realtime = self
                     .manager
                     .get_by_id(id)
                     .map(|s| s.realtime)
                     .unwrap_or(false);
-                if id == self.manager.foreground_id {
-                    if is_realtime {
-                        // 实时渲染模式
-                        self.terminal.append_output(&data)?;
-                    } else {
-                        // 节流渲染模式：缓冲数据，等待定时器刷新
-                        if let Some(session) = self.manager.get_mut_by_id(id) {
-                            for part in data.split_inclusive('\n') {
-                                let trimmed = part.trim_end_matches(['\r', '\n']);
-                                if !trimmed.is_empty() {
-                                    session.pending_data.push(trimmed.to_string());
-                                }
+                let max_lines = self.config.general.scroll_buffer;
+
+                // ===== 阶段 1：触发器处理（收集 omit 标志 + 命令 + Lua 日志）=====
+                // 先运行触发器，得到每行是否被 omit_from_output 抑制，
+                // 再据此决定阶段 2 的显示/入缓冲行为。
+                let mut omit_flags: Vec<bool> = Vec::new();
+                let mut all_cmds: Vec<String> = Vec::new();
+                let mut pending_lua_logs: Vec<String> = Vec::new();
+                if let Some(engine) = self
+                    .manager
+                    .get_by_id(id)
+                    .and_then(|s| s.lua_engine.as_ref())
+                {
+                    // 对每行数据分别匹配触发器
+                    for part in data.split_inclusive('\n') {
+                        let trimmed = part.trim_end_matches(['\r', '\n']);
+                        if trimmed.is_empty() {
+                            // 空行占位，保持与阶段 2 索引对齐
+                            omit_flags.push(false);
+                            continue;
+                        }
+                        let omitted = engine.process_output(trimmed);
+                        omit_flags.push(omitted);
+                        // 延迟期内 trigger 命令放入延迟队列，等到期后统一发送
+                        if engine.has_pending_delayed_on_connect() {
+                            engine.drain_commands_to_delayed();
+                        } else {
+                            all_cmds.extend(engine.drain_commands());
+                        }
+                    }
+                    // 收集 Lua 日志（写入文件 + 暂存待终端输出）
+                    pending_lua_logs = engine.drain_logs();
+                    let name = self
+                        .manager
+                        .get_by_id(id)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+                    for msg in &pending_lua_logs {
+                        let clean = crate::ui::AnsiParser::strip_ansi(msg);
+                        self.logger.log(&name, &clean);
+                    }
+                }
+
+                // ===== 阶段 2：显示 + 回看缓冲（按 omit 标志逐行决定）=====
+                // omit_from_output=true 的行：跳过 output_lines 入栈 + 跳过终端显示
+                // 日志文件不受 omit_from_output 影响（MUSHclient 语义，omit_from_log 才影响日志）
+                for (i, part) in data.split_inclusive('\n').enumerate() {
+                    let trimmed = part.trim_end_matches(['\r', '\n']);
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let omitted = omit_flags.get(i).copied().unwrap_or(false);
+                    if omitted {
+                        continue;
+                    }
+                    // 滚动回看缓冲（所有 session）
+                    if let Some(session) = self.manager.get_mut_by_id(id) {
+                        session.output_lines.push(trimmed.to_string());
+                    }
+                    // 仅渲染前台连接的数据
+                    if id == self.manager.foreground_id {
+                        if is_realtime {
+                            // 实时渲染模式：逐行追加（支持逐行 omit）
+                            self.terminal.append_output(part)?;
+                        } else {
+                            // 节流渲染模式：缓冲数据，等待定时器刷新
+                            if let Some(session) = self.manager.get_mut_by_id(id) {
+                                session.pending_data.push(trimmed.to_string());
+                                session.render_dirty = true;
                             }
-                            session.render_dirty = true;
                         }
                     }
                 }
-                // 所有连接数据写入日志
+                // 限制回看缓冲区大小
+                if let Some(session) = self.manager.get_mut_by_id(id) {
+                    if session.output_lines.len() > max_lines {
+                        let drain_count = session.output_lines.len() - max_lines;
+                        session.output_lines.drain(..drain_count);
+                    }
+                }
+
+                // 所有连接数据写入日志（omit_from_output 不抑制日志）
                 self.log_session_data(id, &data);
 
-                // 触发器处理（所有连接都触发，不仅仅是前台）
-                {
-                    let mut pending_lua_logs = Vec::new();
-                    let trigger_commands = if let Some(engine) = self
-                        .manager
-                        .get_by_id(id)
-                        .and_then(|s| s.lua_engine.as_ref())
-                    {
-                        // 对每行数据分别匹配触发器
-                        let mut all_cmds = Vec::new();
-                        for part in data.split_inclusive('\n') {
-                            let trimmed = part.trim_end_matches(['\r', '\n']);
-                            if !trimmed.is_empty() {
-                                engine.process_output(trimmed);
-                                // 延迟期内 trigger 命令放入延迟队列，等到期后统一发送
-                                if engine.has_pending_delayed_on_connect() {
-                                    engine.drain_commands_to_delayed();
-                                } else {
-                                    all_cmds.extend(engine.drain_commands());
-                                }
-                            }
-                        }
-                        // 收集 Lua 日志（写入文件 + 暂存待终端输出）
-                        let logs = engine.drain_logs();
-                        let name = self
-                            .manager
-                            .get_by_id(id)
-                            .map(|s| s.name.clone())
-                            .unwrap_or_default();
-                        for msg in &logs {
-                            let clean = crate::ui::AnsiParser::strip_ansi(msg);
-                            self.logger.log(&name, &clean);
-                        }
-                        pending_lua_logs = logs;
-                        all_cmds
-                    } else {
-                        Vec::new()
-                    };
-                    // 发送触发器产生的命令
-                    self.send_lua_commands(id, trigger_commands)?;
-                    // 处理 Lua 日志（写入日志文件已在上面的分支中完成）
-                    // 节流模式下缓冲到 pending_data，实时模式直接输出
-                    if !pending_lua_logs.is_empty() && id == self.manager.foreground_id {
-                        if !is_realtime {
-                            if let Some(session) = self.manager.get_mut_by_id(id) {
-                                for msg in pending_lua_logs {
-                                    session
-                                        .pending_data
-                                        .push(format!("\x1b[36m[Lua] {}\x1b[0m", msg));
-                                }
-                                session.render_dirty = true;
-                            }
-                        } else {
+                // 发送触发器产生的命令
+                self.send_lua_commands(id, all_cmds)?;
+
+                // 处理 Lua 日志（写入日志文件已在阶段 1 完成）
+                // 节流模式下缓冲到 pending_data，实时模式直接输出
+                if !pending_lua_logs.is_empty() && id == self.manager.foreground_id {
+                    if !is_realtime {
+                        if let Some(session) = self.manager.get_mut_by_id(id) {
                             for msg in pending_lua_logs {
-                                self.terminal
-                                    .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
+                                session
+                                    .pending_data
+                                    .push(format!("\x1b[36m[Lua] {}\x1b[0m", msg));
                             }
+                            session.render_dirty = true;
+                        }
+                    } else {
+                        for msg in pending_lua_logs {
+                            self.terminal
+                                .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
                         }
                     }
-                    // 排空引擎中剩余的 Lua 日志（触发器处理后又产生的）
-                    self.drain_lua_logs(id)?;
-                    // 发送 SendPkt 压入的原始数据包
-                    self.send_lua_raw(id)?;
-                    // 触发器中可能调用了 SetStatus，刷新状态栏
-                    if id == self.manager.foreground_id {
-                        self.update_status_bar()?;
-                    }
+                }
+                // 排空引擎中剩余的 Lua 日志（触发器处理后又产生的）
+                self.drain_lua_logs(id)?;
+                // 发送 SendPkt 压入的原始数据包
+                self.send_lua_raw(id)?;
+                // 触发器中可能调用了 SetStatus，刷新状态栏
+                if id == self.manager.foreground_id {
+                    self.update_status_bar()?;
                 }
             }
             ManagerEvent::StateChange(id, state) => {

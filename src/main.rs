@@ -1,12 +1,5 @@
-mod app;
-mod config;
-mod connection;
-mod log;
-mod lua;
-mod ui;
-
-use app::App;
-use config::AppConfig;
+use rust_lua_mud::app::App;
+use rust_lua_mud::config::AppConfig;
 
 fn main() {
     // TODO(v1.0): 正式发布前必须移除此行，把 RUST_BACKTRACE 控制权交给用户
@@ -24,7 +17,7 @@ fn main() {
     let config = AppConfig::load_default(&profiles_dir);
 
     // 初始化 panic hook，将 panic 信息和 backtrace 写入日志文件
-    log::panic_hook::init_panic_hook(
+    rust_lua_mud::log::panic_hook::init_panic_hook(
         &config.general.log_dir,
         config.general.log_rotation_size_mb,
         config.general.log_rotation_count,

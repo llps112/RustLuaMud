@@ -23,3 +23,8 @@ regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile = "3"
 tokio-socks = "0.5"
+
+[profile.test]
+# opt-level=1 保留调试符号，测试二进制更小、链接更快
+# 不影响断点调试和 RUST_BACKTRACE 定位
+opt-level = 1
