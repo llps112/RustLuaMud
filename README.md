@@ -1,185 +1,119 @@
 # RustLuaMud
 
-基于 Rust + LuaJIT 的终端 MUD 客户端，面向无 GUI 环境下 7x24 小时挂机，兼容 MUSHclient 脚本 API。
-
-A terminal MUD client built with Rust + LuaJIT, designed for 24/7 headless operation, with MUSHclient script API compatibility.
+基于 Rust + LuaJIT 的终端 MUD 客户端，面向 7x24 小时无 GUI 挂机场景，兼容 MUSHclient 脚本 API。
 
 ---
 
 ## 特性
 
-- **MUSHclient 脚本兼容** — 实现常用 MUSHclient API（AddTrigger / AddAlias / AddTimer / GetInfo / GetTriggerInfo / GetTimerInfo / GetPluginInfo / SetStatus / Simulate / SendPkt / 变量管理等），从 MUSHclient 迁移的脚本可无缝运行
-- **多连接管理** — 单实例同时管理最多 10 个角色连接，支持前台/后台切换
-- **SOCKS5 代理** — 每个角色可独立配置 SOCKS5 代理，支持认证，方便多开挂机规避同 IP 限制
-- **输出历史滚动** — PageUp/PageDown 翻页查看历史输出，End 键回到底部，新输出不影响当前浏览位置
-- **仅前台渲染** — 仅前台连接渲染终端输出，后台连接静默记录日志
-- **ANSI 颜色** — 完整解析 ANSI SGR 转义序列，终端彩色显示；触发器回调可获取颜色样式信息（GetStyle API）
-- **LuaJIT 脚本引擎** — 触发器、别名、定时器、变量管理、协程支持
-- **GBK 编码兼容** — 自动检测并转码 GBK 编码的脚本文件和服务器输出；触发器同时支持 GBK 字节模式和 UTF-8 正则匹配
-- **SQLite3 集成** — Lua 脚本可直接操作 SQLite3 数据库，支持 GBK 文本解码
-- **触发器 w[0] 兼容** — 触发器回调的 `wildcards` 表包含 `w[0]`（完整匹配文本），与 MUSHclient 行为完全一致
-- **自动重连** — 断线自动重连，可配置延迟
-- **日志系统** — 按连接分文件记录，按小时分割，24 小时滚动覆盖，保留数量可单独配置；Rust panic 自动捕获写入日志
-- **Profile 管理** — 从 `profiles/` 目录加载角色配置（TOML），自动注入登录凭证
-- **终端设置持久化** — `keep_command` 等终端选项自动保存到 JSON 文件
-- **状态栏** — 实时显示角色名、连接状态、版本号等信息（SetStatus API）
-- **Simulate API** — 模拟服务器输出触发 Lua 触发器，支持多行匹配
-- **内置命令** — `/connect`、`/disconnect`、`/load`、`/lua`、`/list`、`/set` 等
-- **极低资源占用** — J1800 + 2GB 内存可流畅运行 10 连接
+**MUSHclient 兼容层**
+- 常用 API 全覆盖：触发器、别名、定时器、变量、日志、数据库、样式查询
+- 触发器 `wildcards[0]`（完整匹配文本）与 MUSHclient 行为完全一致
+- 多行触发器、颜色样式回调（`GetStyle`）、模拟输出（`Simulate`）
+- 参考 `help/api/` 目录查阅完整 API 文档
 
-> **注意**：本客户端仅实现了 MUSHclient 的部分常用 API。如果你的脚本使用了未实现的 API（如 `Accelerator`、`AddFont`、`ArrayCreate` 等），脚本将无法正常运行。使用前请确认脚本中调用的所有 API 都在本项目的兼容范围内。
+**脚本引擎**
+- LuaJIT 引擎，协程支持（`wait.make` / `wait.time`）
+- `dofile` 自动处理 GBK 转码
+- 内置 JSON 序列化、正则（`rex`）、位运算（`bit`）
+- SQLite3 集成，支持 GBK 文本解码
+
+**连接管理**
+- 单实例最多 10 个并发连接，前台/后台无缝切换
+- 每个角色独立配置 SOCKS5 代理，支持多开规避同 IP 限制
+- 自动重连，可配置延迟
+- 仅前台渲染，后台静默记录日志
+
+**限速保护**
+- Lua 侧 burst 控制 + Rust 侧物理间隙限速（可配置，默认 50ms）
+- 双层保护确保任意指令出口都不会触发服务器反 flood 机制
+
+**编码兼容**
+- GBK / UTF-8 双编码，自动检测并转码
+- 触发器同时支持 GBK 字节模式与 UTF-8 正则匹配
+
+**终端体验**
+- 完整 ANSI SGR 解析，彩色输出
+- PageUp/PageDown 翻页查看历史输出
+- 鼠标点击状态栏切换连接
+- 极低资源占用：J1800 + 2GB 内存即可流畅运行 10 连接
 
 ---
 
 ## 快速开始
 
-选择哪种安装方式取决于你的场景：
+两种安装方式：
 
-| 场景 | 推荐方式 |
-|------|---------|
-| x86_64 / i686 Linux，不想装 Rust 环境，直接跑 | [方式一：预编译二进制](#方式一下载预编译二进制推荐免编译) |
-| 想先用用看，不确定是否需要 | [方式一](#方式一下载预编译二进制推荐免编译)，`curl \| tar xz` 只需几秒 |
-| 需要最新修改但等不及发版 | [方式一 Nightly 版](#方式一下载预编译二进制推荐免编译)（自动构建 main 分支） |
-| ARM64 机器（树莓派、ARM 云服务器等） | [方式二：从源码编译](#方式二从源码编译)（暂未提供 ARM 预编译包） |
-| 需要修改客户端代码 | [方式二：从源码编译](#方式二从源码编译) |
-| 海外服务器，直连下载快 | 两种方式均可，编译时用官方源更快 |
+| 场景 | 推荐 |
+|------|------|
+| x86_64 / i686 Linux，即下即用 | [预编译二进制](#方式一下载预编译二进制) |
+| ARM64 / 需要改客户端代码 | [从源码编译](#方式二从源码编译) |
 
-> **国内网络优化**：本项目已同步至 Gitee 镜像仓库 [bai-yifei180/RustLuaMud](https://gitee.com/bai-yifei180/RustLuaMud)（自动同步）。GitHub Actions 构建后自动同步 nightly 二进制到 Gitee Release，国内用户可使用 `--gitee` 参数从 Gitee 镜像下载。
-
-### 方式一：下载预编译二进制（推荐，免编译）
-
-预编译的二进制包（基于 Ubuntu 22.04 构建，链接 glibc 2.35），支持 **x86_64** 和 **i686 (32-bit)** 两种架构。`bootstrap.sh` 会自动检测 CPU 架构，下载对应的版本。一键初始化，自动完成目录创建、二进制下载和示例配置生成：
-
-```bash
-bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh)
-```
-
-Nightly 版（main 分支最新构建，可能不稳定）：
-
-```bash
-bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh) --nightly
-```
-
-> **Gitee 镜像**（国内用户使用，GitHub Actions 构建后自动同步 nightly 版到 Gitee Release）：
->
+> 国内用户可使用 `--gitee` 参数从 Gitee 镜像下载：
 > ```bash
 > bash <(curl -Ls https://gitee.com/bai-yifei180/RustLuaMud/raw/main/scripts/bootstrap.sh) --gitee
 > ```
 
-初始化后目录结构如下：
+### 方式一：下载预编译二进制
+
+一键初始化脚本，自动创建目录、下载二进制、生成示例配置：
+
+```bash
+# 稳定版（推荐）
+bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh)
+
+# Nightly 版（main 分支最新构建，可能不稳定）
+bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh) --nightly
+```
+
+初始化后目录结构：
 
 ```
 ~/RustLuaMud/
 ├── RustLuaMud           # 主程序
 ├── profiles/            # 角色 TOML 配置文件
-│   └── example.toml     # 示例配置（自动跳过）
+│   └── example.toml     # 示例配置
 ├── scripts/             # Lua 脚本
 │   └── example.lua      # 示例脚本
 └── logs/                # 日志文件自动生成
 ```
 
-编辑角色配置，然后启动：
+配置角色并启动：
 
 ```bash
 cd ~/RustLuaMud
 cp profiles/example.toml profiles/mychar.toml
-vim profiles/mychar.toml   # 修改角色名、服务器、用户名、密码等
+vim profiles/mychar.toml
 ./RustLuaMud
 ```
 
-> 详细配置项说明见下方[配置](#配置)章节。
+配置项说明见[配置](#配置)章节。
 
-> `nightly` 标签会在每次 push 到 main 分支时自动更新，由 [nightly.yml](.github/workflows/nightly.yml) 工作流构建。Nightly 版同步提供 x86_64 和 i686 两种架构的预编译二进制。
->
-> ARM64 机器暂需[从源码编译](#方式二从源码编译)。
+> Nightly 版由 [nightly.yml](.github/workflows/nightly.yml) 自动构建，每次 push main 分支后自动更新。构建完成后自动同步到 [Gitee Release](https://gitee.com/bai-yifei180/RustLuaMud/releases)。支持 x86_64 和 i686 两种架构。
 
 ### 方式二：从源码编译
 
 #### 安装 Rust
 
-根据当前环境选择对应方案：
-
-<details>
-<summary><b>方案 A：全新安装</b>（没有 <code>~/.cargo</code> 残留，或不需要保留）</summary>
-
 ```bash
-rm -f rustup-init-x86_64-unknown-linux-gnu
-rm -rf ~/.rustup ~/.cargo
-
-# 1. 下载官方 install.sh（仅几 KB）
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
-
-# 2. 将 RUSTUP_UPDATE_ROOT 改为清华镜像
-sed -i 's|static.rust-lang.org/rustup|mirrors.tuna.tsinghua.edu.cn/rustup/rustup|' rustup-init.sh
-
-# 3. 设 DIST_SERVER（管 toolchain 组件下载），然后执行
-RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup \
-sh rustup-init.sh -y
-```
-
-</details>
-
-<details>
-<summary><b>方案 B：保留 cargo 已安装工具</b>（重装 rustup，保留 <code>~/.cargo</code>）</summary>
-
-```bash
-rm -f rustup-init-x86_64-unknown-linux-gnu
-rm -rf ~/.rustup                              # 只清 rustup，保留 ~/.cargo 及其工具
-
+# 国内镜像安装（清华源）
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
 sed -i 's|static.rust-lang.org/rustup|mirrors.tuna.tsinghua.edu.cn/rustup/rustup|' rustup-init.sh
-RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup \
-sh rustup-init.sh -y
-```
+RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup sh rustup-init.sh -y
+source $HOME/.cargo/env
 
-</details>
-
-<details>
-<summary><b>海外服务器</b>（使用官方源，直连速度快）</summary>
-
-```bash
-rm -f rustup-init-x86_64-unknown-linux-gnu
-rm -rf ~/.rustup ~/.cargo
-
+# 海外直连
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-```
-
-</details>
-
-安装完成后刷新环境变量：
-
-```bash
 source $HOME/.cargo/env
 ```
 
-> **注意**：编译时需要 C 编译器（`cc`），部分最小化安装的系统可能缺失。
-> 
-> ```bash
-> # Debian / Ubuntu
-> sudo apt install build-essential
-> 
-> # CentOS / RHEL / Fedora
-> sudo dnf groupinstall "Development Tools"
-> ```
+> 编译需要 C 编译器：`sudo apt install build-essential`（Debian/Ubuntu）或 `sudo dnf groupinstall "Development Tools"`（Fedora/CentOS）。
 
-#### 配置 crates.io 镜像源
+#### 配置依赖镜像（国内）
 
-国内首次编译依赖下载缓慢，推荐配置国内镜像。根据网络环境选择合适源：
+写入 `~/.cargo/config.toml`：
 
-| 镜像 | 配置名 | Registry URL | 备注 |
-|------|--------|-------------|------|
-| **中科大 USTC** | `ustc` | `sparse+https://mirrors.ustc.edu.cn/crates.io-index/` | 老牌稳定 |
-| **上海交大 SJTUG** | `sjtug` | `sparse+https://mirrors.sjtug.sjtu.edu.cn/crates.io-index/` | **阿里云推荐** |
-| **清华 TUNA** | `tuna` | `sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/` | 稳定 |
-| **南京大学 NJU** | `nju` | `sparse+https://mirror.nju.edu.cn/crates.io-index/` | / |
-| **华为云** | `huawei` | `sparse+https://repo.huaweicloud.com/repository/cargo/` | 阿里云也可以用 |
-
-```bash
-mkdir -p ~/.cargo
-
-# 以下二选一即可 ↓
-# 选项 1：直接写死一个源（如 SJTUG）
-cat > ~/.cargo/config.toml << 'EOF'
+```toml
 [build]
 jobs = 2
 
@@ -188,71 +122,45 @@ replace-with = "sjtug"
 
 [source.sjtug]
 registry = "sparse+https://mirrors.sjtug.sjtu.edu.cn/crates.io-index/"
-EOF
-
-# 选项 2：多源 fallback（一个挂了自动切下一个）
-cat > ~/.cargo/config.toml << 'EOF'
-[build]
-jobs = 2
-
-[source.crates-io]
-replace-with = "mirror"
-
-[source.mirror]
-directory = "/nonexistent"  # 占位用，实际不会用到
-
-[source.mirror-alias]
-registry = "sparse+https://mirrors.sjtug.sjtu.edu.cn/crates.io-index/"
-
-[source.mirror-alias-1]
-registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
-
-[source.mirror-alias-2]
-registry = "sparse+https://repo.huaweicloud.com/repository/cargo/"
-
-[source.mirror-alias-3]
-registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
-EOF
 ```
 
-> **注意**：`sparse+` 协议需要 cargo 1.68+（当前 stable 已默认支持）。
->
-> 部分镜像可能间歇性抽风（如 rsproxy 已失效），建议 USTC 或 SJTUG 优先。
+备选源：`mirrors.ustc.edu.cn`、`mirrors.tuna.tsinghua.edu.cn`、`repo.huaweicloud.com`。
 
-#### 克隆仓库
+#### 编译与运行
 
 ```bash
-# GitHub（海外服务器推荐）
-git clone https://github.com/llps112/RustLuaMud.git
-
-# Gitee 镜像（国内访问更快）
-git clone https://gitee.com/bai-yifei180/RustLuaMud.git
-
+git clone https://github.com/llps112/RustLuaMud.git   # 或 Gitee: https://gitee.com/bai-yifei180/RustLuaMud.git
 cd RustLuaMud
+cargo build --release
+./target/release/RustLuaMud
 ```
 
-#### 编译
+#### 多实例运行
 
 ```bash
-cargo build --release
+# 实例一（默认 profiles/ 目录）
+./target/release/RustLuaMud
+
+# 实例二（使用不同配置目录）
+./target/release/RustLuaMud --profiles profiles2
 ```
 
-编译产物位于 `target/release/RustLuaMud`。
+---
 
-#### 配置
+## 配置
 
-在 `profiles/` 目录下创建角色配置文件（如 `mychar.toml`）：
+程序启动时自动扫描 `profiles/` 目录，加载所有 `.toml` 配置文件（`example.toml` 除外）。
+
+完整配置项：
 
 ```toml
 # 角色连接配置
-# 文件名即为角色标识，建议用角色名命名
-
 name = "角色名"
 host = "mud.example.com"
 port = 6666
 encoding = "gbk"
 
-# Lua 脚本路径（相对于程序运行目录）
+# Lua 脚本路径（相对于运行目录）
 script = "scripts/myscript.lua"
 
 # 连接行为
@@ -261,64 +169,34 @@ auto_reconnect = true
 reconnect_delay_secs = 5
 
 # 连接建立后延迟发送命令的毫秒数，默认 1000
-# OnConnect() 仍立即执行，仅延迟后续命令的发送
-# 防止连接瞬间批量发送指令触发服务器反 flood 机制
-# 设置为 0 可恢复立即发送（不推荐）
+# OnConnect() 立即执行，仅延迟后续命令的发送
 # connect_delay_ms = 1000
 
-# 登录凭证（启动时自动注入 Lua 变量 char_name / char_password）
-# 留空则不注入，需手动输入或通过 Lua 脚本设置
+# 登录凭证（自动注入 Lua 变量 char_name / char_password）
 username = "your_character_name"
 password = "your_password"
 
-# SOCKS5 代理（可选，不设置则直连）
-socks5_enable = true
+# SOCKS5 代理（可选）
+socks5_enable = false
 socks5_host = "127.0.0.1"
 socks5_port = 1080
-socks5_username = "user"   # 可选，留空或不设置表示无认证
-socks5_password = "pass"   # 可选
+# socks5_username = "user"
+# socks5_password = "pass"
 
-# 日志保留数量（可选，默认 24，即保留最近 24 小时日志文件）
-# log_rotation_count = 168
+# 命令发送速率限制（可选，范围 20~200，默认 50ms）
+# 底层物理限速，独立于 Lua 脚本层的计数限速
+# 推荐值：50（普通玩家）、80（轻度延迟）、120（保守安全）
+# cmd_interval_ms = 50
 
 # 渲染控制（可选）
-# render_interval = 1000  # 渲染间隔（毫秒），范围 [50, 10000]，默认 1000
-# realtime = false        # 实时渲染开关，true 时忽略 render_interval 直接实时渲染，默认 false
+# render_interval = 1000   # 渲染间隔（毫秒），范围 [50, 10000]
+# realtime = false          # 实时渲染开关
 
-# 命令发送速率限制（可选）
-# cmd_interval_ms = 50    # 命令发送最小间隔（毫秒），范围 20~200，默认 50
-#                         # 这是底层物理限速，独立于脚本层的计数限速
-#                         # 推荐值：50ms（普通玩家）、80ms（轻度延迟）、120ms（保守安全）
-#                         # 值越小发送越快，设置过低可能触发服务器反 flood 机制
+# 日志保留数量（可选，默认 24，保留最近 24 小时日志文件）
+# log_rotation_count = 24
 ```
 
-> `profiles/example.toml` 为示例文件，程序启动时自动跳过，不会加载。如需临时禁用某个角色配置，可将文件后缀改为非 `.toml`（如 `.bak`），恢复时改回即可。
-
-程序启动时会自动扫描 `profiles/` 目录，加载所有 `.toml` 配置文件（`example.toml` 除外），按文件名排序依次连接。
-
-#### 运行
-
-```bash
-./target/release/RustLuaMud
-```
-
-##### 多实例运行
-
-如需运行多个客户端实例（使用不同的角色配置），可使用 `--profiles` 参数指定不同的配置目录：
-
-```bash
-# 第一个实例（默认使用 profiles/ 目录）
-./target/release/RustLuaMud
-
-# 第二个实例（使用 profiles2/ 目录）
-./target/release/RustLuaMud --profiles profiles2
-```
-
-每个实例将加载指定目录下的角色配置文件，实现完全独立的多实例运行。
-
-#### 文档
-
-详细文档请见 [help/](help/README.md) 目录，涵盖 Lua API 接口、CLUI 操作指南等。
+> 如需临时禁用某个角色配置，将文件后缀改为非 `.toml`（如 `.bak`）即可。
 
 ---
 
@@ -326,23 +204,27 @@ socks5_password = "pass"   # 可选
 
 | 快捷键 | 功能 |
 |--------|------|
-| `Alt+1~9` | 切换到对应编号的连接（部分终端/SSH 客户端中 Alt 键被占用，此时无法使用；请使用 `/sw <编号>` 或鼠标点击状态栏标签）|
-| `Alt+0` | 切换到第 10 个连接（同上注意事项）|
-| `Alt+Left` | 切换到前一个连接（循环，同上）|
-| `Alt+Right` | 切换到后一个连接（循环，同上）|
+| `Alt+1~9` / `Alt+0` | 切换到对应编号连接（Alt 被占用时可用 `/sw <编号>` 或鼠标点击标签） |
+| `Alt+Left` / `Alt+Right` | 前一个/后一个连接（循环） |
 | 鼠标点击状态栏标签 | 切换到对应连接 |
 | `Ctrl+C` / `Ctrl+D` | 退出程序 |
 | `↑` / `↓` | 浏览命令历史 |
-| `PageUp` / `PageDown` | 向上/向下滚动查看历史输出（每次滚动半屏） |
-| `Home` | 光标移到输入框行首 |
-| `End` | 输入框为空时回到输出底部，有内容时光标移到行尾 |
-| `Ctrl+A` | 跳到输入框行首（同 Home） |
-| `Ctrl+E` | 跳到输入框行尾 |
-| `Backspace` | 删除光标前一个字符 |
-| `Delete` | 删除光标后一个字符 |
-| `Ctrl+U` | 清除从行首到光标的全部内容 |
-| `Ctrl+K` | 清除从光标到行尾的全部内容 |
-| `Ctrl+W` | 删除光标前的一个单词（含前导空格） |
+| `PageUp` / `PageDown` | 向上/向下滚动查看历史输出（每次半屏） |
+| `Home` | 光标移到行首 |
+| `End` | 输入框为空时回到输出底部，有内容时到行尾 |
+| `Ctrl+A` / `Ctrl+E` | 跳到行首 / 行尾 |
+| `Ctrl+U` / `Ctrl+K` | 清除行首到光标 / 光标到行尾 |
+| `Ctrl+W` | 删除光标前一个单词 |
+
+### 文本复制
+
+鼠标处于应用模式，按住 **Shift** 键拖拽选择文本：
+
+- `Shift + 鼠标拖拽` 选中
+- `Ctrl+Shift+C` 复制（Windows Terminal / GNOME Terminal 等）
+- 鼠标右键复制（Windows Terminal 默认行为）
+- Linux 下选中自动复制到选择缓冲区，鼠标中键粘贴
+- `Ctrl+C` 会退出客户端，请勿用于复制
 
 ---
 
@@ -351,58 +233,42 @@ socks5_password = "pass"   # 可选
 | 命令 | 说明 |
 |------|------|
 | `/connect <名> <主机:端口>` | 添加并连接新角色 |
-| `/connect <名> <主机> <端口>` | 同上 |
 | `/disconnect [编号]` | 断开连接（保留 session） |
 | `/reconnect [编号]` | 断开并重新连接 |
 | `/close [编号]` | 彻底关闭并移除 session |
 | `/list` | 列出所有连接及状态 |
 | `/load <脚本路径>` | 为前台连接加载 Lua 脚本 |
-| `/load reload` | 重新加载前台连接的 Lua 脚本（保留变量状态） |
-| `/reload` | 同上，快捷方式 |
-| `/switch <角色名\|编号>` `/sw <角色名\|编号>` | 切换到指定连接 |
-| `/profile list` | 列出 `profiles/` 目录下所有可用角色配置 |
-| `/profile load <角色名>` | 从 `profiles/<角色名>.toml` 加载配置并连接（无需重启） |
-| `/all <命令>` | 向所有连接发送指令。支持 MUD 命令广播（如 `/all look`）与客户端命令广播（如 `/all /reload`），客户端命令仅允许 `/lua`、`/reload`、`/load`、`/list`、`/disconnect`、`/reconnect` |
-| `/lua <Lua 代码>` | 直接执行 Lua 代码 |
-| `/set keep_command on\|off` | 设置 Enter 后是否保留命令栏输入内容 |
-| `/set render_interval <毫秒>` | 设置渲染间隔（50-10000ms），仅在非实时模式下生效 |
-| `/set realtime on\|off` | 切换实时渲染模式（on=实时渲染，off=节流渲染） |
+| `/load reload` / `/reload` | 重新加载前台脚本（保留变量状态） |
+| `/switch <角色名\|编号>` / `/sw` | 切换到指定连接 |
+| `/profile list` | 列出可用角色配置 |
+| `/profile load <角色名>` | 加载配置并连接（无需重启） |
+| `/all <命令>` | 向所有连接发送指令 |
+| `/lua <代码>` | 直接执行 Lua 代码 |
+| `/set keep_command on\|off` | Enter 后是否保留命令栏内容 |
+| `/set render_interval <毫秒>` | 设置渲染间隔（50-10000ms） |
+| `/set realtime on\|off` | 切换实时渲染模式 |
 
 ---
 
-## 文本复制
+## Lua 脚本 API
 
-由于启用了鼠标点击追踪（状态栏点击切换连接），鼠标处于"应用模式"。
-需要**按住 Shift 键**的同时用鼠标拖拽来选择文本：
+本客户端实现了 MUSHclient 的部分常用 API。完整 API 文档见 [help/api/](help/api/) 目录。
 
-- **Shift + 鼠标拖拽**选中文本
-- 选中后按 `Ctrl+Shift+C` 复制（Windows Terminal / GNOME Terminal 等）
-- 或**鼠标右键**复制（Windows Terminal 默认行为）
-- Linux 下选中文本会自动复制到选择缓冲区，按**鼠标中键**粘贴
-- **注意**: `Ctrl+C` 会退出客户端，请勿用于复制
-
----
-
-## MUSHclient 兼容 API
+> **兼容性提示**：如你的脚本使用了未实现的 API（`Accelerator`、`AddFont`、`ArrayCreate` 等），将无法正常运行。使用前请确认脚本中调用的所有 API 都在兼容范围内。
 
 ### 触发器
 
 | API | 说明 |
 |-----|------|
-| `AddTrigger(name, match, response, flags, ...)` | 注册触发器 |
-| `AddTriggerEx(...)` | 扩展版触发器注册 |
+| `AddTrigger` / `AddTriggerEx` | 注册触发器 |
 | `DeleteTrigger(name)` | 删除触发器 |
-| `EnableTrigger(name, enable)` | 启用/禁用触发器 |
-| `EnableTriggerGroup(group, enable)` | 按组启用/禁用触发器 |
-| `GetTriggerList()` | 获取触发器名称列表 |
-| `GetTriggerInfo(name, code)` | 获取触发器信息 |
-| `SetTriggerOption(name, option, value)` | 设置触发器选项 |
+| `EnableTrigger(group, enable)` | 启用/禁用 |
+| `EnableTriggerGroup(group, enable)` | 按组启用/禁用 |
+| `GetTriggerList()` | 获取名称列表 |
+| `GetTriggerInfo(name, code)` | 获取信息 |
+| `SetTriggerOption(name, option, value)` | 设置选项 |
 
-**回调签名**: `function(name, line, wildcards, styles)`
-- `wildcards[0]` = 完整匹配文本（MUSHclient 兼容）
-- `wildcards[1]` = 第一个捕获组，依此类推
-- `styles` = 样式运行片段表（模拟输出时不传），可通过 `GetStyle(styles, pos)` 查询指定位置的文本颜色
-- 支持 `omit_from_output` 选项（匹配行不显示到终端）
+回调：`function(name, line, wildcards, styles)`，`wildcards[0]` = 完整匹配文本。
 
 ### 别名
 
@@ -410,228 +276,114 @@ socks5_password = "pass"   # 可选
 |-----|------|
 | `AddAlias(name, match, response, flags, [script])` | 注册别名 |
 | `DeleteAlias(name)` | 删除别名 |
-| `GetAliasInfo(name, code)` | 获取别名信息（1=匹配文本, 6=启用, 16=组, 18=发送位置等） |
-| `GetAliasList()` | 获取别名名称列表 |
-| `SetAliasOption(name, option, value)` | 设置别名选项 |
-
-**回调签名**: `function(name, line, wildcards)`
-- `wildcards[0]` = 原始输入
-- `wildcards[1]` = 第一个捕获组
+| `GetAliasInfo(name, code)` / `GetAliasList()` | 获取信息/列表 |
+| `SetAliasOption(name, option, value)` | 设置选项 |
 
 ### 定时器
 
 | API | 说明 |
 |-----|------|
 | `AddTimer(name, h, m, s, command, flags, [script])` | 注册定时器 |
-| `DeleteTimer(name)` | 删除定时器 |
-| `EnableTimer(name, enable)` | 启用/禁用定时器 |
-| `EnableTimerGroup(group, enable)` | 按组启用/禁用定时器 |
-| `GetTimerList()` | 获取定时器名称列表 |
-| `GetTimerInfo(name, code)` | 获取定时器信息 |
-| `SetTimerOption(name, option, value)` | 设置定时器选项 |
-| `ResetTimer(name)` | 重置定时器计时 |
+| `DeleteTimer(name)` / `ResetTimer(name)` | 删除/重置 |
+| `EnableTimer(name, enable)` / `EnableTimerGroup(...)` | 启用/禁用 |
+| `GetTimerList()` / `GetTimerInfo(name, code)` | 获取信息 |
+| `SetTimerOption(name, option, value)` | 设置选项 |
 
 ### 命令与输出
 
 | API | 说明 |
 |-----|------|
-| `send(cmd)` / `Execute(cmd)` | 发送命令到服务器 |
+| `Send(cmd)` / `Execute(cmd)` | 发送命令到服务器 |
 | `DiscardQueue()` | 清空命令队列 |
-| `DoAfter(seconds, command)` | 延迟执行命令 |
-| `DoAfterNote(seconds, text)` | 延迟输出文本到窗口 |
-| `DoAfterSpecial(seconds, text, send_to)` | 延迟发送到指定位置 |
-| `DoAfterSpeedWalk(seconds, text)` | 延迟执行 speedwalk |
-| `Note(msg)` | 输出文本 |
-| `Tell(msg)` | 内联输出（不换行） |
-| `print(...)` | 标准 Lua print，重定向到输出窗口 |
+| `DoAfter(seconds, command)` | 延迟执行命令（支持 DoAfterNote / DoAfterSpecial / DoAfterSpeedWalk） |
+| `Note(text)` / `Tell(text)` / `print(...)` | 输出文本 |
 | `ColourNote(fg, bg, msg)` | 彩色输出 |
+| `Simulate(text)` | 模拟服务器输出 |
+| `SetStatus(text)` | 设置状态栏文本 |
 | `log(msg)` | 记录日志 |
-| `Simulate(text)` | 模拟服务器输出，触发 Lua 触发器 |
-| `SetStatus(text)` | 设置终端底部状态栏文本 |
-| `DeleteTemporaryTimers()` | 删除所有一次性定时器 |
 
 ### 变量
 
 | API | 说明 |
 |-----|------|
-| `GetVariable(name)` | 获取变量 |
-| `SetVariable(name, value)` | 设置变量 |
-| `DeleteVariable(name)` | 删除变量 |
-| `GetVariableList()` | 获取所有变量列表 |
+| `GetVariable(name)` / `SetVariable(...)` / `DeleteVariable(...)` | 变量管理 |
+| `GetVariableList()` | 获取所有变量 |
+| `get(key)` / `set(key, value)` | 简写接口 |
 
 ### 网络
 
 | API | 说明 |
 |-----|------|
-| `IsConnected()` | 是否已连接 |
-| `Connect()` | 请求连接 |
-| `Disconnect()` | 请求断开 |
-| `OnConnect()` | 连接回调（由 Lua 覆盖实现自定义初始化） |
-
-### 配置与信息
-
-| API | 说明 |
-|-----|------|
-| `GetInfo(code)` | 获取客户端信息（code=1 主机, 2 端口, 3 连接状态, 35 脚本目录等） |
-| `SetOption(key, value)` | 设置选项 |
-| `GetOption(key)` | 获取选项 |
-| `SetAlphaOption(key, value)` | 设置字符串选项 |
-| `GetAlphaOption(key)` | 获取字符串选项 |
-
-### 日志
-
-| API | 说明 |
-|-----|------|
-| `OpenLog(filename, append)` | 打开日志文件 |
-| `IsLogOpen()` | 检查日志是否已打开 |
-| `CloseLog()` | 关闭日志文件 |
+| `IsConnected()` / `Connect()` / `Disconnect()` | 连接控制 |
+| `OnConnect()` | 连接回调（由 Lua 覆盖实现） |
 
 ### 数据库
 
 | API | 说明 |
 |-----|------|
 | `sqlite3.open(path)` | 打开数据库 |
-| `conn:execute(sql)` | 执行 SQL |
-| `conn:close()` | 关闭数据库 |
-| `conn:set_gbk(enable)` | 设置数据库文本字段为 GBK 解码 |
-| `DatabaseClose()` | 兼容 MUSHclient 的关闭接口 |
+| `conn:execute(sql)` / `conn:close()` | 执行 SQL / 关闭 |
+| `conn:set_gbk(enable)` | 设置 GBK 解码 |
 
 ### 样式与颜色
 
 | API | 说明 |
 |-----|------|
-| `GetStyle(styles_table, position)` | 从样式表中查询指定位置的颜色样式（返回 textcolour / backcolour / bold 等字段） |
-| `RGBColourToName(colour)` | 将 ANSI 色号（0-15）映射为颜色名称（如 `0` → `"black"`） |
+| `GetStyle(styles_table, position)` | 从样式表查询指定位置颜色 |
+| `RGBColourToName(colour)` | ANSI 色号映射颜色名 |
 
 ### 工具函数
 
 | API | 说明 |
 |-----|------|
 | `GetUniqueNumber()` | 获取唯一递增编号 |
-| `Trim(str)` | 去除字符串首尾空白 |
-| `MakeRegularExpression(text)` | 将普通文本转义为安全正则 |
-| `GetPluginID()` | 获取插件 ID（兼容） |
+| `Trim(str)` | 去除首尾空白 |
 | `GetPluginInfo(id, code)` | 获取插件信息 |
+| `MakeRegularExpression(text)` | 文本转义为正则 |
 
-### 常量表
+### 扩展
+
+| API | 说明 |
+|-----|------|
+| `dofile(filename)` | 加载 Lua 脚本（自动 GBK 转码） |
+| `rex` | 正则模块 |
+| `bit` | 位运算（band / bor / bxor / bnot / lshift / rshift） |
+| `json_encode(val)` / `json_decode(str)` | JSON 序列化/反序列化 |
+| `SendPkt(data)` | 发送原始数据包 |
+
+### 标志位常量
 
 | 常量表 | 说明 |
 |--------|------|
 | `trigger_flag` | 触发器标志位 |
 | `alias_flag` | 别名标志位 |
 | `timer_flag` | 定时器标志位 |
-| `custom_colour` | 自定义颜色 |
 | `error_code` / `error_desc` | 错误码与描述 |
 
-**trigger_flag**:
-| 常量 | 值 | 说明 |
-|------|-----|------|
-| `Enabled` | 1 | 启用 |
-| `OmitFromLog` | 2 | 不记日志 |
-| `OmitFromOutput` | 4 | 不显示输出 |
-| `KeepEvaluating` | 8 | 继续求值 |
-| `IgnoreCase` | 16 | 忽略大小写 |
-| `RegularExpression` | 32 | 正则匹配 |
-| `ExpandVariables` | 64 | 展开变量 |
-| `Replace` | 1024 | 同名替换 |
-| `LowercaseWildcard` | 2048 | 通配符小写 |
-| `Temporary` | 4096 | 临时 |
-| `OneShot` | 8192 | 一次性 |
-
-**alias_flag**:
-| 常量 | 值 | 说明 |
-|------|-----|------|
-| `Enabled` | 1 | 启用 |
-| `IgnoreCase` | 16 | 忽略大小写 |
-| `RegularExpression` | 32 | 正则匹配 |
-| `ExpandVariables` | 64 | 展开变量 |
-| `Replace` | 1024 | 同名替换 |
-| `Temporary` | 4096 | 临时 |
-
-**timer_flag**:
-| 常量 | 值 | 说明 |
-|------|-----|------|
-| `Enabled` | 1 | 启用 |
-| `AtTime` | 4 | 指定时刻触发 |
-| `Replace` | 1024 | 同名替换（继承旧定时器禁用状态） |
-| `Temporary` | 4096 | 临时 |
-| `OneShot` | 8192 | 一次性 |
-| `ActiveWhenClosed` | 16384 | 窗口关闭时仍运行 |
-
-### 内部与扩展
-
-| API | 说明 |
-|-----|------|
-| `dofile(filename)` | 加载并执行 Lua 脚本文件（自动处理 GBK 转码） |
-| `rex` | 正则表达式模块 |
-| `bit` | 位运算模块（band / bor / bxor / bnot / lshift / rshift） |
-| `trigger(name, data)` | 快速注册触发器 |
-| `alias(name, data)` | 快速注册别名 |
-| `timer(name, data)` | 快速注册定时器 |
-| `get(key)` | 获取变量 |
-| `set(key, value)` | 设置变量 |
-| `json_encode(value)` | 将 Lua 值序列化为 JSON |
-| `json_decode(json_str)` | 将 JSON 解析为 Lua 值 |
+常用值：`Enabled=1`、`KeepEvaluating=8`、`RegularExpression=32`、`Replace=1024`、`Temporary=4096`（触发器）/ `OneShot=8192`（定时器）。
 
 ---
 
-## 目录结构
+## 项目结构
 
 ```
-├── profiles/              # 角色配置文件（一个 .toml 一个角色）
-│   └── example.toml       # 示例配置（自动跳过）
+├── profiles/              # 角色配置文件
 ├── scripts/               # Lua 脚本
-│   ├── example.lua        # 示例脚本
 │   └── lua/               # Lua 依赖库（wait.lua 等）
-├── logs/                  # 日志文件（按连接分文件，按小时分割）
-├── help/                  # 客户端文档
-│   ├── api/               # Lua API 接口文档
-│   └── commands/          # 命令和 CLUI 操作指南
+├── logs/                  # 日志文件
+├── help/                  # 文档
+│   ├── api/               # Lua API 参考
+│   └── commands/          # 命令指南
 ├── src/
 │   ├── main.rs            # 入口
-│   ├── app.rs             # 应用主逻辑（终端 UI、命令处理、连接管理）
-│   ├── config.rs          # 配置解析（TOML profile 加载）
-│   ├── connection/        # 连接管理
-│   │   ├── manager.rs     # 连接管理器（多连接、重连）
-│   │   └── session.rs     # 单个会话（TCP、Lua 引擎绑定）
-│   ├── ui/                # 终端 UI
-│   │   ├── terminal.rs    # 终端渲染（屏幕缓冲、状态栏）
-│   │   ├── input.rs       # 输入处理
-│   │   └── ansi.rs        # ANSI SGR 解析器
-│   ├── log/               # 日志系统
-│   │   ├── logger.rs      # 按连接分文件、大小轮转
-│   │   └── panic_hook.rs  # panic 日志捕获（崩溃信息写入日志）
-│   └── lua/               # Lua 脚本引擎
-│       └── engine.rs      # LuaJIT 引擎、MUSHclient API 实现
-├── .github/               # GitHub Actions CI/CD
-│   └── workflows/
-│       ├── ci.yml         # 自动测试 + clippy + fmt
-│       ├── release.yml    # 打 tag 自动发布
-│       └── audit.yml      # 每周安全审计
+│   ├── app.rs             # 应用主逻辑
+│   ├── config.rs          # 配置解析
+│   ├── connection/        # 连接管理（manager.rs + session.rs）
+│   ├── ui/                # 终端 UI（terminal.rs / input.rs / ansi.rs）
+│   ├── log/               # 日志系统（logger.rs / panic_hook.rs）
+│   └── lua/               # Lua 引擎 + API 实现（engine.rs）
+├── .github/workflows/     # CI/CD
 └── Cargo.toml
-```
-
----
-
-## 数据交换接口（外部程序集成）
-
-客户端内置了 JSON 序列化和配置读写 API，外部程序可通过引擎的 `eval_to_string` 接口实现数据交互，无需直接解析日志或模拟输入。
-
-### JSON 序列化
-
-| API | 说明 |
-|-----|------|
-| `json_encode(value)` | 将 Lua 值序列化为 JSON 字符串（支持 nil、boolean、number、string、table 嵌套） |
-| `json_decode(json_str)` | 将 JSON 字符串反序列化为 Lua 值 |
-
-### 调用示例（Rust）
-
-```rust
-// 获取数据
-let json = engine.eval_to_string("return json_encode(my_table)");
-
-// 解析 JSON 到 Lua
-let result = engine.eval_to_string("return json_decode('{\"key\":\"value\"}')");
 ```
 
 ---
@@ -643,12 +395,11 @@ let result = engine.eval_to_string("return json_decode('{\"key\":\"value\"}')");
 | 异步运行时 | tokio |
 | 终端控制 | crossterm |
 | Lua 引擎 | mlua (LuaJIT) |
-| 正则匹配 | regex |
+| 正则 | regex |
 | 数据库 | rusqlite |
 | 配置解析 | toml + serde |
-| 编码处理 | encoding_rs |
-| 日志时间 | chrono |
-| SOCKS5 代理 | tokio-socks |
+| 编码 | encoding_rs |
+| SOCKS5 | tokio-socks |
 
 ---
 
@@ -656,148 +407,81 @@ let result = engine.eval_to_string("return json_decode('{\"key\":\"value\"}')");
 
 | 项目 | 要求 |
 |------|------|
-| 操作系统 | Linux（已测试）/ macOS / Windows（理论上支持） |
-| CPU | x86_64、i686 或 aarch64（LuaJIT 需要 JIT 支持的平台） |
-| 内存 | 最低 512MB（基础使用），2GB 推荐（10 连接） |
-| 终端 | 支持 UTF-8 和 ANSI 转义序列的终端（如 xterm、GNOME Terminal、iTerm2、Windows Terminal） |
-| Rust | 1.70+（edition 2021） |
+| 操作系统 | Linux（已测试）/ macOS / Windows |
+| CPU | x86_64、i686 或 aarch64 |
+| 内存 | 最低 512MB，推荐 2GB（10 连接） |
+| 终端 | 支持 UTF-8 + ANSI 转义序列 |
+| Rust 编译 | 1.70+（edition 2021） |
 
 ### 32 位平台 (i686)
 
-预编译二进制已支持 i686 架构。从源码编译时：
+预编译二进制已支持。从源码编译需安装 32 位工具链：
 
-1. 安装 32 位开发工具链：
-   ```bash
-   sudo dpkg --add-architecture i386
-   sudo apt update
-   sudo apt install gcc-multilib g++-multilib
-   ```
+```bash
+sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install gcc-multilib g++-multilib
+scripts/build.sh --arch i686
+```
 
-2. 使用构建脚本：
-   ```bash
-   scripts/build.sh --arch i686
-   ```
+> 32 位 LuaJIT 整数上限 2^31，MUD 脚本中的经验值、HP 等数值不受影响。
 
-> **注意**：32 位平台的 LuaJIT 整数上限为 2^31（约 21 亿），超过此值的整数运算会截断。MUD 脚本中的经验值、HP 等数值不受影响。
+---
 
 ## 故障排查
 
-开发阶段已硬编码启用 `RUST_BACKTRACE=1`，panic 时会自动打印堆栈信息并写入对应连接日志文件（`[PNC]` 前缀）。正式版发布前会移除此设置，届时如需调试可手动设置：
+如需调试信息，启动前设置环境变量：
 
 ```bash
 export RUST_BACKTRACE=1
 ./RustLuaMud
 ```
 
+panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀）。
+
 ---
 
 ## CI/CD
 
-### GitHub Actions
+项目使用 GitHub Actions 实现自动化：
 
-项目使用 GitHub Actions 实现自动化工作流：
-
-- **CI** — 每次 push/PR 自动运行测试、clippy 检查、fmt 格式化验证
-- **Release** — 打 tag 后自动构建并发布二进制（基于 Ubuntu 22.04，glibc 2.35）
-- **Nightly** — 每次 push main 自动构建并更新 [nightly release](https://github.com/llps112/RustLuaMud/releases/tag/nightly)
-- **Audit** — 每周自动进行依赖安全审计
-- **Dependabot** — 依赖自动更新 PR
-
-### Gitee Release 同步
-
-Nightly 构建完成后，GitHub Actions 会自动将二进制同步到 [Gitee Release](https://gitee.com/bai-yifei180/RustLuaMud/releases)，方便国内用户下载。
-
-#### 配置方法
-
-1. 在 [Gitee 个人设置 - 私人令牌](https://gitee.com/profile/personal_access_tokens) 创建一个令牌，勾选 `projects` 权限
-2. 在 GitHub 仓库的 **Settings → Secrets and variables → Actions → Repository secrets** 中添加 `GITEE_TOKEN`，值填入上一步生成的令牌
-3. 之后每次 push 到 main 分支，GitHub Actions 会自动构建并同步 nightly 二进制到 Gitee Release
-
-### Gitee Go 流水线（备选方案）
-
-如果希望完全脱离 GitHub，在 Gitee 上完成 CI/CD，可以参考 `.gitee/workflows/nightly.yml` 在 Gitee 仓库中配置流水线。
-
-> **注意**：Gitee Go 个人版暂无原生 Rust 构建插件，上述参考配置使用 GCC 构建环境手动安装 Rust 工具链。首次构建因依赖下载较慢，后续会缓存加速。
+- **CI** — 每次 push/PR 自动运行测试、clippy、fmt 检查
+- **Release** — 打 tag 自动构建 GitHub Release
+- **Nightly** — 每次 push main 自动构建并同步到 [GitHub](https://github.com/llps112/RustLuaMud/releases/tag/nightly) 和 [Gitee](https://gitee.com/bai-yifei180/RustLuaMud/releases) Release
+- **Audit** — 每周自动依赖安全审计
 
 ---
 
 ## 版本历史
 
-### v0.2.1 (2026-07-14)
+### v0.3.0 (2026-07-22)
+- 新增 Rust 侧命令发送物理限速（`cmd_interval_ms` 配置项），配合 Lua 侧 burst 控制形成双层限速保护
+- 新增 Gitee Release 自动同步（Nightly 构建）
+- 新增 i686 架构预编译构建
+- 新增 i686 架构构建脚本 `scripts/build.sh --arch i686`
+- 优化命令限速算法：从漏桶算法回归 burst 计数 + 动态补偿等待
 
-- 修复 `connect_delay_ms` 延迟触发机制，确保在定时器中正确检查并执行待触发的 OnConnect
+### v0.2.1 (2026-07-14)
+- 修复 `connect_delay_ms` 延迟触发机制
 
 ### v0.2.0 (2026-07-14)
+- `bootstrap.sh` 改为一键初始化脚本
+- 新增游戏脚本自动部署支持
+- 修复目录/文件冲突处理
 
-- `bootstrap.sh` 改为一键初始化脚本，自动完成目录创建、二进制下载和示例配置生成
-- 新增游戏脚本自动部署步骤，支持从私有仓库同步 Lua 脚本
-- 修复 `$HOME/RustLuaMud` 已存在为文件时的冲突处理
+### v0.1.0 ~ v0.1.9 (2026-06-10 ~ 2026-07-14)
+- 完整实现 MUSHclient 兼容 API
+- 多连接管理、SOCKS5 代理、输出历史滚动
+- ANSI SGR 解析、GBK 编码兼容
+- SQLite3 集成、JSON 序列化
+- 可配置渲染频率、连接延迟
+- 629+ 单元测试
 
-### v0.1.9 (2026-07-14)
+---
 
-- 修复服务器宕机时客户端因 TCP 无超时而完全冻结无响应的问题
-- 添加 nightly 自动构建工作流，切换 musl 静态编译（后回退到 glibc）
+## 外部程序集成
 
-### v0.1.8 (2026-07-14)
+客户端支持通过 `json_encode` / `json_decode` API 与外部程序交换数据：
 
-- 实现可配置的渲染频率功能（`render_interval` 和 `realtime` 配置项）
-- 修复节流模式下 Lua 日志与 MUD 数据不同步的问题
-
-### v0.1.7 (2026-07-14)
-
-- 实现 `AddTriggerEx`/`AddTrigger`/`AddAlias` 的 Replace 标志（1024），支持同名替换
-- 新增 `GetStyle`/`RGBColourToName` API，触发器回调支持颜色样式信息
-
-### v0.1.6 (2026-07-14)
-
-- 状态栏 UI 改进：选中 session tab 改为粗体白字蓝底，图标移入选 tab 内部
-- 日志文件名添加日期后缀（YYMMDD_HH），正确滚动保留最近 24 个文件
-- 新增 `/reconnect` 命令，开放 `/all` 命令白名单
-
-### v0.1.5 (2026-07-14)
-
-- 新增 `connect_delay_ms` 配置项，连接建立后延迟发送命令（OnConnect 立即执行），防止瞬间批量发送指令触发服务器反 flood 机制（默认延迟 1000ms）
-
-### v0.1.4 (2026-06-22)
-
-- 实现 GetStyle / RGBColourToName API，触发器回调新增第 4 参数 `styles`（颜色样式信息）
-- 修复 session 输入缓冲区独立性问题
-- 修复 `/close` 命令导致的级联重连 bug
-- 为 `dofile` 添加递归深度限制，防止意外死循环
-- 修复 `AddTimer` 的 `response_text` 处理逻辑
-- 修复 `channel-closed` 错误日志泛滥问题
-
-### v0.1.3 (2026-06-20)
-
-- 实现独立 session 输入缓冲区，各连接输入互不干扰
-- 修复 logger 测试 flaky 问题
-
-### v0.1.2 (2026-06-15)
-
-- 修复 `Execute()` 命令绕过别名匹配的问题，确保 Lua 脚本中的命令也经过别名系统处理
-- 新增 `--profiles` 命令行参数，支持多实例运行（每个实例使用不同的配置目录）
-- 实现输出历史滚动功能：PageUp/PageDown 翻页查看，End 键回到底部，新输出不影响当前浏览位置
-- 实现 SOCKS5 代理支持，每个角色可独立配置代理服务器（支持认证）
-- 新增 629 个单元测试，覆盖核心功能
-
-### v0.1.1 (2026-06-10)
-
-- 新增 `help/` 文档目录，涵盖 Lua API、CLUI 操作指南等 18 个文档
-- 修复 `AddTimer` Replace 标志不继承旧定时器禁用状态的问题
-- 重构 `OnConnect` 回调抽象接口，替代直接调用 `alias.atconnect`
-- 修复连接初始化时命令队列未及时发送的问题
-- 清理调试输出和游戏脚本耦合内容
-
-### v0.1.0 (2026-06-10)
-
-- 完整实现 MUSHclient 兼容 API（触发器、别名、定时器、变量、数据库等）
-- 触发器 `wildcards` 表支持 `w[0]` 完整匹配文本（MUSHclient 兼容）
-- 多行触发器支持（`multi_line` + `lines_to_match`）
-- GBK 字节模式正则匹配 + UTF-8 正则匹配双模式
-- SQLite3 数据库集成，支持 GBK 文本解码
-- Simulate API（模拟服务器输出触发触发器）
-- SetStatus API（状态栏文本）
-- ANSI SGR 解析器（终端彩色显示）
-- 终端设置持久化（`keep_command` 选项）
-- `/load reload` 保留 Lua 变量状态
-- 26+ 单元测试覆盖触发器、别名、配置解析等核心模块
+```rust
+// Rust 侧获取 Lua 数据
+let json = engine.eval_to_string("return json_encode(my_table)");
+```
