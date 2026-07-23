@@ -100,6 +100,8 @@ if ! curl -fsSL --http1.1 --retry 3 -o "$TMP_TAR" "$BINARY_URL"; then
     rm -f "$TMP_TAR"
     exit 1
 fi
+# 先删除旧二进制（运行中可删，Linux 仅 unlink 目录项，inode 保持打开）
+rm -f "$DATA_DIR/RustLuaMud"
 tar xzf "$TMP_TAR" -C "$DATA_DIR"
 rm -f "$TMP_TAR"
 echo "    ✓ 解压完成"
