@@ -52,10 +52,10 @@ if [ "$USE_GITEE" = true ]; then
         LATEST_TAG=$(curl -sS "https://gitee.com/api/v5/repos/bai-yifei180/RustLuaMud/releases" | python3 -c "
 import sys, json
 releases = json.load(sys.stdin)
-for r in releases:
-    if r['tag_name'] != 'nightly':
-        print(r['tag_name'])
-        break
+# 排除 nightly，按语义版本号排序取最高版本
+tags = [r['tag_name'] for r in releases if r['tag_name'] != 'nightly']
+sorted_tags = sorted(tags, key=lambda t: [int(x) for x in t.lstrip('v').split('.')])
+print(sorted_tags[-1])
 " 2>/dev/null || echo "")
         if [ -n "$LATEST_TAG" ]; then
             BINARY_URL="https://gitee.com/bai-yifei180/RustLuaMud/releases/download/${LATEST_TAG}/RustLuaMud-${ARCH}.tar.gz"
