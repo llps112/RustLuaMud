@@ -49,7 +49,14 @@ if [ "$USE_GITEE" = true ]; then
         BINARY_URL="https://gitee.com/bai-yifei180/RustLuaMud/releases/download/nightly/RustLuaMud-${ARCH}.tar.gz"
         CHANNEL_LABEL="nightly (Gitee)"
     else
-        LATEST_TAG=$(curl -sS "https://gitee.com/api/v5/repos/bai-yifei180/RustLuaMud/releases/latest" | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])" 2>/dev/null || echo "")
+        LATEST_TAG=$(curl -sS "https://gitee.com/api/v5/repos/bai-yifei180/RustLuaMud/releases" | python3 -c "
+import sys, json
+releases = json.load(sys.stdin)
+for r in releases:
+    if r['tag_name'] != 'nightly':
+        print(r['tag_name'])
+        break
+" 2>/dev/null || echo "")
         if [ -n "$LATEST_TAG" ]; then
             BINARY_URL="https://gitee.com/bai-yifei180/RustLuaMud/releases/download/${LATEST_TAG}/RustLuaMud-${ARCH}.tar.gz"
             CHANNEL_LABEL="stable (Gitee)"
