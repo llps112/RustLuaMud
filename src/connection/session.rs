@@ -471,6 +471,7 @@ impl Session {
         tokio::spawn(async move {
             use tokio::select;
             let mut last_cmd_time = std::time::Instant::now();
+            let cmd_interval = std::time::Duration::from_millis(cmd_interval_ms);
             loop {
                 select! {
                     maybe_cmd = send_rx.recv() => {
@@ -478,7 +479,6 @@ impl Session {
                             Some(cmd) => {
                                 // 限速：确保命令之间至少有 cmd_interval_ms 的间隔
                                 let elapsed = last_cmd_time.elapsed();
-                                let cmd_interval = std::time::Duration::from_millis(cmd_interval_ms);
                                 if elapsed < cmd_interval {
                                     tokio::time::sleep(cmd_interval - elapsed).await;
                                 }
