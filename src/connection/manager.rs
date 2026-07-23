@@ -28,6 +28,12 @@ pub struct ConnectionManager {
     event_tx: mpsc::Sender<ManagerEvent>,
 }
 
+impl Default for ConnectionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConnectionManager {
     pub fn new() -> Self {
         let (event_tx, event_rx) = mpsc::channel(512);
