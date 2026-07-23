@@ -49,9 +49,13 @@
 | x86_64 / i686 Linux，即下即用 | [预编译二进制](#方式一下载预编译二进制) |
 | ARM64 / 需要改客户端代码 | [从源码编译](#方式二从源码编译) |
 
-> 国内用户可使用 `--gitee` 参数从 Gitee 镜像下载：
+> **国内镜像加速**：`--gitee` 参数从 Gitee 下载，支持 stable 和 nightly 两种版本：
 > ```bash
+> # 稳定版（推荐）
 > bash <(curl -Ls https://gitee.com/bai-yifei180/RustLuaMud/raw/main/scripts/bootstrap.sh) --gitee
+>
+> # Nightly 版
+> bash <(curl -Ls https://gitee.com/bai-yifei180/RustLuaMud/raw/main/scripts/bootstrap.sh) --nightly --gitee
 > ```
 
 ### 方式一：下载预编译二进制

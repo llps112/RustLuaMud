@@ -45,10 +45,20 @@ ARCH=$(detect_arch)
 
 # 根据 channel 和镜像源决定下载 URL
 if [ "$USE_GITEE" = true ]; then
-    # Gitee 镜像（仅 nightly 同步到 Gitee Release）
-    RELEASE_CHANNEL="nightly"
-    BINARY_URL="https://gitee.com/bai-yifei180/RustLuaMud/releases/download/nightly/RustLuaMud-${ARCH}.tar.gz"
-    CHANNEL_LABEL="nightly (Gitee)"
+    if [ "$RELEASE_CHANNEL" = "nightly" ]; then
+        BINARY_URL="https://gitee.com/bai-yifei180/RustLuaMud/releases/download/nightly/RustLuaMud-${ARCH}.tar.gz"
+        CHANNEL_LABEL="nightly (Gitee)"
+    else
+        LATEST_TAG=$(curl -sS "https://gitee.com/api/v5/repos/bai-yifei180/RustLuaMud/releases/latest" | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])" 2>/dev/null || echo "")
+        if [ -n "$LATEST_TAG" ]; then
+            BINARY_URL="https://gitee.com/bai-yifei180/RustLuaMud/releases/download/${LATEST_TAG}/RustLuaMud-${ARCH}.tar.gz"
+            CHANNEL_LABEL="stable (Gitee)"
+        else
+            # 降级到 nightly
+            BINARY_URL="https://gitee.com/bai-yifei180/RustLuaMud/releases/download/nightly/RustLuaMud-${ARCH}.tar.gz"
+            CHANNEL_LABEL="nightly (Gitee fallback)"
+        fi
+    fi
 else
     if [ "$RELEASE_CHANNEL" = "nightly" ]; then
         BINARY_URL="https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-${ARCH}.tar.gz"
