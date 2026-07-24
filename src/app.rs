@@ -855,24 +855,40 @@ impl App {
                 if !alias_handled {
                     // 无别名匹配，直接发送到 MUD
                     self.logger.log_command(&name, &cmd);
-                    if let Err(e) = self.manager.send_to(session_id, &cmd) {
-                        self.terminal.append_output(&format!("[发送错误] {}", e))?;
+                    if self.is_session_connected(session_id) {
+                        if let Err(e) = self.manager.send_to(session_id, &cmd) {
+                            self.terminal.append_output(&format!("[发送错误] {}", e))?;
+                        }
                     }
                 }
                 depth += 1;
             } else {
                 // 超过嵌套深度，直接发送防止无限递归
                 self.logger.log_command(&name, &cmd);
-                if let Err(e) = self.manager.send_to(session_id, &cmd) {
-                    self.terminal.append_output(&format!("[发送错误] {}", e))?;
+                if self.is_session_connected(session_id) {
+                    if let Err(e) = self.manager.send_to(session_id, &cmd) {
+                        self.terminal.append_output(&format!("[发送错误] {}", e))?;
+                    }
                 }
             }
         }
         Ok(())
     }
 
+    /// 检查指定 session 是否处于已连接状态（用于断线保护守卫）
+    fn is_session_connected(&self, session_id: SessionId) -> bool {
+        self.manager
+            .get_by_id(session_id)
+            .map(|s| s.state == crate::connection::SessionState::Connected)
+            .unwrap_or(false)
+    }
+
     /// 发送 Lua 引擎产生的原始数据包（SendPkt 压入的）
     fn send_lua_raw(&mut self, session_id: SessionId) -> io::Result<()> {
+        // 断线 session 跳过原始包发送，静默丢弃
+        if !self.is_session_connected(session_id) {
+            return Ok(());
+        }
         let raw_packets = self
             .manager
             .get_by_id(session_id)
@@ -891,6 +907,10 @@ impl App {
     /// 处理定时器触发（轮询模式：检查所有到期定时器）
     fn handle_timer(&mut self, session_id: SessionId) -> io::Result<()> {
         if self.manager.get_by_id(session_id).is_none() {
+            return Ok(());
+        }
+        // 断线 session 跳过所有 Lua 定时器处理，避免通过已关闭通道发送数据产生错误刷屏
+        if !self.is_session_connected(session_id) {
             return Ok(());
         }
         let mut any_fired = false;
@@ -1998,6 +2018,11 @@ impl App {
                     // 同步 Lua 引擎的连接状态（同步到对应 session，不限于前台）
                     if let Some(ref mut engine) = session.lua_engine {
                         engine.set_connected(matches!(state, SessionState::Connected));
+                    }
+                    // 断线时清理发送通道，避免 Lua 引擎通过已关闭通道发送数据触发"channel closed"错误刷屏
+                    if state == SessionState::Disconnected {
+                        session.send_tx = None;
+                        session.send_raw_tx = None;
                     }
                 }
                 if id == self.manager.foreground_id {

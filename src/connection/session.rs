@@ -108,9 +108,9 @@ pub struct Session {
     pub cmd_interval_ms: u64,
 
     // 发送命令的通道
-    send_tx: Option<mpsc::Sender<String>>,
+    pub(crate) send_tx: Option<mpsc::Sender<String>>,
     /// 发送原始数据包的通道
-    send_raw_tx: Option<mpsc::Sender<Vec<u8>>>,
+    pub(crate) send_raw_tx: Option<mpsc::Sender<Vec<u8>>>,
     /// 取消信号发送端：shutdown() 时发送信号让读任务静默退出
     cancel_tx: Option<oneshot::Sender<()>>,
     /// 定时器轮询任务的取消信号发送端
