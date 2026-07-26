@@ -7161,6 +7161,31 @@ mod tests {
     }
 
     #[test]
+    fn test_process_output_omit_gbk_with_trailing_text() {
+        with_engine(|engine| {
+            // 模拟 linktri 模式：中文 + \w*，匹配真实服务器输出 "你正忙着呢，先忍忍吧"
+            // 需要 flag=1065 = KeepEvaluating(8) + RegularExpression(32) + Replace(1024) + Enabled(1)
+            exec(
+                engine,
+                "AddTriggerEx('noecho_test', '^(> > > |> > |> |)(你正忙着呢\\\\w*|你现在不忙\\\\w*)', '', 1065, -1, 0, '', '', 0, 10)",
+            )
+            .unwrap();
+            exec(
+                engine,
+                "SetTriggerOption('noecho_test', 'omit_from_output', true)",
+            )
+            .unwrap();
+            // 模式应匹配前缀 "你正忙着呢"（\w* 匹配零个单词字符）
+            assert!(
+                engine.process_output("你正忙着呢，先忍忍吧"),
+                "linktri 模式应匹配 '你正忙着呢' 前缀"
+            );
+            // 不匹配项
+            assert!(!engine.process_output("完全不相关的内容"));
+        });
+    }
+
+    #[test]
     fn test_add_trigger_omit_from_output_flag_bit() {
         with_engine(|engine| {
             // flag 5 = 1(Enabled) + 4(eOmitFromOutput)，通过 flag 位直接设置 omit
