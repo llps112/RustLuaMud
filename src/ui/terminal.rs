@@ -18,6 +18,20 @@ pub struct ClickRegion {
     pub session_id: SessionId,
 }
 
+/// 浮动面板（overlay，绘制在输出区之上）
+#[derive(Debug, Clone)]
+pub struct Panel {
+    pub name: String,
+    /// 列位置（负数 = 从右边缘往左偏移）
+    pub x: i16,
+    /// 行位置（负数 = 从底边缘往上偏移）
+    pub y: i16,
+    pub width: u16,
+    pub height: u16,
+    /// 预分割的行内容（每行可含 ANSI 转义序列）
+    pub lines: Vec<String>,
+}
+
 /// 提取字符串中最后一组 CSI SGR 序列（形如 \x1b[...m），返回完整序列
 fn extract_last_sgr(s: &str) -> Option<String> {
     let mut last = None;
@@ -44,6 +58,86 @@ fn extract_last_sgr(s: &str) -> Option<String> {
 /// 终端驱动会按当前光标列位置执行 TAB 跳格，与 MushClient 行为一致
 fn expand_tabs(s: &str) -> String {
     s.to_string()
+}
+
+/// 将一行文本按可见宽度拆分为多个段
+/// - ANSI 转义序列不计入宽度
+/// - CJK 字符按 2 cell 计宽
+/// - 跨段保持颜色状态（每段以当前 SGR 前缀开头，以 reset 结尾）
+fn wrap_line_to_width(line: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![line.to_string()];
+    }
+
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    // 累积 SGR 状态（自上次 reset 以来的所有 SGR 序列）
+    let mut sgr_state = String::new();
+
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            // 收集完整 CSI 序列（按 ECMA-48 规范）
+            let mut seq = String::from("\x1b[");
+            chars.next(); // consume '['
+                          // 参数字节 0x30-0x3F + 中间字节 0x20-0x2F
+            while let Some(&next) = chars.peek() {
+                if ('\x30'..='\x3f').contains(&next) || ('\x20'..='\x2f').contains(&next) {
+                    seq.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            // final byte 0x40-0x7E
+            let is_sgr = if let Some(&fb) = chars.peek() {
+                if ('\x40'..='\x7e').contains(&fb) {
+                    seq.push(fb);
+                    chars.next();
+                    fb == 'm'
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if is_sgr {
+                // SGR 序列：更新状态
+                if seq == "\x1b[0m" || seq == "\x1b[00m" {
+                    sgr_state.clear();
+                } else {
+                    sgr_state.push_str(&seq);
+                }
+            }
+            current.push_str(&seq);
+        } else {
+            let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            if cw > 0 && current_width + cw > max_width {
+                // 当前行已满：保存当前段，开启新段
+                if !sgr_state.is_empty() {
+                    current.push_str("\x1b[0m");
+                }
+                segments.push(std::mem::take(&mut current));
+                if !sgr_state.is_empty() {
+                    current.push_str(&sgr_state);
+                }
+                current_width = 0;
+            }
+            current.push(c);
+            current_width += cw;
+        }
+    }
+
+    if !current.is_empty() {
+        segments.push(current);
+    }
+
+    if segments.is_empty() {
+        segments.push(String::new());
+    }
+
+    segments
 }
 
 /// 将字符索引转换为字节偏移量
@@ -223,6 +317,8 @@ pub struct TerminalState {
     pub scroll_offset: usize,
     /// 状态栏可点击区域
     pub status_bar_regions: Vec<ClickRegion>,
+    /// 浮动面板列表
+    pub panels: Vec<Panel>,
 }
 
 impl TerminalState {
@@ -250,6 +346,7 @@ impl TerminalState {
             last_ansi_sgr: String::new(),
             scroll_offset: 0,
             status_bar_regions: Vec::new(),
+            panels: Vec::new(),
         }
     }
 
@@ -687,6 +784,60 @@ impl TerminalState {
         &self.output_lines[start..end]
     }
 
+    /// 插入或替换同名浮动面板
+    pub fn set_panel(
+        &mut self,
+        name: &str,
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+        lines: Vec<String>,
+    ) {
+        if let Some(panel) = self.panels.iter_mut().find(|p| p.name == name) {
+            panel.x = x;
+            panel.y = y;
+            panel.width = width;
+            panel.height = height;
+            panel.lines = lines;
+        } else {
+            self.panels.push(Panel {
+                name: name.to_string(),
+                x,
+                y,
+                width,
+                height,
+                lines,
+            });
+        }
+    }
+
+    /// 移除浮动面板
+    pub fn remove_panel(&mut self, name: &str) {
+        self.panels.retain(|p| p.name != name);
+    }
+
+    /// 将面板的相对坐标解析为绝对坐标
+    /// x < 0: 从右边缘往左偏移；y < 0: 从底边缘往上偏移
+    fn resolve_panel_position(&self, panel: &Panel) -> (u16, u16) {
+        let abs_x = if panel.x < 0 {
+            (self.width as i16 + panel.x).max(0) as u16
+        } else {
+            panel.x as u16
+        };
+        // y=0 是状态栏，面板从 status_height 开始
+        let output_top = self.status_height;
+        let output_bottom = self
+            .height
+            .saturating_sub(self.lua_status_height + self.input_height);
+        let abs_y = if panel.y < 0 {
+            (output_bottom as i16 + panel.y).max(output_top as i16) as u16
+        } else {
+            output_top + panel.y as u16
+        };
+        (abs_x, abs_y)
+    }
+
     /// 获取输入行显示内容（考虑滚动）
     pub fn input_display(&self) -> (String, usize) {
         use unicode_width::UnicodeWidthChar;
@@ -788,7 +939,7 @@ impl Terminal {
         Ok(())
     }
 
-    /// 完整刷新屏幕（包括状态栏 + 输出区 + 输入行）
+    /// 完整刷新屏幕（包括状态栏 + 输出区 + 面板 + 输入行）
     fn refresh_all(&self, stdout: &mut io::Stdout) -> io::Result<()> {
         // session 状态栏（顶部）
         if let Some(ref bar) = self.state.status_bar_cache {
@@ -798,6 +949,7 @@ impl Terminal {
         }
 
         self.draw_output_area(stdout)?;
+        self.draw_panels(stdout)?;
 
         // Lua 状态栏（输出区下方、输入行上方）
         let lua_bar_y = self
@@ -818,9 +970,10 @@ impl Terminal {
         Ok(())
     }
 
-    /// 仅刷新输出区和输入行（不重绘状态栏，避免闪烁）
+    /// 仅刷新输出区、面板和输入行（不重绘状态栏，避免闪烁）
     fn refresh_output_area(&self, stdout: &mut io::Stdout) -> io::Result<()> {
         self.draw_output_area(stdout)?;
+        self.draw_panels(stdout)?;
         self.draw_input_line(stdout)?;
         stdout.flush()?;
         Ok(())
@@ -830,17 +983,121 @@ impl Terminal {
     fn draw_output_area(&self, stdout: &mut io::Stdout) -> io::Result<()> {
         let output_height = self.state.output_height() as usize;
         let visible = self.state.visible_output_lines();
-        for (i, line) in visible.iter().enumerate() {
-            let row = self.state.status_height + i as u16;
-            queue!(stdout, cursor::MoveTo(0, row))?;
-            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-            let expanded = expand_tabs(line);
-            queue!(stdout, Print(&expanded))?;
+        let max_width = self.state.width as usize;
+
+        if output_height == 0 {
+            return Ok(());
         }
-        for i in visible.len()..output_height {
+
+        // 从底部向上计算包装段，确保最新内容优先可见
+        let mut all_segments: Vec<Vec<String>> = Vec::new();
+        let mut total_rows = 0usize;
+
+        for line in visible.iter().rev() {
+            if total_rows >= output_height {
+                break;
+            }
+            let expanded = expand_tabs(line);
+            let segs = wrap_line_to_width(&expanded, max_width);
+            total_rows += segs.len();
+            all_segments.push(segs);
+        }
+        all_segments.reverse(); // 恢复为从上到下顺序
+
+        // 扁平化为段列表，从顶部裁剪超出部分
+        let mut flat: Vec<&String> = Vec::new();
+        for segs in &all_segments {
+            for seg in segs.iter() {
+                flat.push(seg);
+            }
+        }
+        let start = flat.len().saturating_sub(output_height);
+        let to_render = &flat[start..];
+
+        // 渲染
+        for (i, seg) in to_render.iter().enumerate() {
             let row = self.state.status_height + i as u16;
             queue!(stdout, cursor::MoveTo(0, row))?;
             queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+            queue!(stdout, Print(seg))?;
+        }
+
+        // 清除剩余行
+        for i in to_render.len()..output_height {
+            let row = self.state.status_height + i as u16;
+            queue!(stdout, cursor::MoveTo(0, row))?;
+            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+        }
+
+        Ok(())
+    }
+
+    /// 绘制浮动面板（overlay，覆盖在输出区之上）
+    fn draw_panels(&self, stdout: &mut io::Stdout) -> io::Result<()> {
+        if self.state.panels.is_empty() {
+            return Ok(());
+        }
+
+        let output_bottom = self
+            .state
+            .height
+            .saturating_sub(self.state.lua_status_height + self.state.input_height);
+        let term_width = self.state.width;
+
+        for panel in &self.state.panels {
+            let (abs_x, abs_y) = self.state.resolve_panel_position(panel);
+
+            // 裁剪：面板超出输出区可见范围则跳过
+            if abs_y >= output_bottom || abs_x >= term_width {
+                continue;
+            }
+
+            let max_rows = (output_bottom - abs_y) as usize;
+            let rows_to_draw = (panel.height as usize).min(max_rows);
+            // 水平裁剪：面板宽度不超过终端剩余宽度
+            let effective_width = (panel.width as usize).min((term_width - abs_x) as usize);
+
+            for i in 0..rows_to_draw {
+                let row = abs_y + i as u16;
+                let col = abs_x;
+
+                // 取内容行（不足则用空串）
+                let content = panel.lines.get(i).map(|s| s.as_str()).unwrap_or("");
+
+                // 计算内容可见宽度
+                let content_w = visible_width(content);
+                let panel_w = effective_width;
+
+                // 内容截断到面板宽度
+                let display_content: String = if content_w > panel_w {
+                    // 按可见宽度截取
+                    let mut result = String::new();
+                    let mut width = 0;
+                    for ch in content.chars() {
+                        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                        if width + cw > panel_w {
+                            break;
+                        }
+                        result.push(ch);
+                        width += cw;
+                    }
+                    result
+                } else {
+                    content.to_string()
+                };
+
+                let padding = panel_w.saturating_sub(visible_width(&display_content));
+
+                queue!(stdout, cursor::MoveTo(col, row))?;
+                // 内容由 Lua 脚本控制全部样式（背景色、前景色），Rust 只负责定位和打印
+                // 不使用 Clear 以避免擦除面板左侧的输出文本
+                queue!(
+                    stdout,
+                    Print(&display_content),
+                    Print(&" ".repeat(padding)),
+                    Print("\x1b[0m")
+                )?;
+            }
         }
         Ok(())
     }
@@ -957,6 +1214,34 @@ impl Terminal {
         let mut stdout = io::stdout();
         self.refresh_all(&mut stdout)?;
         Ok(())
+    }
+
+    /// 设置/更新浮动面板（由 Lua API SetPanel 调用）
+    pub fn set_panel(
+        &mut self,
+        name: &str,
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+        lines: Vec<String>,
+    ) {
+        self.state.set_panel(name, x, y, width, height, lines);
+    }
+
+    /// 移除浮动面板（由 Lua API RemovePanel 调用）
+    pub fn remove_panel(&mut self, name: &str) {
+        self.state.remove_panel(name);
+    }
+
+    /// 保存当前面板状态（切换 session 前调用）
+    pub fn save_panels(&self) -> Vec<Panel> {
+        self.state.panels.clone()
+    }
+
+    /// 恢复面板状态（切换 session 后调用）
+    pub fn restore_panels(&mut self, panels: &[Panel]) {
+        self.state.panels = panels.to_vec();
     }
 
     /// 保存当前输入状态（切换 session 前调用）
@@ -2294,5 +2579,211 @@ mod tests {
         let _ = state.handle_key(KeyEvent::new(KeyCode::Char('\x7f'), KeyModifiers::NONE));
         assert_eq!(state.input_buffer, "a");
         assert_eq!(state.input_cursor, 1);
+    }
+
+    // === Panel 测试 ===
+
+    #[test]
+    fn test_set_panel_inserts_new() {
+        let mut state = TerminalState::new(80, 24);
+        state.set_panel(
+            "stat",
+            -70,
+            1,
+            70,
+            10,
+            vec!["line1".to_string(), "line2".to_string()],
+        );
+        assert_eq!(state.panels.len(), 1);
+        assert_eq!(state.panels[0].name, "stat");
+        assert_eq!(state.panels[0].x, -70);
+        assert_eq!(state.panels[0].lines.len(), 2);
+    }
+
+    #[test]
+    fn test_set_panel_updates_existing() {
+        let mut state = TerminalState::new(80, 24);
+        state.set_panel("stat", -70, 1, 70, 10, vec!["old".to_string()]);
+        state.set_panel("stat", -50, 2, 50, 5, vec!["new".to_string()]);
+        assert_eq!(state.panels.len(), 1);
+        assert_eq!(state.panels[0].x, -50);
+        assert_eq!(state.panels[0].lines[0], "new");
+    }
+
+    #[test]
+    fn test_remove_panel() {
+        let mut state = TerminalState::new(80, 24);
+        state.set_panel("stat", -70, 1, 70, 10, vec!["line".to_string()]);
+        state.set_panel("debug", 0, 1, 40, 5, vec!["dbg".to_string()]);
+        assert_eq!(state.panels.len(), 2);
+        state.remove_panel("stat");
+        assert_eq!(state.panels.len(), 1);
+        assert_eq!(state.panels[0].name, "debug");
+    }
+
+    #[test]
+    fn test_remove_panel_nonexistent() {
+        let mut state = TerminalState::new(80, 24);
+        state.remove_panel("nonexistent");
+        assert!(state.panels.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_panel_position_negative_x() {
+        let state = TerminalState::new(80, 24);
+        let panel = Panel {
+            name: "test".to_string(),
+            x: -70,
+            y: 1,
+            width: 70,
+            height: 10,
+            lines: vec![],
+        };
+        let (abs_x, _) = state.resolve_panel_position(&panel);
+        // 80 + (-70) = 10
+        assert_eq!(abs_x, 10);
+    }
+
+    #[test]
+    fn test_resolve_panel_position_positive_x() {
+        let state = TerminalState::new(80, 24);
+        let panel = Panel {
+            name: "test".to_string(),
+            x: 5,
+            y: 2,
+            width: 30,
+            height: 5,
+            lines: vec![],
+        };
+        let (abs_x, abs_y) = state.resolve_panel_position(&panel);
+        assert_eq!(abs_x, 5);
+        // y is relative to status_height (1)
+        assert_eq!(abs_y, 3);
+    }
+
+    #[test]
+    fn test_resolve_panel_position_negative_y() {
+        let state = TerminalState::new(80, 24);
+        // output_bottom = 24 - 1(lua_status) - 1(input) = 22
+        let panel = Panel {
+            name: "test".to_string(),
+            x: 0,
+            y: -5,
+            width: 30,
+            height: 5,
+            lines: vec![],
+        };
+        let (_, abs_y) = state.resolve_panel_position(&panel);
+        // 22 + (-5) = 17
+        assert_eq!(abs_y, 17);
+    }
+
+    // ---- wrap_line_to_width 测试 ----
+
+    #[test]
+    fn test_wrap_short_line() {
+        let segs = wrap_line_to_width("hello", 80);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0], "hello");
+    }
+
+    #[test]
+    fn test_wrap_long_line() {
+        let line = "abcdefghij"; // 10 chars
+        let segs = wrap_line_to_width(line, 4);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0], "abcd");
+        assert_eq!(segs[1], "efgh");
+        assert_eq!(segs[2], "ij");
+    }
+
+    #[test]
+    fn test_wrap_ansi_zero_width() {
+        // ANSI 序列不计入宽度
+        let line = "\x1b[31mred\x1b[0m text";
+        let segs = wrap_line_to_width(line, 80);
+        assert_eq!(segs.len(), 1);
+        // 宽度 = "red text" = 8
+    }
+
+    #[test]
+    fn test_wrap_ansi_state_preserved() {
+        // 长红色文本跨段应保持颜色
+        let line = format!("\x1b[31m{}\x1b[0m", "a".repeat(10));
+        let segs = wrap_line_to_width(&line, 4);
+        assert_eq!(segs.len(), 3);
+        // 第一段：红色 + 4字符 + reset
+        assert!(segs[0].starts_with("\x1b[31m"));
+        assert!(segs[0].ends_with("\x1b[0m"));
+        // 第二段：应以红色开头（恢复颜色）
+        assert!(segs[1].starts_with("\x1b[31m"));
+        assert!(segs[1].ends_with("\x1b[0m"));
+        // 第三段：同样
+        assert!(segs[2].starts_with("\x1b[31m"));
+        assert!(segs[2].ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn test_wrap_cjk_chars() {
+        // 中文每个占 2 cell，宽度 4 可放 2 个汉字
+        let line = "你好世界测试"; // 6 汉字 = 12 cell
+        let segs = wrap_line_to_width(line, 4);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0], "你好");
+        assert_eq!(segs[1], "世界");
+        assert_eq!(segs[2], "测试");
+    }
+
+    #[test]
+    fn test_wrap_exact_boundary() {
+        // 恰好等于宽度，应为 1 段
+        let segs = wrap_line_to_width("abcd", 4);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0], "abcd");
+    }
+
+    #[test]
+    fn test_wrap_empty_line() {
+        let segs = wrap_line_to_width("", 80);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0], "");
+    }
+
+    #[test]
+    fn test_wrap_width_zero() {
+        let line = "hello world";
+        let segs = wrap_line_to_width(line, 0);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0], line);
+    }
+
+    #[test]
+    fn test_wrap_non_sgr_csi() {
+        // 非 SGR CSI 序列（如清屏 \x1b[2J）不应过度消费后续字符
+        let line = "\x1b[2JHello"; // \x1b[2J 是清屏，Hello 是普通文本
+        let segs = wrap_line_to_width(line, 3);
+        // \x1b[2J 不计入宽度，Hello = 5 字符，宽度 3 应拆为 2 段
+        assert_eq!(segs.len(), 2);
+        // 第一段应包含 CSI 序列 + Hel
+        assert!(segs[0].contains("\x1b[2J"));
+        assert!(segs[0].contains("Hel"));
+        // 第二段应包含 lo
+        assert!(segs[1].contains("lo"));
+    }
+
+    #[test]
+    fn test_wrap_mixed_csi_and_sgr() {
+        // 非 SGR CSI + SGR 混合
+        let line = "\x1b[?25h\x1b[31mRedText\x1b[0m";
+        let segs = wrap_line_to_width(line, 3);
+        // \x1b[?25h（显光标）和 \x1b[31m（红色）不计入宽度
+        // RedText = 7 字符，宽度 3 应拆为 3 段
+        assert_eq!(segs.len(), 3);
+        // 第一段应包含两个 CSI 序列 + Red
+        assert!(segs[0].contains("\x1b[?25h"));
+        assert!(segs[0].contains("\x1b[31m"));
+        assert!(segs[0].contains("Red"));
+        // 后续段应保持红色
+        assert!(segs[1].starts_with("\x1b[31m"));
     }
 }

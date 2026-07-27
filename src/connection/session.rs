@@ -102,6 +102,8 @@ pub struct Session {
     pub pending_data: Vec<String>,
     /// 是否有待渲染的数据
     pub render_dirty: bool,
+    /// 该连接的浮动面板状态（前台切换时保存/恢复）
+    pub panels: Vec<crate::ui::terminal::Panel>,
     /// 连接建立后延迟执行 OnConnect 的毫秒数
     pub connect_delay_ms: u64,
     /// 命令发送最小间隔（毫秒），范围 20~200ms
@@ -209,6 +211,7 @@ impl Session {
             realtime: config.realtime,
             pending_data: Vec::new(),
             render_dirty: false,
+            panels: Vec::new(),
             connect_delay_ms: config.connect_delay_ms,
             cmd_interval_ms: config.cmd_interval_ms.clamp(20, 200),
             send_tx: None,

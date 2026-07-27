@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::config::AppConfig;
 use crate::connection::{ConnectionManager, ManagerEvent, SessionId, SessionState};
 use crate::log::Logger;
+use crate::lua::PanelUpdate;
 use crate::ui::{AnsiParser, Terminal};
 
 /// 终端设置持久化
@@ -1109,7 +1110,41 @@ impl App {
                 }
             }
         }
+        // 面板更新需在日志输出前处理，确保 append_output 触发渲染时面板已是最新状态
+        // 实时模式：先 drain 面板再 append，refesh_output_area 使用正确面板数据
+        // 缓冲模式：先 drain 面板再加 pending，handle_render_tick 刷新时使用正确面板数据
+        self.drain_lua_panels(session_id);
         Ok(())
+    }
+
+    /// 排空 Lua 面板更新并应用到终端（仅前台连接）
+    fn drain_lua_panels(&mut self, session_id: SessionId) {
+        if session_id != self.manager.foreground_id {
+            return;
+        }
+        let updates = self
+            .manager
+            .get_by_id(session_id)
+            .and_then(|s| s.lua_engine.as_ref())
+            .map(|engine| engine.drain_panels())
+            .unwrap_or_default();
+        for update in updates {
+            match update {
+                PanelUpdate::Set {
+                    name,
+                    x,
+                    y,
+                    width,
+                    height,
+                    lines,
+                } => {
+                    self.terminal.set_panel(&name, x, y, width, height, lines);
+                }
+                PanelUpdate::Remove { name } => {
+                    self.terminal.remove_panel(&name);
+                }
+            }
+        }
     }
 
     /// 处理鼠标事件
@@ -2109,19 +2144,21 @@ impl App {
 
     /// 切换前台连接，恢复目标连接的输出缓冲区
     fn switch_foreground(&mut self, session_id: SessionId) -> io::Result<()> {
-        // 保存当前前台 session 的输入状态
+        // 保存当前前台 session 的输入状态和面板
         let old_id = self.manager.foreground_id;
         if self.manager.get_by_id(old_id).is_some() {
             let saved = self.terminal.save_input_state();
+            let saved_panels = self.terminal.save_panels();
             if let Some(session) = self.manager.get_mut_by_id(old_id) {
                 session.input_state = saved;
+                session.panels = saved_panels;
             }
         }
 
         self.manager.switch_foreground(session_id).ok();
         self.update_status_bar()?;
 
-        // 恢复目标 session 的输入状态
+        // 恢复目标 session 的输入状态和面板
         if let Some(saved) = self
             .manager
             .get_by_id(session_id)
@@ -2129,6 +2166,12 @@ impl App {
         {
             self.terminal.restore_input_state(&saved);
         }
+        let saved_panels = self
+            .manager
+            .get_by_id(session_id)
+            .map(|s| s.panels.clone())
+            .unwrap_or_default();
+        self.terminal.restore_panels(&saved_panels);
 
         // 恢复目标连接的输出缓冲区到终端
         // 预提取 display_pos 和 foreground_name，避免后续与 terminal 借用冲突
@@ -2146,6 +2189,27 @@ impl App {
         self.terminal.replace_output(output)?;
         self.terminal
             .append_output(&format!("[系统] 切换到连接 {} ({})", display_pos, fg_name))?;
+
+        // 立即排空新前台 session 的 pending_data，避免切换后显示延迟
+        let pending = self
+            .manager
+            .get_mut_by_id(session_id)
+            .map(|s| {
+                s.render_dirty = false;
+                std::mem::take(&mut s.pending_data)
+            })
+            .unwrap_or_default();
+        if !pending.is_empty() {
+            let mut combined = String::new();
+            for line in &pending {
+                combined.push_str(line);
+                combined.push('\n');
+            }
+            if !combined.is_empty() {
+                self.terminal.append_output(&combined)?;
+            }
+        }
+
         Ok(())
     }
 

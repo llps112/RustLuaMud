@@ -376,6 +376,24 @@ struct ScriptState {
     current_encoding: ScriptEncoding,
     /// 上次收到服务器数据的时间（用于空闲心跳检测）
     last_server_data: std::time::Instant,
+    /// 待处理的面板更新（由 SetPanel/RemovePanel 产生）
+    pending_panels: Vec<PanelUpdate>,
+}
+
+/// 浮动面板更新指令（由 Lua API 产生，drain 后应用到 TerminalState）
+#[derive(Debug, Clone)]
+pub enum PanelUpdate {
+    Set {
+        name: String,
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+        lines: Vec<String>,
+    },
+    Remove {
+        name: String,
+    },
 }
 
 /// 连接状态（用于 reload 时保存和恢复）
@@ -806,6 +824,7 @@ impl LuaEngine {
             status_text: String::new(),
             current_encoding: ScriptEncoding::Utf8,
             last_server_data: std::time::Instant::now(),
+            pending_panels: Vec::new(),
         }));
 
         let script_dir = Rc::new(RefCell::new(None::<String>));
@@ -1236,6 +1255,38 @@ impl LuaEngine {
             Ok(())
         })?;
         globals.set("SetStatus", set_status_fn)?;
+
+        // SetPanel(name, x, y, width, height, text) — 扩展 API: 创建/更新浮动面板
+        let state_rc_panel = state_rc.clone();
+        let set_panel_fn = lua.create_function_mut(
+            move |_, (name, x, y, width, height, text): (String, i16, i16, u16, u16, String)| {
+                let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+                state_rc_panel
+                    .borrow_mut()
+                    .pending_panels
+                    .push(PanelUpdate::Set {
+                        name,
+                        x,
+                        y,
+                        width,
+                        height,
+                        lines,
+                    });
+                Ok(())
+            },
+        )?;
+        globals.set("SetPanel", set_panel_fn)?;
+
+        // RemovePanel(name) — 扩展 API: 移除浮动面板
+        let state_rc_panel_rm = state_rc.clone();
+        let remove_panel_fn = lua.create_function_mut(move |_, name: String| {
+            state_rc_panel_rm
+                .borrow_mut()
+                .pending_panels
+                .push(PanelUpdate::Remove { name });
+            Ok(())
+        })?;
+        globals.set("RemovePanel", remove_panel_fn)?;
 
         // Tell(text...) — 追加到 tell_buffer，实现内联输出（支持多参数拼接）
         let state_rc7 = state_rc.clone();
@@ -3939,6 +3990,12 @@ impl LuaEngine {
         state.pending_logs.drain(..).collect()
     }
 
+    /// 取出待处理的面板更新
+    pub fn drain_panels(&self) -> Vec<PanelUpdate> {
+        let mut state = self.state.borrow_mut();
+        state.pending_panels.drain(..).collect()
+    }
+
     /// 获取 SetStatus 设置的状态栏文本
     pub fn status_text(&self) -> String {
         self.state.borrow().status_text.clone()
@@ -4575,6 +4632,54 @@ mod tests {
             exec(engine, "print('hello')").unwrap();
             let logs = engine.drain_logs();
             assert!(logs.contains(&"hello".to_string()));
+        });
+    }
+
+    #[test]
+    fn test_set_panel() {
+        with_engine(|engine| {
+            exec(
+                engine,
+                r#"SetPanel("stat", -70, 1, 70, 10, "line1\nline2")"#,
+            )
+            .unwrap();
+            let panels = engine.drain_panels();
+            assert_eq!(panels.len(), 1);
+            match &panels[0] {
+                PanelUpdate::Set {
+                    name,
+                    x,
+                    y,
+                    width,
+                    height,
+                    lines,
+                } => {
+                    assert_eq!(name, "stat");
+                    assert_eq!(*x, -70);
+                    assert_eq!(*y, 1);
+                    assert_eq!(*width, 70);
+                    assert_eq!(*height, 10);
+                    assert_eq!(lines.len(), 2);
+                    assert_eq!(lines[0], "line1");
+                    assert_eq!(lines[1], "line2");
+                }
+                PanelUpdate::Remove { .. } => panic!("expected Set, got Remove"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_remove_panel() {
+        with_engine(|engine| {
+            exec(engine, r#"RemovePanel("stat")"#).unwrap();
+            let panels = engine.drain_panels();
+            assert_eq!(panels.len(), 1);
+            match &panels[0] {
+                PanelUpdate::Remove { name } => {
+                    assert_eq!(name, "stat");
+                }
+                PanelUpdate::Set { .. } => panic!("expected Remove, got Set"),
+            }
         });
     }
 

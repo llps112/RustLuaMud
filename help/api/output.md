@@ -93,3 +93,11 @@
   ```lua
   log("这是一条日志消息")
   ```
+
+---
+
+## 浮动面板 API
+
+RustLuaMud 扩展了 MUSHclient API，提供浮动面板（Floating Panel）机制，允许脚本在终端输出区上创建固定位置的 overlay 面板。面板不随输出文本滚动，适合显示实时统计数据、小地图、调试信息等。
+
+详见 [浮动面板 API](panels.md)。
