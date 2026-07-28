@@ -192,17 +192,30 @@ mod tests {
         ensure_context_initialized();
         set_current_session("hook_test");
 
+        // 用 Arc<AtomicBool> 确认 hook 被调用（避免并行测试 set_hook 竞争导致 hook 被覆盖）
+        let hook_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_called_clone = hook_called.clone();
+
         // 保存当前的 panic hook，测试后恢复
         let old_hook = std::panic::take_hook();
 
-        // 重新设置 panic hook（PANIC_CONTEXT 已初始化，set 会静默失败，但 hook 会更新）
+        // 设置自定义 panic hook：标记被调用 + 委托给 init_panic_hook 的逻辑
         init_panic_hook("/tmp/rustluamud_panic_hook_test", 10, 5);
+        let composed_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            hook_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            composed_hook(info);
+        }));
 
         // 触发 panic（用 catch_unwind 捕获，防止测试进程崩溃）
         let result = std::panic::catch_unwind(|| {
             panic!("test panic for hook validation");
         });
         assert!(result.is_err(), "catch_unwind 应捕获到 panic");
+        assert!(
+            hook_called.load(std::sync::atomic::Ordering::SeqCst),
+            "panic hook 应被调用"
+        );
 
         // 恢复原来的 panic hook
         std::panic::set_hook(old_hook);
@@ -211,7 +224,16 @@ mod tests {
         let ts = Local::now().format("%y%m%d_%H").to_string();
         let log_file = std::path::Path::new("/tmp/rustluamud_panic_hook_test")
             .join(format!("hook_test_{}.log", ts));
-        assert!(log_file.exists(), "panic 日志文件应存在");
+        // 文件写入可能有短暂延迟，重试等待
+        let mut found = false;
+        for _ in 0..10 {
+            if log_file.exists() {
+                found = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(found, "panic 日志文件应存在: {:?}", log_file);
 
         let content = std::fs::read_to_string(&log_file).unwrap();
         assert!(
