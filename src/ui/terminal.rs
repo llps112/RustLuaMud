@@ -18,6 +18,19 @@ pub struct ClickRegion {
     pub session_id: SessionId,
 }
 
+/// 面板按钮定义（相对面板左上角的坐标）
+#[derive(Debug, Clone)]
+pub struct PanelButtonDef {
+    /// 按钮所在行（0 = 面板第一行）
+    pub row: u16,
+    /// 按钮起始列（相对面板左边缘）
+    pub start_col: u16,
+    /// 按钮结束列（独占，相对面板左边缘）
+    pub end_col: u16,
+    /// 按钮点击时传递给 Lua 的动作名
+    pub action: String,
+}
+
 /// 浮动面板（overlay，绘制在输出区之上）
 #[derive(Debug, Clone)]
 pub struct Panel {
@@ -30,6 +43,8 @@ pub struct Panel {
     pub height: u16,
     /// 预分割的行内容（每行可含 ANSI 转义序列）
     pub lines: Vec<String>,
+    /// 面板上的可点击按钮
+    pub buttons: Vec<PanelButtonDef>,
 }
 
 /// 提取字符串中最后一组 CSI SGR 序列（形如 \x1b[...m），返回完整序列
@@ -785,6 +800,7 @@ impl TerminalState {
     }
 
     /// 插入或替换同名浮动面板
+    #[allow(clippy::too_many_arguments)]
     pub fn set_panel(
         &mut self,
         name: &str,
@@ -793,6 +809,7 @@ impl TerminalState {
         width: u16,
         height: u16,
         lines: Vec<String>,
+        buttons: Vec<PanelButtonDef>,
     ) {
         if let Some(panel) = self.panels.iter_mut().find(|p| p.name == name) {
             panel.x = x;
@@ -800,6 +817,7 @@ impl TerminalState {
             panel.width = width;
             panel.height = height;
             panel.lines = lines;
+            panel.buttons = buttons;
         } else {
             self.panels.push(Panel {
                 name: name.to_string(),
@@ -808,6 +826,7 @@ impl TerminalState {
                 width,
                 height,
                 lines,
+                buttons,
             });
         }
     }
@@ -1217,6 +1236,7 @@ impl Terminal {
     }
 
     /// 设置/更新浮动面板（由 Lua API SetPanel 调用）
+    #[allow(clippy::too_many_arguments)]
     pub fn set_panel(
         &mut self,
         name: &str,
@@ -1225,8 +1245,10 @@ impl Terminal {
         width: u16,
         height: u16,
         lines: Vec<String>,
+        buttons: Vec<PanelButtonDef>,
     ) {
-        self.state.set_panel(name, x, y, width, height, lines);
+        self.state
+            .set_panel(name, x, y, width, height, lines, buttons);
     }
 
     /// 移除浮动面板（由 Lua API RemovePanel 调用）
@@ -1267,10 +1289,51 @@ impl Drop for Terminal {
     }
 }
 
+/// 检测鼠标是否命中某个面板的按钮
+/// 返回 (面板名, 动作名) 或 None
+impl TerminalState {
+    pub fn panel_hit_test(&self, mouse_col: u16, mouse_row: u16) -> Option<(String, String)> {
+        // 与 draw_panels 保持一致的裁剪：不检测输出区以外的点击
+        let output_bottom = self
+            .height
+            .saturating_sub(self.lua_status_height + self.input_height);
+        for panel in &self.panels {
+            let (abs_x, abs_y) = self.resolve_panel_position(panel);
+            // 面板完全在输出区外则跳过
+            if abs_y >= output_bottom {
+                continue;
+            }
+            // 检查是否在面板可见范围内（裁剪到 output_bottom）
+            if mouse_row < abs_y || mouse_row >= abs_y.saturating_add(panel.height) {
+                continue;
+            }
+            if mouse_row >= output_bottom {
+                continue;
+            }
+            if mouse_col < abs_x || mouse_col >= abs_x.saturating_add(panel.width) {
+                continue;
+            }
+            // 在面板内，检查按钮
+            let rel_row = mouse_row - abs_y;
+            let rel_col = mouse_col - abs_x;
+            for btn in &panel.buttons {
+                if btn.row == rel_row && rel_col >= btn.start_col && rel_col < btn.end_col {
+                    return Some((panel.name.clone(), btn.action.clone()));
+                }
+            }
+        }
+        None
+    }
+}
+
 /// 获取状态栏可点击区域
 impl Terminal {
     pub fn click_regions(&self) -> &[ClickRegion] {
         &self.state.status_bar_regions
+    }
+
+    pub fn panel_hit_test(&self, mouse_col: u16, mouse_row: u16) -> Option<(String, String)> {
+        self.state.panel_hit_test(mouse_col, mouse_row)
     }
 }
 
@@ -2593,6 +2656,7 @@ mod tests {
             70,
             10,
             vec!["line1".to_string(), "line2".to_string()],
+            vec![],
         );
         assert_eq!(state.panels.len(), 1);
         assert_eq!(state.panels[0].name, "stat");
@@ -2603,8 +2667,8 @@ mod tests {
     #[test]
     fn test_set_panel_updates_existing() {
         let mut state = TerminalState::new(80, 24);
-        state.set_panel("stat", -70, 1, 70, 10, vec!["old".to_string()]);
-        state.set_panel("stat", -50, 2, 50, 5, vec!["new".to_string()]);
+        state.set_panel("stat", -70, 1, 70, 10, vec!["old".to_string()], vec![]);
+        state.set_panel("stat", -50, 2, 50, 5, vec!["new".to_string()], vec![]);
         assert_eq!(state.panels.len(), 1);
         assert_eq!(state.panels[0].x, -50);
         assert_eq!(state.panels[0].lines[0], "new");
@@ -2613,8 +2677,8 @@ mod tests {
     #[test]
     fn test_remove_panel() {
         let mut state = TerminalState::new(80, 24);
-        state.set_panel("stat", -70, 1, 70, 10, vec!["line".to_string()]);
-        state.set_panel("debug", 0, 1, 40, 5, vec!["dbg".to_string()]);
+        state.set_panel("stat", -70, 1, 70, 10, vec!["line".to_string()], vec![]);
+        state.set_panel("debug", 0, 1, 40, 5, vec!["dbg".to_string()], vec![]);
         assert_eq!(state.panels.len(), 2);
         state.remove_panel("stat");
         assert_eq!(state.panels.len(), 1);
@@ -2638,6 +2702,7 @@ mod tests {
             width: 70,
             height: 10,
             lines: vec![],
+            buttons: vec![],
         };
         let (abs_x, _) = state.resolve_panel_position(&panel);
         // 80 + (-70) = 10
@@ -2654,6 +2719,7 @@ mod tests {
             width: 30,
             height: 5,
             lines: vec![],
+            buttons: vec![],
         };
         let (abs_x, abs_y) = state.resolve_panel_position(&panel);
         assert_eq!(abs_x, 5);
@@ -2672,6 +2738,7 @@ mod tests {
             width: 30,
             height: 5,
             lines: vec![],
+            buttons: vec![],
         };
         let (_, abs_y) = state.resolve_panel_position(&panel);
         // 22 + (-5) = 17

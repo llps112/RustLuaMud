@@ -11,6 +11,8 @@ use regex::bytes::Regex as BytesRegex;
 use regex::Regex;
 use rusqlite::{types::Value as SqlValue, Connection};
 
+use crate::ui::terminal::PanelButtonDef;
+
 /// mlua::Integer 在 64 位平台是 i64，在 32 位平台（如 i686）是 i32。
 /// 内部逻辑统一使用 i64，在与 mlua 交互的边界点做转换。
 ///
@@ -390,6 +392,7 @@ pub enum PanelUpdate {
         width: u16,
         height: u16,
         lines: Vec<String>,
+        buttons: Vec<PanelButtonDef>,
     },
     Remove {
         name: String,
@@ -1256,25 +1259,120 @@ impl LuaEngine {
         })?;
         globals.set("SetStatus", set_status_fn)?;
 
-        // SetPanel(name, x, y, width, height, text) — 扩展 API: 创建/更新浮动面板
+        // SetPanel(name, x, y, width, height, text[, buttons]) — 创建/更新浮动面板
+        // buttons 是可选的第 7 参数，格式: {{ row=11, start_col=3, end_col=11, action="go" }, ...}
         let state_rc_panel = state_rc.clone();
-        let set_panel_fn = lua.create_function_mut(
-            move |_, (name, x, y, width, height, text): (String, i16, i16, u16, u16, String)| {
-                let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
-                state_rc_panel
-                    .borrow_mut()
-                    .pending_panels
-                    .push(PanelUpdate::Set {
-                        name,
-                        x,
-                        y,
-                        width,
-                        height,
-                        lines,
+        let set_panel_fn = lua.create_function_mut(move |_lua, mut args: mlua::MultiValue| {
+            if args.len() < 6 {
+                return Err(mlua::Error::external(
+                    "SetPanel 至少需要 6 个参数: name, x, y, width, height, text",
+                ));
+            }
+            let name: String = {
+                let v = args
+                    .remove(0)
+                    .ok_or_else(|| mlua::Error::external("SetPanel: 缺少 name 参数"))?;
+                mlua::FromLua::from_lua(v, _lua)
+                    .map_err(|_| mlua::Error::external("SetPanel: name 必须是字符串"))?
+            };
+            let x: i16 = {
+                let v = args
+                    .remove(0)
+                    .ok_or_else(|| mlua::Error::external("SetPanel: 缺少 x 参数"))?;
+                mlua::FromLua::from_lua(v, _lua)
+                    .map_err(|_| mlua::Error::external("SetPanel: x 必须是数字"))?
+            };
+            let y: i16 = {
+                let v = args
+                    .remove(0)
+                    .ok_or_else(|| mlua::Error::external("SetPanel: 缺少 y 参数"))?;
+                mlua::FromLua::from_lua(v, _lua)
+                    .map_err(|_| mlua::Error::external("SetPanel: y 必须是数字"))?
+            };
+            let width: u16 = {
+                let v = args
+                    .remove(0)
+                    .ok_or_else(|| mlua::Error::external("SetPanel: 缺少 width 参数"))?;
+                mlua::FromLua::from_lua(v, _lua)
+                    .map_err(|_| mlua::Error::external("SetPanel: width 必须是数字"))?
+            };
+            let height: u16 = {
+                let v = args
+                    .remove(0)
+                    .ok_or_else(|| mlua::Error::external("SetPanel: 缺少 height 参数"))?;
+                mlua::FromLua::from_lua(v, _lua)
+                    .map_err(|_| mlua::Error::external("SetPanel: height 必须是数字"))?
+            };
+            let text: String = {
+                let v = args
+                    .remove(0)
+                    .ok_or_else(|| mlua::Error::external("SetPanel: 缺少 text 参数"))?;
+                mlua::FromLua::from_lua(v, _lua)
+                    .map_err(|_| mlua::Error::external("SetPanel: text 必须是字符串"))?
+            };
+            let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+            // 解析可选的 buttons 参数（第 7 个）
+            let buttons = if !args.is_empty() {
+                let v = args
+                    .remove(0)
+                    .ok_or_else(|| mlua::Error::external("SetPanel: 缺少 buttons 参数"))?;
+                let table: mlua::Table = mlua::FromLua::from_lua(v, _lua)
+                    .map_err(|_| mlua::Error::external("SetPanel: buttons 必须是 table"))?;
+                let mut defs = Vec::new();
+                for pair in table.pairs::<mlua::Integer, mlua::Table>() {
+                    let (_, btn) = pair.map_err(|e| {
+                        mlua::Error::external(format!("SetPanel: buttons 元素无效: {}", e))
+                    })?;
+                    let row: u16 = btn.get("row").map_err(|e| {
+                        mlua::Error::external(format!("SetPanel: buttons 缺 row 字段: {}", e))
+                    })?;
+                    let start_col: u16 = btn.get("start_col").map_err(|e| {
+                        mlua::Error::external(format!("SetPanel: buttons 缺 start_col 字段: {}", e))
+                    })?;
+                    let end_col: u16 = btn.get("end_col").map_err(|e| {
+                        mlua::Error::external(format!("SetPanel: buttons 缺 end_col 字段: {}", e))
+                    })?;
+                    let action: String = btn.get("action").map_err(|e| {
+                        mlua::Error::external(format!("SetPanel: buttons 缺 action 字段: {}", e))
+                    })?;
+                    // 校验按钮坐标在面板范围内
+                    if row >= height {
+                        return Err(mlua::Error::external(format!(
+                            "SetPanel: buttons row {} 超出面板高度 {}",
+                            row, height
+                        )));
+                    }
+                    if end_col > width || start_col >= end_col {
+                        return Err(mlua::Error::external(format!(
+                            "SetPanel: buttons start_col {} end_col {} 超出面板宽度 {} 或范围无效",
+                            start_col, end_col, width
+                        )));
+                    }
+                    defs.push(PanelButtonDef {
+                        row,
+                        start_col,
+                        end_col,
+                        action,
                     });
-                Ok(())
-            },
-        )?;
+                }
+                defs
+            } else {
+                Vec::new()
+            };
+            state_rc_panel
+                .borrow_mut()
+                .pending_panels
+                .push(PanelUpdate::Set {
+                    name,
+                    x,
+                    y,
+                    width,
+                    height,
+                    lines,
+                    buttons,
+                });
+            Ok(())
+        })?;
         globals.set("SetPanel", set_panel_fn)?;
 
         // RemovePanel(name) — 扩展 API: 移除浮动面板
@@ -3996,6 +4094,17 @@ impl LuaEngine {
         state.pending_panels.drain(..).collect()
     }
 
+    /// 处理面板按钮点击事件，调用 Lua 全局函数 on_panel_click(panel_name, action)
+    pub fn handle_panel_click(&self, panel_name: &str, action: &str) {
+        let globals = self.lua.globals();
+        let func_result = globals.get::<mlua::Function>("on_panel_click");
+        if let Ok(func) = func_result {
+            if let Err(e) = func.call::<()>((panel_name, action)) {
+                self.log_error(&format!("[Lua] on_panel_click 回调中发生错误: {}", e));
+            }
+        }
+    }
+
     /// 获取 SetStatus 设置的状态栏文本
     pub fn status_text(&self) -> String {
         self.state.borrow().status_text.clone()
@@ -4653,8 +4762,10 @@ mod tests {
                     width,
                     height,
                     lines,
+                    buttons,
                 } => {
                     assert_eq!(name, "stat");
+                    assert!(buttons.is_empty());
                     assert_eq!(*x, -70);
                     assert_eq!(*y, 1);
                     assert_eq!(*width, 70);

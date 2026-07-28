@@ -1137,8 +1137,10 @@ impl App {
                     width,
                     height,
                     lines,
+                    buttons,
                 } => {
-                    self.terminal.set_panel(&name, x, y, width, height, lines);
+                    self.terminal
+                        .set_panel(&name, x, y, width, height, lines, buttons);
                 }
                 PanelUpdate::Remove { name } => {
                     self.terminal.remove_panel(&name);
@@ -1149,15 +1151,38 @@ impl App {
 
     /// 处理鼠标事件
     fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) -> io::Result<()> {
-        // 只在状态栏行（y=0）响应鼠标点击
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && mouse.row == 0 {
-            let x = mouse.column;
-            for region in self.terminal.click_regions() {
-                if x >= region.start_x && x < region.end_x {
-                    if self.manager.get_by_id(region.session_id).is_some() {
-                        self.switch_foreground(region.session_id)?;
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            // 1. 先检查面板按钮（优先级高于状态栏）
+            let fg_id = self.manager.foreground_id;
+            if let Some((panel_name, action)) =
+                self.terminal.panel_hit_test(mouse.column, mouse.row)
+            {
+                let commands = self
+                    .manager
+                    .get_by_id(fg_id)
+                    .and_then(|s| s.lua_engine.as_ref())
+                    .map(|engine| {
+                        engine.handle_panel_click(&panel_name, &action);
+                        engine.drain_commands()
+                    })
+                    .unwrap_or_default();
+                if !commands.is_empty() {
+                    self.send_lua_commands(fg_id, commands)?;
+                }
+                self.drain_lua_panels(fg_id);
+                return Ok(());
+            }
+
+            // 2. 再检查状态栏 tab（仅 row=0）
+            if mouse.row == 0 {
+                let x = mouse.column;
+                for region in self.terminal.click_regions() {
+                    if x >= region.start_x && x < region.end_x {
+                        if self.manager.get_by_id(region.session_id).is_some() {
+                            self.switch_foreground(region.session_id)?;
+                        }
+                        break;
                     }
-                    break;
                 }
             }
         }
