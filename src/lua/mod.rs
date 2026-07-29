@@ -4,6 +4,7 @@ mod commands;
 mod database;
 mod engine;
 mod helpers;
+mod index;
 mod timers;
 mod triggers;
 mod types;

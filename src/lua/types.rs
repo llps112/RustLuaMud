@@ -101,6 +101,18 @@ pub(crate) struct ScriptState {
     pub triggers: Vec<Trigger>,
     pub aliases: Vec<Alias>,
     pub timers: Vec<TimerDef>,
+    /// trigger name → Vec 索引，O(1) 查找
+    pub trigger_by_name: HashMap<String, usize>,
+    /// trigger group → 索引列表，O(k) 批量操作
+    pub trigger_groups: HashMap<String, Vec<usize>>,
+    /// alias name → Vec 索引
+    pub alias_by_name: HashMap<String, usize>,
+    /// alias group → 索引列表
+    pub alias_groups: HashMap<String, Vec<usize>>,
+    /// timer name → Vec 索引
+    pub timer_by_name: HashMap<String, usize>,
+    /// timer group → 索引列表
+    pub timer_groups: HashMap<String, Vec<usize>>,
     pub variables: HashMap<String, String>,
     pub pending_commands: Vec<String>,
     pub pending_raw: Vec<Vec<u8>>,

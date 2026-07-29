@@ -295,7 +295,16 @@ impl LuaEngine {
         // DeleteTemporaryTimers() — MushClient API: 删除所有临时定时器
         let state_rc_dtt = state_rc.clone();
         let delete_temp_timers_fn = lua.create_function_mut(move |_, ()| {
-            state_rc_dtt.borrow_mut().timers.retain(|t| !t.one_shot);
+            let mut state = state_rc_dtt.borrow_mut();
+            let to_delete: Vec<String> = state
+                .timers
+                .iter()
+                .filter(|t| t.one_shot)
+                .map(|t| t.name.clone())
+                .collect();
+            for name in to_delete {
+                state.delete_timer(&name);
+            }
             Ok(())
         })?;
         globals.set("DeleteTemporaryTimers", delete_temp_timers_fn)?;
@@ -663,9 +672,8 @@ impl LuaEngine {
         let state_rc10 = state_rc.clone();
         let delete_trigger_fn = lua.create_function_mut(move |_, name: String| {
             let mut state = state_rc10.borrow_mut();
-            let before = state.triggers.len();
-            state.triggers.retain(|t| t.name != name);
-            if state.triggers.len() < before {
+            let found = state.delete_trigger(&name);
+            if found {
                 Ok(0)
             } else {
                 Ok(1)
@@ -691,7 +699,11 @@ impl LuaEngine {
         let get_trigger_info_fn =
             lua.create_function_mut(move |lua, (name, code): (String, i64)| {
                 let state = state_rc12.borrow();
-                if let Some(t) = state.triggers.iter().find(|t| t.name == name) {
+                if let Some(t) = state
+                    .trigger_by_name
+                    .get(&name)
+                    .map(|&i| &state.triggers[i])
+                {
                     match code {
                         1 => Ok(Value::String(lua.create_string(&t.name)?)),
                         2 => Ok(Value::String(lua.create_string(&match &t.pattern {
@@ -731,13 +743,18 @@ impl LuaEngine {
             lua.create_function_mut(move |_lua, (name, key, value): (String, String, Value)| {
                 let mut state = state_rc13.borrow_mut();
                 let encoding = state.current_encoding;
-                if let Some(t) = state.triggers.iter_mut().find(|t| t.name == name) {
-                    match key.as_str() {
-                        "group" => {
-                            if let Value::String(s) = value {
-                                t.group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
-                            }
+                let idx = state.trigger_by_name.get(&name).copied();
+                if let Some(i) = idx {
+                    // group 变更需要同步更新索引，单独处理
+                    if key == "group" {
+                        if let Value::String(s) = value {
+                            let new_group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+                            state.update_trigger_group(i, &new_group);
                         }
+                        return Ok(Value::Integer(0));
+                    }
+                    let t = &mut state.triggers[i];
+                    match key.as_str() {
                         "regexp" => {
                             if let Value::String(s) = value {
                                 let pattern = s.to_str().map_err(|e| {
@@ -818,11 +835,7 @@ impl LuaEngine {
         let enable_trigger_group_fn =
             lua.create_function_mut(move |_, (group, enable): (String, bool)| {
                 let mut state = state_rc14.borrow_mut();
-                for t in state.triggers.iter_mut() {
-                    if !t.group.is_empty() && t.group == group {
-                        t.enabled = enable;
-                    }
-                }
+                state.enable_trigger_group(&group, enable);
                 Ok(())
             })?;
         globals.set("EnableTriggerGroup", enable_trigger_group_fn)?;
@@ -832,8 +845,9 @@ impl LuaEngine {
         let enable_trigger_fn =
             lua.create_function_mut(move |_, (name, enable): (String, bool)| {
                 let mut state = state_rc_et.borrow_mut();
-                if let Some(t) = state.triggers.iter_mut().find(|t| t.name == name) {
-                    t.enabled = enable;
+                let idx = state.trigger_by_name.get(&name).copied();
+                if let Some(i) = idx {
+                    state.triggers[i].enabled = enable;
                     Ok(Value::Integer(0))
                 } else {
                     Ok(Value::Integer(1))
@@ -873,7 +887,7 @@ impl LuaEngine {
 
             // Replace flag (1024): 先删除同名 alias
             if do_replace {
-                state_rc15.borrow_mut().aliases.retain(|a| a.name != name);
+                state_rc15.borrow_mut().delete_alias(&name);
             }
 
             let re_str = if is_regex {
@@ -912,7 +926,7 @@ impl LuaEngine {
                 0 // send to world
             };
 
-            state_rc15.borrow_mut().aliases.push(Alias {
+            state_rc15.borrow_mut().add_alias(Alias {
                 name,
                 match_text: match_str,
                 pattern: re,
@@ -931,9 +945,8 @@ impl LuaEngine {
         let state_rc16 = state_rc.clone();
         let delete_alias_fn = lua.create_function_mut(move |_, name: String| {
             let mut state = state_rc16.borrow_mut();
-            let before = state.aliases.len();
-            state.aliases.retain(|a| a.name != name);
-            if state.aliases.len() < before {
+            let found = state.delete_alias(&name);
+            if found {
                 Ok(0)
             } else {
                 Ok(1)
@@ -958,7 +971,7 @@ impl LuaEngine {
         let get_alias_info_fn =
             lua.create_function_mut(move |lua, (name, code): (String, i64)| {
                 let state = state_rc_gi.borrow();
-                if let Some(a) = state.aliases.iter().find(|a| a.name == name) {
+                if let Some(a) = state.alias_by_name.get(&name).map(|&i| &state.aliases[i]) {
                     match code {
                         1 => Ok(Value::String(lua.create_string(&a.match_text)?)),
                         2 => Ok(Value::String(lua.create_string(&a.response)?)),
@@ -1004,13 +1017,18 @@ impl LuaEngine {
         let set_alias_option_fn =
             lua.create_function_mut(move |_, (name, key, value): (String, String, Value)| {
                 let mut state = state_rc18.borrow_mut();
-                if let Some(a) = state.aliases.iter_mut().find(|a| a.name == name) {
-                    match key.as_str() {
-                        "group" => {
-                            if let Value::String(s) = value {
-                                a.group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
-                            }
+                let idx = state.alias_by_name.get(&name).copied();
+                if let Some(i) = idx {
+                    // group 变更需要同步更新索引，单独处理
+                    if key == "group" {
+                        if let Value::String(s) = value {
+                            let new_group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+                            state.update_alias_group(i, &new_group);
                         }
+                        return Ok(Value::Integer(0));
+                    }
+                    let a = &mut state.aliases[i];
+                    match key.as_str() {
                         "regexp" => {
                             if let Value::String(s) = value {
                                 let pattern = s.to_str().map_err(|e| {
@@ -1119,11 +1137,10 @@ impl LuaEngine {
             let old_enabled = if (flags & 1024) != 0 {
                 let old_enabled = state_rc19
                     .borrow()
-                    .timers
-                    .iter()
-                    .find(|t| t.name == name)
-                    .map(|t| t.enabled);
-                state_rc19.borrow_mut().timers.retain(|t| t.name != name);
+                    .timer_by_name
+                    .get(&name)
+                    .map(|&i| state_rc19.borrow().timers[i].enabled);
+                state_rc19.borrow_mut().delete_timer(&name);
                 old_enabled
             } else {
                 None
@@ -1136,7 +1153,7 @@ impl LuaEngine {
                 _ => (flags & 1) != 0,
             };
 
-            state_rc19.borrow_mut().timers.push(TimerDef {
+            state_rc19.borrow_mut().add_timer(TimerDef {
                 name,
                 interval_millis: interval_millis_u64,
                 callback: None,
@@ -1164,7 +1181,7 @@ impl LuaEngine {
 
             let send_text = format!("Execute([[{}]])", text);
 
-            state.timers.push(TimerDef {
+            state.add_timer(TimerDef {
                 name: timer_name,
                 interval_millis,
                 callback: None,
@@ -1193,7 +1210,7 @@ impl LuaEngine {
 
                 let send_text = format!("Note([[{}]])", text);
 
-                state.timers.push(TimerDef {
+                state.add_timer(TimerDef {
                     name: timer_name,
                     interval_millis,
                     callback: None,
@@ -1232,7 +1249,7 @@ impl LuaEngine {
                     _ => format!("Execute([[{}]])", text),           // 默认走 Execute
                 };
 
-                state.timers.push(TimerDef {
+                state.add_timer(TimerDef {
                     name: timer_name,
                     interval_millis,
                     callback: None,
@@ -1261,7 +1278,7 @@ impl LuaEngine {
 
                 let send_text = format!("Execute([[{}]])", text);
 
-                state.timers.push(TimerDef {
+                state.add_timer(TimerDef {
                     name: timer_name,
                     interval_millis,
                     callback: None,
@@ -1280,9 +1297,8 @@ impl LuaEngine {
         let state_rc20 = state_rc.clone();
         let delete_timer_fn = lua.create_function_mut(move |_, name: String| {
             let mut state = state_rc20.borrow_mut();
-            let before = state.timers.len();
-            state.timers.retain(|t| t.name != name);
-            if state.timers.len() < before {
+            let found = state.delete_timer(&name);
+            if found {
                 Ok(0)
             } else {
                 Ok(1)
@@ -1308,7 +1324,7 @@ impl LuaEngine {
         let get_timer_info_fn =
             lua.create_function_mut(move |lua, (name, code): (String, i64)| {
                 let state = state_rc22.borrow();
-                if let Some(t) = state.timers.iter().find(|tt| tt.name == name) {
+                if let Some(t) = state.timer_by_name.get(&name).map(|&i| &state.timers[i]) {
                     match code {
                         1 => Ok(Value::String(lua.create_string(&t.name)?)),
                         6 => Ok(Value::Boolean(t.enabled)), // enabled
@@ -1332,13 +1348,18 @@ impl LuaEngine {
         let set_timer_option_fn =
             lua.create_function_mut(move |_, (name, key, value): (String, String, Value)| {
                 let mut state = state_rc23.borrow_mut();
-                if let Some(t) = state.timers.iter_mut().find(|t| t.name == name) {
-                    match key.as_str() {
-                        "group" => {
-                            if let Value::String(s) = value {
-                                t.group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
-                            }
+                let idx = state.timer_by_name.get(&name).copied();
+                if let Some(i) = idx {
+                    // group 变更需要同步更新索引，单独处理
+                    if key == "group" {
+                        if let Value::String(s) = value {
+                            let new_group = s.to_str().map(|s| s.to_string()).unwrap_or_default();
+                            state.update_timer_group(i, &new_group);
                         }
+                        return Ok(Value::Integer(0));
+                    }
+                    let t = &mut state.timers[i];
+                    match key.as_str() {
                         "timer_timestamp" => {
                             if let Value::Integer(ts) = value {
                                 if ts > 0 {
@@ -1376,11 +1397,7 @@ impl LuaEngine {
         let enable_timer_group_fn =
             lua.create_function_mut(move |_, (group, enable): (String, bool)| {
                 let mut state = state_rc24.borrow_mut();
-                for t in state.timers.iter_mut() {
-                    if !t.group.is_empty() && t.group == group {
-                        t.enabled = enable;
-                    }
-                }
+                state.enable_timer_group(&group, enable);
                 Ok(())
             })?;
         globals.set("EnableTimerGroup", enable_timer_group_fn)?;
@@ -1390,8 +1407,9 @@ impl LuaEngine {
         let enable_timer_fn =
             lua.create_function_mut(move |_, (name, enable): (String, bool)| {
                 let mut state = state_rc_emt.borrow_mut();
-                if let Some(t) = state.timers.iter_mut().find(|t| t.name == name) {
-                    t.enabled = enable;
+                let idx = state.timer_by_name.get(&name).copied();
+                if let Some(i) = idx {
+                    state.timers[i].enabled = enable;
                     Ok(Value::Integer(0))
                 } else {
                     Ok(Value::Integer(1))
@@ -1403,8 +1421,9 @@ impl LuaEngine {
         let state_rc_rt = state_rc.clone();
         let reset_timer_fn = lua.create_function_mut(move |_, name: String| {
             let mut state = state_rc_rt.borrow_mut();
-            if let Some(t) = state.timers.iter_mut().find(|t| t.name == name) {
-                t.last_fired = std::time::Instant::now();
+            let idx = state.timer_by_name.get(&name).copied();
+            if let Some(i) = idx {
+                state.timers[i].last_fired = std::time::Instant::now();
                 Ok(Value::Integer(0))
             } else {
                 Ok(Value::Integer(1))
@@ -2196,7 +2215,7 @@ impl LuaEngine {
                         }
                     }
                 };
-                state_rc33.borrow_mut().triggers.push(Trigger {
+                state_rc33.borrow_mut().add_trigger(Trigger {
                     name: String::new(),
                     pattern: trigger_pattern,
                     callback,
@@ -2220,7 +2239,7 @@ impl LuaEngine {
                 let pattern = convert_pcre_to_rust_regex(&pattern);
                 let re = Regex::new(&pattern)
                     .map_err(|e| mlua::Error::external(format!("无效正则 '{}': {}", pattern, e)))?;
-                state_rc34.borrow_mut().aliases.push(Alias {
+                state_rc34.borrow_mut().add_alias(Alias {
                     name: String::new(),
                     match_text: pattern.clone(),
                     pattern: re,
@@ -2239,7 +2258,7 @@ impl LuaEngine {
         let state_rc35 = state_rc.clone();
         let timer_fn =
             lua.create_function_mut(move |_, (interval_secs, callback): (u64, Function)| {
-                state_rc35.borrow_mut().timers.push(TimerDef {
+                state_rc35.borrow_mut().add_timer(TimerDef {
                     name: String::new(),
                     interval_millis: interval_secs * 1000,
                     callback: Some(callback),
@@ -2357,13 +2376,10 @@ pub(super) fn add_trigger_impl(
 
     let mut state = state_rc.borrow_mut();
     if do_replace {
-        if let Some(pos) = state.triggers.iter().position(|t| t.name == name) {
-            state.triggers[pos] = new_trigger;
-        } else {
-            state.triggers.push(new_trigger);
-        }
+        state.delete_trigger(name);
+        state.add_trigger(new_trigger);
     } else {
-        state.triggers.push(new_trigger);
+        state.add_trigger(new_trigger);
     }
 
     Ok(Value::Integer(0))

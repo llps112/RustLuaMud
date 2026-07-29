@@ -159,12 +159,10 @@ impl LuaEngine {
             }
         }
 
-        // 步骤5: one_shot 删除定时器（按名称搜索，避免回调执行后索引已变化）
+        // 步骤5: one_shot 删除定时器（通过索引辅助函数，保证索引一致性）
         if one_shot {
             let mut state = self.state.borrow_mut();
-            if let Some(pos) = state.timers.iter().position(|t| t.name == timer_name) {
-                state.timers.remove(pos);
-            }
+            state.delete_timer(&timer_name);
         }
     }
 
