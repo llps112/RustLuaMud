@@ -1060,6 +1060,7 @@ impl Terminal {
             let row = self.state.status_height + i as u16;
             queue!(stdout, cursor::MoveTo(0, row))?;
             queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+            queue!(stdout, style::ResetColor)?; // 确保每行从默认颜色开始，避免行间颜色泄漏
             queue!(stdout, Print(seg))?;
         }
 
