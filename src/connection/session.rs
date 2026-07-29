@@ -108,6 +108,10 @@ pub struct Session {
     pub connect_delay_ms: u64,
     /// 命令发送最小间隔（毫秒），范围 20~200ms
     pub cmd_interval_ms: u64,
+    /// 令牌桶容量（突发上限），默认 15
+    pub burst_size: u64,
+    /// 每秒令牌补充速率，默认 20
+    pub cmds_per_sec: u64,
 
     // 发送命令的通道
     pub(crate) send_tx: Option<mpsc::Sender<String>>,
@@ -214,6 +218,8 @@ impl Session {
             panels: Vec::new(),
             connect_delay_ms: config.connect_delay_ms,
             cmd_interval_ms: config.cmd_interval_ms.clamp(20, 200),
+            burst_size: config.burst_size.max(1),
+            cmds_per_sec: config.cmds_per_sec.max(1),
             send_tx: None,
             send_raw_tx: None,
             cancel_tx: None,
@@ -467,25 +473,28 @@ impl Session {
         // 写入任务：发送用户命令到服务器
         let event_tx_write = event_tx.clone();
         let write_encoding = self.encoding.clone();
+        let burst_size = self.burst_size;
+        let cmds_per_sec = self.cmds_per_sec;
         let cmd_interval_ms = self.cmd_interval_ms;
-        // 命令发送速率限制：最小间隔（ms），默认 50ms ≈ 20 条/秒
-        // 这是最终的物理限速，独立于 Lua 侧的计数限速
-        // 可通过角色配置文件的 cmd_interval_ms 项调整
+        // 令牌桶限速：burst_size 允许突发，cmds_per_sec 控制长期平均速率
+        // cmd_interval_ms 作为最小间隔下限，防止速率过高
         tokio::spawn(async move {
             use tokio::select;
-            let mut last_cmd_time = std::time::Instant::now();
-            let cmd_interval = std::time::Duration::from_millis(cmd_interval_ms);
+            let mut bucket = crate::connection::rate_limiter::TokenBucket::new(
+                burst_size,
+                cmds_per_sec,
+                cmd_interval_ms,
+            );
             loop {
                 select! {
                     maybe_cmd = send_rx.recv() => {
                         match maybe_cmd {
                             Some(cmd) => {
-                                // 限速：确保命令之间至少有 cmd_interval_ms 的间隔
-                                let elapsed = last_cmd_time.elapsed();
-                                if elapsed < cmd_interval {
-                                    tokio::time::sleep(cmd_interval - elapsed).await;
+                                // 令牌桶限速：获取令牌，不足则等待
+                                let wait = bucket.acquire();
+                                if !wait.is_zero() {
+                                    tokio::time::sleep(wait).await;
                                 }
-                                last_cmd_time = std::time::Instant::now();
 
                                 // 根据编码将命令转为字节
                                 let bytes = match write_encoding {
@@ -708,6 +717,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
         assert_eq!(session.name, "test");
@@ -740,6 +751,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
         assert_eq!(session.render_interval, 2000);
@@ -770,6 +783,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.send("hello").is_err());
@@ -798,6 +813,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let mut session = Session::new(SessionId(1), &config);
         session.disconnect();
@@ -827,6 +844,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(2), &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -855,6 +874,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(3), &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -883,6 +904,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(5), &config);
         assert_eq!(session.script_path, Some("/path/to/script.lua".to_string()));
@@ -911,6 +934,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(6), &config);
         assert_eq!(session.username, Some("player".to_string()));
@@ -940,6 +965,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(7), &config);
         assert!(session.auto_connect);
@@ -970,6 +997,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(8), &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -998,6 +1027,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(9), &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -1074,6 +1105,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.output_lines.is_empty());
@@ -1102,6 +1135,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.lua_engine.is_none());
@@ -1130,6 +1165,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let mut session = Session::new(SessionId(1), &config);
         session.disconnect();
@@ -1167,6 +1204,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(!session.socks5_enable);
@@ -1197,6 +1236,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1227,6 +1268,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1260,6 +1303,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1290,6 +1335,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1320,6 +1367,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         }
     }
 
@@ -1345,6 +1394,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         }
     }
 

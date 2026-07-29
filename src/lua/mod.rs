@@ -1,4 +1,14 @@
-pub mod api;
-pub mod engine;
+mod aliases;
+mod api;
+mod commands;
+mod database;
+mod engine;
+mod helpers;
+mod timers;
+mod triggers;
+mod types;
 
-pub use engine::{LuaEngine, PanelUpdate};
+#[cfg(test)]
+mod tests;
+
+pub use types::{LuaEngine, PanelUpdate};

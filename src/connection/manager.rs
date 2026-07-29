@@ -290,6 +290,8 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
+            burst_size: 15,
+            cmds_per_sec: 20,
         }
     }
 
