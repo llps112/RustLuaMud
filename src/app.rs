@@ -1105,9 +1105,25 @@ impl App {
                         s.render_dirty = true;
                     }
                 } else {
+                    crate::log::debug::debug_log(&format!(
+                        "drain_lua_logs 实时append: fg={} buffer={} msg={:?}",
+                        is_foreground,
+                        buffer,
+                        crate::log::debug::truncate_for_log(&clean, 80)
+                    ));
+                    // 保存到 session 的 output_lines，切换 session 时不会丢失
+                    if let Some(s) = self.manager.get_mut_by_id(session_id) {
+                        s.output_lines.push(format!("\x1b[36m[Lua] {}\x1b[0m", msg));
+                    }
                     self.terminal
                         .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
                 }
+            } else {
+                crate::log::debug::debug_log(&format!(
+                    "drain_lua_logs 非前台SKIP: fg={} msg={:?}",
+                    is_foreground,
+                    crate::log::debug::truncate_for_log(&clean, 80)
+                ));
             }
         }
         // 面板更新需在日志输出前处理，确保 append_output 触发渲染时面板已是最新状态
@@ -1994,6 +2010,15 @@ impl App {
                         let clean = crate::ui::AnsiParser::strip_ansi(msg);
                         self.logger.log(&name, &clean);
                     }
+                    // [DEBUG] 记录 drain_logs 收集到的 Lua 日志
+                    if !pending_lua_logs.is_empty() {
+                        crate::log::debug::debug_log(&format!("阶段1 drain_logs: session={:?} fg={:?} realtime={} log_count={} first_msg={:?}",
+                            id, self.manager.foreground_id, is_realtime, pending_lua_logs.len(),
+                            pending_lua_logs.first().map(|s| {
+                                let c = crate::ui::AnsiParser::strip_ansi(s);
+                                crate::log::debug::truncate_for_log(&c, 80)
+                            })));
+                    }
                 }
 
                 // ===== 阶段 2：显示 + 回看缓冲（按 omit 标志逐行决定）=====
@@ -2053,11 +2078,58 @@ impl App {
                             session.render_dirty = true;
                         }
                     } else {
+                        crate::log::debug::debug_log(&format!(
+                            "阶段2 实时模式 append_lua_logs: count={}",
+                            pending_lua_logs.len()
+                        ));
                         for msg in pending_lua_logs {
-                            self.terminal
-                                .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", msg))?;
+                            let formatted = format!("\x1b[36m[Lua] {}\x1b[0m", msg);
+                            let clean = crate::ui::AnsiParser::strip_ansi(&formatted);
+                            crate::log::debug::debug_log(&format!(
+                                "  append_output: msg={:?}",
+                                crate::log::debug::truncate_for_log(&clean, 80)
+                            ));
+                            // 保存到 session 的 output_lines，切换 session 时不会丢失
+                            if let Some(session) = self.manager.get_mut_by_id(id) {
+                                session.output_lines.push(formatted.clone());
+                            }
+                            let before = self.terminal.output_lines_len();
+                            self.terminal.append_output(&formatted)?;
+                            let after = self.terminal.output_lines_len();
+                            crate::log::debug::debug_log(&format!(
+                                "  append_result: before={} after={} delta={}",
+                                before,
+                                after,
+                                after.saturating_sub(before)
+                            ));
+                        }
+                        // 限制回看缓冲区大小
+                        if let Some(session) = self.manager.get_mut_by_id(id) {
+                            if session.output_lines.len() > max_lines {
+                                let drain_count = session.output_lines.len() - max_lines;
+                                session.output_lines.drain(..drain_count);
+                            }
                         }
                     }
+                } else if !pending_lua_logs.is_empty() {
+                    // 非前台 session 的 Lua 日志也需写入 session.output_lines
+                    if let Some(session) = self.manager.get_mut_by_id(id) {
+                        for msg in &pending_lua_logs {
+                            session
+                                .output_lines
+                                .push(format!("\x1b[36m[Lua] {}\x1b[0m", msg));
+                        }
+                        if session.output_lines.len() > max_lines {
+                            let drain_count = session.output_lines.len() - max_lines;
+                            session.output_lines.drain(..drain_count);
+                        }
+                    }
+                    crate::log::debug::debug_log(&format!(
+                        "阶段2 非前台lua_logs: session={:?} fg={:?} logs_saved={}",
+                        id,
+                        self.manager.foreground_id,
+                        pending_lua_logs.len()
+                    ));
                 }
                 // 排空引擎中剩余的 Lua 日志（触发器处理后又产生的）
                 self.drain_lua_logs(id)?;

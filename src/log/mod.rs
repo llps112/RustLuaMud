@@ -1,3 +1,4 @@
+pub mod debug;
 pub mod logger;
 pub mod panic_hook;
 
