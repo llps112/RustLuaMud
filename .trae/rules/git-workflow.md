@@ -7,7 +7,16 @@
 **主仓库**（Rust 客户端）和 **子模块**（Lua 脚本）各自独立提交和推送，互不关联：
 - 改脚本 → 只在 `scripts/private/` 里 commit + push
 - 改主仓库代码 → 只在根目录 commit + push
-- **禁止**在主仓库提交"更新子模块指针"这类与 Rust 代码无关的 commit
+
+## 子模块指针更新
+
+子模块提交后，需要更新主仓库的子模块指针（`git add scripts/private` → commit），使 release 版本指向正确的子模块 commit。
+
+**注意事项**：
+- 子模块指针更新**只改 `.gitmodules` 中的 commit hash**，不涉及 Rust 代码变更
+- **不需要触发 CI**（cargo fmt/clippy/test）
+- **不需要发布新 release**——子模块由 `deploy.sh` 独立部署
+- commit message 统一用 `chore: 更新子模块指针`
 
 ## war_members_data.lua 提交规则
 

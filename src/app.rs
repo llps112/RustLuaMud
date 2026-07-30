@@ -947,17 +947,14 @@ impl App {
             self.drain_lua_logs(session_id)?;
         }
 
-        loop {
-            // 先检查是否有到期的定时器，确保 engine 引用在调用 self 方法前被释放
-            let should_fire = self
-                .manager
-                .get_by_id(session_id)
-                .and_then(|s| s.lua_engine.as_ref())
-                .map(|engine| engine.fire_next_due_timer())
-                .unwrap_or(false);
-            if !should_fire {
-                break;
-            }
+        // 批量触发所有到期定时器（MushClient 兼容：一轮扫描收集，逐个触发）
+        let due_names = self
+            .manager
+            .get_by_id(session_id)
+            .and_then(|s| s.lua_engine.as_ref())
+            .map(|engine| engine.fire_due_timers())
+            .unwrap_or_default();
+        if !due_names.is_empty() {
             any_fired = true;
             let commands = self
                 .manager
@@ -968,7 +965,6 @@ impl App {
             if !commands.is_empty() {
                 self.send_lua_commands(session_id, commands)?;
             }
-            // 处理 SendPkt 压入的原始数据包
             self.send_lua_raw(session_id)?;
             self.drain_lua_logs(session_id)?;
         }
@@ -1353,7 +1349,7 @@ impl App {
                     realtime: false,
                     connect_delay_ms: 1000,
                     cmd_interval_ms: 50,
-                    burst_size: 15,
+                    burst_size: 10,
                     cmds_per_sec: 20,
                 };
 

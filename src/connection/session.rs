@@ -108,7 +108,7 @@ pub struct Session {
     pub connect_delay_ms: u64,
     /// 命令发送最小间隔（毫秒），范围 20~200ms
     pub cmd_interval_ms: u64,
-    /// 令牌桶容量（突发上限），默认 15
+    /// 令牌桶容量（突发上限），默认 10
     pub burst_size: u64,
     /// 每秒令牌补充速率，默认 20
     pub cmds_per_sec: u64,
@@ -717,7 +717,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
@@ -751,7 +751,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
@@ -783,7 +783,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
@@ -813,7 +813,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let mut session = Session::new(SessionId(1), &config);
@@ -844,7 +844,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(2), &config);
@@ -874,7 +874,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(3), &config);
@@ -904,7 +904,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(5), &config);
@@ -934,7 +934,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(6), &config);
@@ -965,7 +965,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(7), &config);
@@ -997,7 +997,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(8), &config);
@@ -1027,7 +1027,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(9), &config);
@@ -1105,7 +1105,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
@@ -1135,7 +1135,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
@@ -1165,7 +1165,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let mut session = Session::new(SessionId(1), &config);
@@ -1204,7 +1204,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
@@ -1236,7 +1236,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
@@ -1268,7 +1268,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
@@ -1303,7 +1303,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
@@ -1335,7 +1335,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         };
         let session = Session::new(SessionId(1), &config);
@@ -1367,7 +1367,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         }
     }
@@ -1394,7 +1394,7 @@ mod tests {
             realtime: false,
             connect_delay_ms: 1000,
             cmd_interval_ms: 50,
-            burst_size: 15,
+            burst_size: 10,
             cmds_per_sec: 20,
         }
     }

@@ -22,6 +22,28 @@ use super::types::{
 };
 use crate::ui::terminal::PanelButtonDef;
 
+/// 计算 at_time timer 的下次触发时间（本地时区的下一个 HH:MM:SS）
+fn compute_next_at_time(hour: i64, min: i64, sec: f64) -> std::time::Instant {
+    use chrono::{Duration as ChronoDuration, Local, NaiveTime};
+    let now = Local::now();
+    let target_time = NaiveTime::from_hms_opt(
+        hour.clamp(0, 23) as u32,
+        min.clamp(0, 59) as u32,
+        sec.floor().clamp(0.0, 59.0) as u32,
+    )
+    .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+    let today_target = now.date_naive().and_time(target_time);
+    let next = if today_target >= now.naive_local() {
+        today_target
+    } else {
+        today_target + ChronoDuration::days(1)
+    };
+    let duration = (next - now.naive_local())
+        .to_std()
+        .unwrap_or(std::time::Duration::from_secs(86400));
+    std::time::Instant::now() + duration
+}
+
 impl LuaEngine {
     pub(super) fn register_api(&mut self) -> LuaResult<()> {
         let lua = &self.lua;
@@ -1153,6 +1175,14 @@ impl LuaEngine {
                 _ => (flags & 1) != 0,
             };
 
+            // at_time timer：计算到下一个本地 HH:MM:SS 时刻
+            // 否则：now + interval
+            let next_fire = if at_time {
+                compute_next_at_time(_hour, _min, sec_val)
+            } else {
+                std::time::Instant::now() + std::time::Duration::from_millis(interval_millis_u64)
+            };
+
             state_rc19.borrow_mut().add_timer(TimerDef {
                 name,
                 interval_millis: interval_millis_u64,
@@ -1162,7 +1192,7 @@ impl LuaEngine {
                 one_shot,
                 at_time,
                 send_text,
-                last_fired: std::time::Instant::now(),
+                next_fire,
             });
             Ok(Value::Integer(0))
         })?;
@@ -1174,24 +1204,11 @@ impl LuaEngine {
             if !(0.1..=86399.0).contains(&seconds) {
                 return Ok(Value::Integer(1)); // eTimeInvalid
             }
-            let mut state = state_rc_da.borrow_mut();
-            state.unique_counter += 1;
-            let timer_name = format!("__doafter_{}", state.unique_counter);
             let interval_millis = (seconds * 1000.0) as u64;
-
             let send_text = format!("Execute([[{}]])", text);
-
-            state.add_timer(TimerDef {
-                name: timer_name,
-                interval_millis,
-                callback: None,
-                enabled: true,
-                group: String::new(),
-                one_shot: true,
-                at_time: false,
-                send_text,
-                last_fired: std::time::Instant::now(),
-            });
+            state_rc_da
+                .borrow_mut()
+                .add_doafter_timer("__doafter", interval_millis, send_text);
             Ok(Value::Integer(0)) // eOK
         })?;
         globals.set("DoAfter", doafter_fn)?;
@@ -1203,24 +1220,13 @@ impl LuaEngine {
                 if !(0.1..=86399.0).contains(&seconds) {
                     return Ok(Value::Integer(1)); // eTimeInvalid
                 }
-                let mut state = state_rc_dn.borrow_mut();
-                state.unique_counter += 1;
-                let timer_name = format!("__doafter_note_{}", state.unique_counter);
                 let interval_millis = (seconds * 1000.0) as u64;
-
                 let send_text = format!("Note([[{}]])", text);
-
-                state.add_timer(TimerDef {
-                    name: timer_name,
+                state_rc_dn.borrow_mut().add_doafter_timer(
+                    "__doafter_note",
                     interval_millis,
-                    callback: None,
-                    enabled: true,
-                    group: String::new(),
-                    one_shot: true,
-                    at_time: false,
                     send_text,
-                    last_fired: std::time::Instant::now(),
-                });
+                );
                 Ok(Value::Integer(0))
             })?;
         globals.set("DoAfterNote", doafter_note_fn)?;
@@ -1235,11 +1241,7 @@ impl LuaEngine {
                 if !(0..=14).contains(&send_to) {
                     return Ok(Value::Integer(2)); // eOptionOutOfRange
                 }
-                let mut state = state_rc_ds.borrow_mut();
-                state.unique_counter += 1;
-                let timer_name = format!("__doafter_special_{}", state.unique_counter);
                 let interval_millis = (seconds * 1000.0) as u64;
-
                 let send_text = match send_to {
                     0 | 10 | 13 => format!("Execute([[{}]])", text), // World / Execute / Immediate
                     2 => format!("Note([[{}]])", text),              // Output window
@@ -1248,18 +1250,11 @@ impl LuaEngine {
                     12 | 14 => text,                                 // Script engine — 直接执行 Lua
                     _ => format!("Execute([[{}]])", text),           // 默认走 Execute
                 };
-
-                state.add_timer(TimerDef {
-                    name: timer_name,
+                state_rc_ds.borrow_mut().add_doafter_timer(
+                    "__doafter_special",
                     interval_millis,
-                    callback: None,
-                    enabled: true,
-                    group: String::new(),
-                    one_shot: true,
-                    at_time: false,
                     send_text,
-                    last_fired: std::time::Instant::now(),
-                });
+                );
                 Ok(Value::Integer(0))
             })?;
         globals.set("DoAfterSpecial", doafter_special_fn)?;
@@ -1271,24 +1266,13 @@ impl LuaEngine {
                 if !(0.1..=86399.0).contains(&seconds) {
                     return Ok(Value::Integer(1)); // eTimeInvalid
                 }
-                let mut state = state_rc_dw.borrow_mut();
-                state.unique_counter += 1;
-                let timer_name = format!("__doafter_sw_{}", state.unique_counter);
                 let interval_millis = (seconds * 1000.0) as u64;
-
                 let send_text = format!("Execute([[{}]])", text);
-
-                state.add_timer(TimerDef {
-                    name: timer_name,
+                state_rc_dw.borrow_mut().add_doafter_timer(
+                    "__doafter_sw",
                     interval_millis,
-                    callback: None,
-                    enabled: true,
-                    group: String::new(),
-                    one_shot: true,
-                    at_time: false,
                     send_text,
-                    last_fired: std::time::Instant::now(),
-                });
+                );
                 Ok(Value::Integer(0))
             })?;
         globals.set("DoAfterSpeedWalk", doafter_sw_fn)?;
@@ -1368,10 +1352,13 @@ impl LuaEngine {
                                         .unwrap_or_default()
                                         .as_secs();
                                     let offset = current_time.saturating_sub(ts as u64);
-                                    t.last_fired = std::time::Instant::now()
-                                        - std::time::Duration::from_secs(offset);
+                                    // 绝对时间模型：通过偏移量计算下次触发时间
+                                    t.next_fire = std::time::Instant::now()
+                                        - std::time::Duration::from_secs(offset)
+                                        + std::time::Duration::from_millis(t.interval_millis);
                                 } else {
-                                    t.last_fired = std::time::Instant::now();
+                                    t.next_fire = std::time::Instant::now()
+                                        + std::time::Duration::from_millis(t.interval_millis);
                                 }
                             }
                         }
@@ -1423,13 +1410,39 @@ impl LuaEngine {
             let mut state = state_rc_rt.borrow_mut();
             let idx = state.timer_by_name.get(&name).copied();
             if let Some(i) = idx {
-                state.timers[i].last_fired = std::time::Instant::now();
+                let timer = &mut state.timers[i];
+                timer.next_fire = if timer.at_time {
+                    // at_time timer：重置到下一个本地 HH:MM:SS 时刻
+                    // 从 interval_millis 反推 hour/min/sec
+                    let total_secs = timer.interval_millis / 1000;
+                    let hour = (total_secs / 3600) as i64;
+                    let min = ((total_secs % 3600) / 60) as i64;
+                    let sec = (total_secs % 60) as f64;
+                    compute_next_at_time(hour, min, sec)
+                } else {
+                    std::time::Instant::now()
+                        + std::time::Duration::from_millis(timer.interval_millis)
+                };
                 Ok(Value::Integer(0))
             } else {
                 Ok(Value::Integer(1))
             }
         })?;
         globals.set("ResetTimer", reset_timer_fn)?;
+
+        // IsTimer(name) — 测试 timer 是否存在
+        // 返回 0=存在（eOK），1=不存在（与 DeleteTimer 返回值模式一致）
+        let state_rc_it = state_rc.clone();
+        let is_timer_fn = lua.create_function_mut(move |_, name: String| {
+            Ok(Value::Integer(
+                if state_rc_it.borrow().timer_by_name.contains_key(&name) {
+                    0
+                } else {
+                    1
+                },
+            ))
+        })?;
+        globals.set("IsTimer", is_timer_fn)?;
 
         // ============================================================
         // 配置 API
@@ -2267,7 +2280,8 @@ impl LuaEngine {
                     one_shot: false,
                     at_time: false,
                     send_text: String::new(),
-                    last_fired: std::time::Instant::now(),
+                    next_fire: std::time::Instant::now()
+                        + std::time::Duration::from_millis(interval_secs * 1000),
                 });
                 Ok(())
             })?;

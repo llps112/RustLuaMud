@@ -1236,9 +1236,9 @@ fn test_set_timer_option_timestamp() {
         exec(engine, "AddTimer('ts_timer', 0, 0, 60, '', 1)").unwrap();
         // 设一个过去的时间戳，定时器应立即到期
         exec(engine, "SetTimerOption('ts_timer', 'timer_timestamp', 100)").unwrap();
-        let fired = engine.fire_next_due_timer();
+        let due = engine.fire_due_timers();
         assert!(
-            fired,
+            !due.is_empty(),
             "past timestamp should cause timer to fire immediately"
         );
     });
@@ -1289,7 +1289,7 @@ fn test_fire_timer() {
         "#,
         )
         .unwrap();
-        engine.fire_timer(0);
+        engine.fire_timer_by_name("fire_t");
         let result: Option<String> = eval(engine, "return timer_result").unwrap();
         assert_eq!(result, Some("fired".to_string()));
     });
@@ -1301,7 +1301,7 @@ fn test_fire_timer_one_shot() {
         // flag 4 = OneShot, flag 1 = Enabled
         exec(engine, "AddTimer('oneshot', 0, 0, 5, '', 5)").unwrap();
         assert_eq!(engine.timer_count(), 1);
-        engine.fire_timer(0);
+        engine.fire_timer_by_name("oneshot");
         assert_eq!(engine.timer_count(), 0);
     });
 }
@@ -1317,7 +1317,7 @@ fn test_fire_timer_disabled() {
         "#,
         )
         .unwrap();
-        engine.fire_timer(0);
+        engine.fire_timer_by_name("dis_t");
         let result: Option<bool> = eval(engine, "return disabled_timer_result").unwrap();
         assert_eq!(result, None);
     });
@@ -1350,6 +1350,114 @@ fn test_timer_nil_sec() {
         exec(engine, "AddTimer('nil_t', 0, 0, nil, '', 1)").unwrap();
         let intervals = engine.timer_intervals();
         assert!(intervals.contains(&1000));
+    });
+}
+
+#[test]
+fn test_is_timer() {
+    with_engine(|engine| {
+        exec(engine, "AddTimer('exists_t', 0, 0, 5, '', 1)").unwrap();
+        let exists: i64 = eval(engine, "return IsTimer('exists_t')").unwrap();
+        assert_eq!(exists, 0, "existing timer should return 0");
+        let missing: i64 = eval(engine, "return IsTimer('nope')").unwrap();
+        assert_eq!(missing, 1, "missing timer should return 1");
+    });
+}
+
+#[test]
+fn test_doafter_via_fire_due_timers() {
+    with_engine(|engine| {
+        exec(engine, r#"DoAfter(0.1, "test_cmd")"#).unwrap();
+        // 手动把 next_fire 设为过去，使其立即到期（避免 sleep 导致的 flaky test）
+        {
+            let mut state = engine.state.borrow_mut();
+            let idx = state
+                .timer_by_name
+                .keys()
+                .find(|k| k.starts_with("__doafter_"))
+                .cloned();
+            if let Some(name) = idx {
+                let i = state.timer_by_name[&name];
+                state.timers[i].next_fire =
+                    std::time::Instant::now() - std::time::Duration::from_secs(1);
+            }
+        }
+        let due = engine.fire_due_timers();
+        assert!(
+            due.iter().any(|n| n.starts_with("__doafter_")),
+            "DoAfter timer should fire via fire_due_timers"
+        );
+        let cmds = engine.drain_commands();
+        assert!(
+            cmds.contains(&"test_cmd".to_string()),
+            "DoAfter timer should send command"
+        );
+    });
+}
+
+#[test]
+fn test_at_time_timer_advances_24h() {
+    with_engine(|engine| {
+        // at_time timer: flags = Enabled(1) + AtTime(2) = 3
+        // 目标时刻 23:50:00 — 一定在未来（或刚过去，都会推进到明天）
+        exec(engine, "AddTimer('at_t', 23, 50, 0, '', 3)").unwrap();
+        // 手动把 next_fire 设为过去，使其立即触发
+        {
+            let mut state = engine.state.borrow_mut();
+            let idx = state.timer_by_name.get("at_t").copied().unwrap();
+            state.timers[idx].next_fire =
+                std::time::Instant::now() - std::time::Duration::from_secs(1);
+        }
+        let due = engine.fire_due_timers();
+        assert!(
+            due.contains(&"at_t".to_string()),
+            "at_time timer should fire"
+        );
+        // 再次调用：next_fire 已推进 24h，不应再次触发
+        let due2 = engine.fire_due_timers();
+        assert!(
+            due2.is_empty(),
+            "at_time timer should not fire again immediately after 24h advance"
+        );
+    });
+}
+
+#[test]
+fn test_multiple_timers_fire_together() {
+    with_engine(|engine| {
+        // 创建 3 个已过期的 timer
+        exec(engine, "AddTimer('m1', 0, 0, 5, '', 1)").unwrap();
+        exec(engine, "AddTimer('m2', 0, 0, 5, '', 1)").unwrap();
+        exec(engine, "AddTimer('m3', 0, 0, 5, '', 1)").unwrap();
+        // 手动把所有 next_fire 设为过去
+        {
+            let mut state = engine.state.borrow_mut();
+            let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+            for i in 0..state.timers.len() {
+                state.timers[i].next_fire = past;
+            }
+        }
+        let due = engine.fire_due_timers();
+        assert_eq!(due.len(), 3, "all three timers should fire together");
+    });
+}
+
+#[test]
+fn test_timer_callback_deletes_another() {
+    with_engine(|engine| {
+        exec(
+            engine,
+            r#"
+            AddTimer('t1', 0, 0, 1, '', 1, 'DeleteTimer("t2")')
+            AddTimer('t2', 0, 0, 1, '', 1)
+        "#,
+        )
+        .unwrap();
+        // 触发 t1，它的回调会删除 t2
+        engine.fire_timer_by_name("t1");
+        // t2 应该已被删除
+        let exists: i64 = eval(engine, "return IsTimer('t2')").unwrap();
+        assert_eq!(exists, 1, "t2 should be deleted by t1's callback");
     });
 }
 
@@ -2174,8 +2282,8 @@ fn test_set_connected_delay_calls_on_connect_immediately() {
 #[test]
 fn test_fire_timer_out_of_bounds() {
     with_engine(|engine| {
-        // 索引越界不应 panic
-        engine.fire_timer(999);
+        // 不存在的 timer 名称不应 panic
+        engine.fire_timer_by_name("nonexistent_timer");
     });
 }
 
@@ -2549,7 +2657,7 @@ fn test_timer_shorthand() {
         )
         .unwrap();
         assert_eq!(engine.timer_count(), 1);
-        engine.fire_timer(0);
+        engine.fire_timer_by_name("");
         let result: String = eval(engine, "return timer_result").unwrap();
         assert_eq!(result, "fired");
     });

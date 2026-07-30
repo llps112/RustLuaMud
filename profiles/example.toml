@@ -37,7 +37,7 @@ realtime = true
 render_interval = 1000
 
 # 日志文件保留数量（可选，默认 24，即保留最近 24 个小时的日志文件）
-# log_rotation_count = 24
+log_rotation_count = 24
 
 # 命令发送速率限制（令牌桶限速，可选）
 # 限速由 Rust 侧令牌桶统一保证，Lua 脚本只负责入队
@@ -45,13 +45,13 @@ render_interval = 1000
 # cmd_interval_ms: 最小发送间隔（毫秒，默认 50，范围 20~200）
 #   作为令牌桶的下限保护，仅在令牌不足时生效；令牌充足时允许突发
 #   推荐值：50（普通玩家）、80（轻度延迟）、120（保守安全）
-# cmd_interval_ms = 50
+cmd_interval_ms = 50
 #
-# burst_size: 令牌桶容量（突发上限，默认 15）
+# burst_size: 令牌桶容量（突发上限，默认 10）
 #   允许短时间内发送的最大命令数，初始满桶
 #   设为 1 可禁用突发，退化为固定间隔模式（最保守）
-# burst_size = 15
+burst_size = 10
 #
 # cmds_per_sec: 每秒令牌补充速率（默认 20）
 #   控制长期平均发送速率，令牌按此速率持续补充
-# cmds_per_sec = 20
+cmds_per_sec = 20

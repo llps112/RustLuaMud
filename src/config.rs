@@ -97,7 +97,7 @@ pub struct ConnectionConfig {
     /// 推荐值：50ms（普通玩家）、80ms（轻度延迟）、120ms（保守安全）
     #[serde(default = "default_cmd_interval_ms")]
     pub cmd_interval_ms: u64,
-    /// 令牌桶容量（突发上限），默认 15
+    /// 令牌桶容量（突发上限），默认 10
     /// 允许短时间内发送的最大命令数，对应 Lua 侧原 max_burst
     #[serde(default = "default_burst_size")]
     pub burst_size: u64,
@@ -126,7 +126,7 @@ fn default_cmd_interval_ms() -> u64 {
     50
 }
 fn default_burst_size() -> u64 {
-    15
+    10
 }
 fn default_cmds_per_sec() -> u64 {
     20

@@ -204,6 +204,29 @@ impl ScriptState {
         }
     }
 
+    /// 添加 DoAfter 系列一次性定时器（共用构造模式）
+    pub fn add_doafter_timer(
+        &mut self,
+        name_prefix: &str,
+        interval_millis: u64,
+        send_text: String,
+    ) {
+        self.unique_counter += 1;
+        let name = format!("{}_{}", name_prefix, self.unique_counter);
+        self.add_timer(TimerDef {
+            name,
+            interval_millis,
+            callback: None,
+            enabled: true,
+            group: String::new(),
+            one_shot: true,
+            at_time: false,
+            send_text,
+            next_fire: std::time::Instant::now()
+                + std::time::Duration::from_millis(interval_millis),
+        });
+    }
+
     /// 删除 timer 并更新索引
     pub fn delete_timer(&mut self, name: &str) -> bool {
         let idx = match self.timer_by_name.remove(name) {

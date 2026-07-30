@@ -86,7 +86,8 @@ pub struct TimerDef {
     pub one_shot: bool,
     pub at_time: bool,
     pub send_text: String,
-    pub last_fired: Instant,
+    /// 下次触发的绝对时间（MushClient 兼容：tFireTime 模型，无累积漂移）
+    pub next_fire: Instant,
 }
 
 /// 脚本编码类型

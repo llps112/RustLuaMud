@@ -3,6 +3,7 @@
 ## 重要：区分语言，避免做无用功
 
 - **仅改 Lua 脚本** → 只需做 GBK 同步（`iconv -f utf-8 -t gbk ...`）。**严禁**跑 `cargo fmt`、`cargo clippy`、`cargo test`、`cargo build`，纯属浪费时间。
+- **仅更新子模块指针** → 只改 commit hash，不涉及任何代码变更。无需 GBK 同步、无需 Rust 检查、无需 CI 触发、无需新 release。
 - **改 Rust 代码** → 执行下方三项检查 + 编译。
 
 ## 修改/新增 Rust 代码的完整检查流程
