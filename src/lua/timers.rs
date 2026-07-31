@@ -86,13 +86,6 @@ impl LuaEngine {
     /// 依赖外层 `fire_timer_by_name` 的 `catch_unwind` 兜底，
     /// 本函数不再使用步骤级 `catch_unwind`，避免 panic 后继续执行后续步骤导致状态不一致。
     fn fire_timer_inner(&self, index: usize) {
-        // 安全守卫：确认 pending_commands 为空（主循环路径在 drain 后调用 timer，
-        // 如果非空说明有命令泄漏，需排查调用路径）
-        debug_assert!(
-            self.state.borrow().pending_commands.is_empty(),
-            "pending_commands should be empty before timer fires"
-        );
-
         // 读取定时器信息
         let (callback, send_text, one_shot, timer_name) = {
             let state = self.state.borrow();
@@ -172,6 +165,16 @@ impl LuaEngine {
     pub fn fire_due_timers(&self) -> Vec<String> {
         let now = std::time::Instant::now();
         let mut due_names: Vec<String> = Vec::new();
+
+        // 安全守卫：确认 pending_commands 为空（主循环每轮结束时已 drain，
+        // 若入口处非空说明有命令泄漏，需排查调用路径）。
+        // 注意：不能放在 fire_timer_inner 内部——同一轮内前一个 timer 回调
+        // 通过 Execute 产生的命令会残留到下一个 timer 触发时，属合法累积，
+        // 全部触发完后由主循环统一 drain。
+        debug_assert!(
+            self.state.borrow().pending_commands.is_empty(),
+            "pending_commands should be empty before timer fires"
+        );
 
         // 阶段1：扫描所有 timer，收集到期名称并推进 next_fire
         {
