@@ -419,12 +419,6 @@ impl TerminalState {
                     } else if let Some(sgr) = last_sgr {
                         self.last_ansi_sgr = sgr;
                     }
-                    // [DEBUG] 追踪被跳过的纯 ANSI 行
-                    crate::log::debug::debug_log(&format!(
-                        "push_output SKIP纯ANSI: has_reset={} len={}",
-                        has_reset,
-                        trimmed.len()
-                    ));
                 } else if last_sgr.is_some() {
                     // 有可见文本且自身带 ANSI：保存颜色，加入输出（附 reset）
                     if !has_reset {
@@ -450,17 +444,6 @@ impl TerminalState {
         }
 
         let new_lines = self.output_lines.len() - old_len;
-
-        // [DEBUG] 追踪 push_output 的结果
-        if new_lines == 0 && !line.trim().is_empty() {
-            let clean = AnsiParser::strip_ansi(line);
-            crate::log::debug::debug_log(&format!(
-                "push_output NO_NEW_LINES: input_len={} stripped_len={} sample={:?}",
-                line.len(),
-                clean.len(),
-                crate::log::debug::truncate_for_log(&clean, 60)
-            ));
-        }
 
         // 限制缓冲区大小
         const MAX_OUTPUT_LINES: usize = 5000;
@@ -955,11 +938,6 @@ impl Terminal {
     #[allow(dead_code)]
     pub fn state(&self) -> &TerminalState {
         &self.state
-    }
-
-    /// [DEBUG] 返回 output_lines 的长度，用于调试日志
-    pub fn output_lines_len(&self) -> usize {
-        self.state.output_lines.len()
     }
 
     /// 获取状态可变引用
