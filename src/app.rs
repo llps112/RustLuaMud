@@ -14,6 +14,7 @@ use crate::config::AppConfig;
 use crate::connection::{ConnectionManager, ManagerEvent, SessionId, SessionState};
 use crate::log::Logger;
 use crate::lua::PanelUpdate;
+use crate::ui::terminal::Panel;
 use crate::ui::{AnsiParser, Terminal};
 
 /// 终端设置持久化
@@ -1120,7 +1121,8 @@ impl App {
     /// 排空 Lua 面板更新并应用到终端
     ///
     /// 所有 session 的 pending_panels 都会在此排空，避免后台 session 的面板更新无限累积。
-    /// 仅前台 session 的更新会被实际应用到终端，后台 session 的更新直接丢弃。
+    /// 前台 session 的更新直接应用到终端；后台 session 的更新增量写入 session.panels，
+    /// 使切换 session 时 restore_panels 能恢复最新状态。
     fn drain_lua_panels(&mut self, session_id: SessionId) {
         let updates = self
             .manager
@@ -1129,6 +1131,48 @@ impl App {
             .map(|engine| engine.drain_panels())
             .unwrap_or_default();
         if session_id != self.manager.foreground_id {
+            // 后台 session：将面板更新增量写入 session.panels，切换时即可恢复最新状态
+            if !updates.is_empty() {
+                if let Some(session) = self.manager.get_mut_by_id(session_id) {
+                    for update in updates {
+                        match update {
+                            PanelUpdate::Set {
+                                name,
+                                x,
+                                y,
+                                width,
+                                height,
+                                lines,
+                                buttons,
+                            } => {
+                                if let Some(existing) =
+                                    session.panels.iter_mut().find(|p| p.name == name)
+                                {
+                                    existing.x = x;
+                                    existing.y = y;
+                                    existing.width = width;
+                                    existing.height = height;
+                                    existing.lines = lines;
+                                    existing.buttons = buttons;
+                                } else {
+                                    session.panels.push(Panel {
+                                        name,
+                                        x,
+                                        y,
+                                        width,
+                                        height,
+                                        lines,
+                                        buttons,
+                                    });
+                                }
+                            }
+                            PanelUpdate::Remove { name } => {
+                                session.panels.retain(|p| p.name != name);
+                            }
+                        }
+                    }
+                }
+            }
             return;
         }
         for update in updates {
