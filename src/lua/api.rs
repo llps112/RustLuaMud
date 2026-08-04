@@ -549,6 +549,23 @@ impl LuaEngine {
         })?;
         globals.set("RemovePanel", remove_panel_fn)?;
 
+        // RegisterPanelHandler(panel_name, callback) — 注册面板点击回调
+        // panel_name: 面板名称（与 SetPanel 的 name 参数一致）
+        // callback: function(panel_name, action) — 点击按钮时调用
+        //
+        // 设计意图: 解耦客户端与脚本。客户端不硬编码脚本侧函数名,
+        // 脚本通过此 API 主动注册回调, 与 AddTrigger/AddAlias/AddTimer 模式一致。
+        let state_rc_panel_handler = state_rc.clone();
+        let register_panel_handler_fn =
+            lua.create_function_mut(move |_, (panel_name, callback): (String, mlua::Function)| {
+                state_rc_panel_handler
+                    .borrow_mut()
+                    .panel_handlers
+                    .insert(panel_name, callback);
+                Ok(())
+            })?;
+        globals.set("RegisterPanelHandler", register_panel_handler_fn)?;
+
         // Tell(text...) — 追加到 tell_buffer，实现内联输出（支持多参数拼接）
         let state_rc7 = state_rc.clone();
         let tell_fn = lua.create_function_mut(move |_lua, args: mlua::MultiValue| {

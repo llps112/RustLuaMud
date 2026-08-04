@@ -211,13 +211,32 @@ impl LuaEngine {
         state.pending_panels.drain(..).collect()
     }
 
-    /// 处理面板按钮点击事件，调用 Lua 全局函数 on_panel_click(panel_name, action)
+    /// 处理面板按钮点击事件，调用通过 RegisterPanelHandler 注册的回调
+    ///
+    /// 设计: 客户端不硬编码脚本侧函数名，而是从 `panel_handlers` 注册表查找。
+    /// 脚本通过 `RegisterPanelHandler(panel_name, callback)` 主动注册回调，
+    /// 与 AddTrigger/AddAlias/AddTimer 的注册模式一致。
     pub fn handle_panel_click(&self, panel_name: &str, action: &str) {
-        let globals = self.lua.globals();
-        let func_result = globals.get::<mlua::Function>("on_panel_click");
-        if let Ok(func) = func_result {
-            if let Err(e) = func.call::<()>((panel_name, action)) {
-                self.log_error(&format!("[Lua] on_panel_click 回调中发生错误: {}", e));
+        // 从注册表查找回调（clone 出来避免跨 RefCell 借用调用 Lua）
+        let callback_opt = {
+            let state = self.state.borrow();
+            state.panel_handlers.get(panel_name).cloned()
+        };
+        match callback_opt {
+            Some(func) => {
+                if let Err(e) = func.call::<()>((panel_name, action)) {
+                    self.log_error(&format!(
+                        "[Lua] 面板 '{}' 点击回调中发生错误: {}",
+                        panel_name, e
+                    ));
+                }
+            }
+            None => {
+                // 未注册回调时记录调试信息，便于排查（不再静默失败）
+                self.log_error(&format!(
+                    "[Lua] 面板 '{}' 未注册点击回调（请调用 RegisterPanelHandler 注册）",
+                    panel_name
+                ));
             }
         }
     }

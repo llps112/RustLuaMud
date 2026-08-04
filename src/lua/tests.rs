@@ -366,6 +366,97 @@ fn test_remove_panel() {
 }
 
 #[test]
+fn test_register_panel_handler() {
+    with_engine(|engine| {
+        // 注册回调
+        exec(
+            engine,
+            r#"RegisterPanelHandler("stat", function(name, action) end)"#,
+        )
+        .unwrap();
+        // 验证已存入注册表
+        let state = engine.state.borrow();
+        assert!(state.panel_handlers.contains_key("stat"));
+    });
+}
+
+#[test]
+fn test_register_panel_handler_overwrite() {
+    with_engine(|engine| {
+        // 同一 panel 注册两次, 后者覆盖前者
+        exec(engine, r#"RegisterPanelHandler("stat", function() end)"#).unwrap();
+        exec(
+            engine,
+            r#"RegisterPanelHandler("stat", function(name, action) _clicked = action end)"#,
+        )
+        .unwrap();
+        // 注册表只有一个条目
+        let state = engine.state.borrow();
+        assert_eq!(state.panel_handlers.len(), 1);
+    });
+}
+
+#[test]
+fn test_panel_click_dispatch() {
+    with_engine(|engine| {
+        // 注册回调: 点击时把 action 写入 Lua 全局 _clicked_action
+        exec(
+            engine,
+            r#"RegisterPanelHandler("stat", function(name, action)
+                    _clicked_name = name
+                    _clicked_action = action
+                end)"#,
+        )
+        .unwrap();
+        // 模拟点击 "go" 按钮
+        engine.handle_panel_click("stat", "go");
+        // 验证回调被调用, 参数正确传递
+        let name: String = eval(engine, "return _clicked_name").unwrap();
+        let action: String = eval(engine, "return _clicked_action").unwrap();
+        assert_eq!(name, "stat");
+        assert_eq!(action, "go");
+    });
+}
+
+#[test]
+fn test_panel_click_no_handler() {
+    with_engine(|engine| {
+        // 未注册回调时调用, 不应 panic
+        // (会通过 log_error 记录调试信息, 但不影响流程)
+        engine.handle_panel_click("unknown_panel", "go");
+        // 验证: 没有 Lua 命令被入队 (回调不存在, 不应有副作用)
+        let cmds = engine.drain_commands();
+        assert!(cmds.is_empty());
+    });
+}
+
+#[test]
+fn test_panel_click_multiple_panels() {
+    with_engine(|engine| {
+        // 注册两个不同 panel 的回调, 验证独立分发
+        exec(
+            engine,
+            r#"RegisterPanelHandler("stat", function(n, a) _stat_action = a end)"#,
+        )
+        .unwrap();
+        exec(
+            engine,
+            r#"RegisterPanelHandler("inventory", function(n, a) _inv_action = a end)"#,
+        )
+        .unwrap();
+        // 点击 stat 面板
+        engine.handle_panel_click("stat", "go");
+        // 点击 inventory 面板
+        engine.handle_panel_click("inventory", "drop");
+        // 验证各自回调被正确调用
+        let stat_action: String = eval(engine, "return _stat_action").unwrap();
+        let inv_action: String = eval(engine, "return _inv_action").unwrap();
+        assert_eq!(stat_action, "go");
+        assert_eq!(inv_action, "drop");
+    });
+}
+
+#[test]
 fn test_print_multiple_args() {
     with_engine(|engine| {
         // print 多个参数，用制表符分隔
