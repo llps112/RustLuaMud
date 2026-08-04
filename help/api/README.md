@@ -8,7 +8,7 @@ RustLuaMud 提供了 MUSHclient 兼容的 Lua API，涵盖命令执行、输出�
 |------|-----|------|
 | **命令执行** | `send`, `Execute`, `DiscardQueue`, `Simulate`, `DeleteTemporaryTimers` | 向 MUD 发送命令或模拟服务器输出 |
 | **输出** | `ColourNote`, `Note`, `print`, `Tell`, `SetStatus`, `log` | 在输出窗口显示信息 |
-| **浮动面板** | `SetPanel`, `RemovePanel` | 创建/移除固定位置的 overlay 面板（RustLuaMud 扩展） |
+| **浮动面板** | `SetPanel`, `RemovePanel`, `RegisterPanelHandler` | 创建/移除浮动面板，注册按钮点击回调（RustLuaMud 扩展） |
 | **JSON** | `json_encode`, `json_decode` | Lua 与 JSON 的序列化/反序列化 |
 | **触发器** | `AddTrigger`, `AddTriggerEx`, `DeleteTrigger`, `GetTriggerList`, `GetTriggerInfo`, `SetTriggerOption`, `EnableTriggerGroup`, `EnableTrigger` | 管理文本匹配和自动响应 |
 | **别名** | `AddAlias`, `DeleteAlias`, `GetAliasList`, `SetAliasOption` | 管理用户输入别名 |

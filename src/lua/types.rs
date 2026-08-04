@@ -137,6 +137,10 @@ pub(crate) struct ScriptState {
     pub last_server_data: Instant,
     /// 待处理的面板更新（由 SetPanel/RemovePanel 产生）
     pub pending_panels: Vec<PanelUpdate>,
+    /// 面板点击回调注册表: panel_name → 回调函数
+    /// 由 RegisterPanelHandler API 注册, handle_panel_click 查找调用
+    /// 解耦客户端与脚本: 客户端不再硬编码脚本侧函数名
+    pub panel_handlers: HashMap<String, Function>,
 }
 
 /// 浮动面板更新指令（由 Lua API 产生，drain 后应用到 TerminalState）

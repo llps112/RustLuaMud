@@ -1,0 +1,25 @@
+#!/bin/bash
+# post-merge: 在 git pull (fetch + merge) 后触发
+# 用途: 同步 scripts/michen_xkx.lua (本地副本) ← scripts/private/michen_xkx.lua (源)
+#
+# 背景:
+#   - scripts/private/michen_xkx.lua 是子模块中的加载清单 (唯一源)
+#   - scripts/michen_xkx.lua 是主仓库的本地配置副本 (不在 git 跟踪中)
+#   - 子模块源文件改动后, 本地副本必须手动 cp 同步, 否则会出现:
+#     "attempt to call global '_set_defaults_from_config' (a nil value)" 等错误
+#   - 本钩子在每次 git pull 后自动同步, 避免漏掉
+
+SRC="scripts/private/michen_xkx.lua"
+DST="scripts/michen_xkx.lua"
+
+# 子模块未检出时静默跳过 (如首次 clone 但未 init 子模块)
+[ -f "$SRC" ] || exit 0
+
+# 内容一致时静默跳过 (避免无意义的文件重写)
+if [ -f "$DST" ] && diff -q "$SRC" "$DST" >/dev/null 2>&1; then
+    exit 0
+fi
+
+cp "$SRC" "$DST"
+echo "[post-merge] 已同步 michen_xkx.lua (本地副本 ← 子模块源)"
+exit 0

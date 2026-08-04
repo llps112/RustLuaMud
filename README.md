@@ -306,6 +306,28 @@ socks5_port = 1080
 | `SetStatus(text)` | 设置状态栏文本 |
 | `log(msg)` | 记录日志 |
 
+### 浮动面板
+
+> RustLuaMud 扩展 API（非 MUSHclient 标准），详见 [浮动面板 API](help/api/panels.md)。
+
+| API | 说明 |
+|-----|------|
+| `SetPanel(name, x, y, w, h, text, [buttons])` | 创建/更新浮动面板（overlay，不随输出滚动） |
+| `RemovePanel(name)` | 移除浮动面板 |
+| `RegisterPanelHandler(panel_name, callback)` | 注册面板按钮点击回调 |
+
+`SetPanel` 的 `buttons` 参数定义可点击区域，点击时客户端通过 `RegisterPanelHandler` 注册的回调分发 `action`：
+
+```lua
+RegisterPanelHandler("stat", function(panel_name, action)
+  if action == "go" then start() end
+end)
+
+SetPanel("stat", -70, 0, 70, 10, stat_text, {
+  { row = 9, start_col = 5, end_col = 12, action = "go" },
+})
+```
+
 ### 变量
 
 | API | 说明 |

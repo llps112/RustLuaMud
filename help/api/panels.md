@@ -101,9 +101,57 @@ Row 23: ├─────────── 输入行 ────────�
 
 ---
 
+## RegisterPanelHandler(panel_name, callback)
+
+注册面板按钮点击回调。当用户点击面板中定义的按钮区域时，客户端通过此注册表查找对应面板的回调并调用。
+
+- **参数**:
+  - `panel_name` (string) - 面板名称（与 `SetPanel` 的 `name` 参数一致）
+  - `callback` (function) - 点击回调函数，签名为 `function(panel_name, action)`
+    - `panel_name` (string) - 被点击的面板名称
+    - `action` (string) - 被点击按钮的 `action` 标识（在 `SetPanel` 的 `buttonDefs` 中定义）
+- **返回值**: 无
+- **设计意图**:
+  - 客户端**不硬编码**脚本侧函数名，而是通过注册表查找回调
+  - 与 `AddTrigger`/`AddAlias`/`AddTimer` 的注册模式一致，实现客户端与脚本解耦
+  - 脚本可自由重构回调函数的命名空间（如 `common.on_panel_click`），只需更新注册调用即可
+- **注册时机**: 在脚本加载阶段调用一次即可，无需在每次 `SetPanel` 时重复注册。重复注册同一 `panel_name` 会覆盖之前的回调。
+- **示例**:
+
+  ```lua
+  -- 定义回调函数
+  function common.on_panel_click(panel_name, action)
+    if panel_name == "stat" then
+      if action == "go" then
+        start_workflow()
+      elseif action == "stop" then
+        stop_workflow()
+      end
+    end
+  end
+
+  -- 注册回调（脚本加载时执行一次）
+  RegisterPanelHandler("stat", common.on_panel_click)
+
+  -- 创建带按钮的面板
+  SetPanel("stat", -70, 0, 70, 10, stat_text, {
+    { row = 9, start_col = 5, end_col = 12, action = "go" },
+    { row = 9, start_col = 15, end_col = 22, action = "stop" },
+  })
+  ```
+
+- **按钮定义**: `SetPanel` 的第 7 个参数 `buttonDefs` 是一个表数组，每个元素包含：
+  - `row` (number) - 按钮所在行（0-indexed，相对于面板顶部）
+  - `start_col` (number) - 按钮起始列（0-indexed，相对于面板左边）
+  - `end_col` (number) - 按钮结束列
+  - `action` (string) - 按钮标识，点击时传递给回调函数的 `action` 参数
+- **未注册回调时的行为**: 如果用户点击了面板按钮但该面板未通过 `RegisterPanelHandler` 注册回调，客户端会记录一条错误日志（`[Lua] 面板 'xxx' 未注册点击回调`），不会 panic 或中断。
+
+---
+
 ## 兼容性说明
 
-- `SetPanel` / `RemovePanel` 是 RustLuaMud 扩展 API，**不在标准 MUSHclient 中**
+- `SetPanel` / `RemovePanel` / `RegisterPanelHandler` 是 RustLuaMud 扩展 API，**不在标准 MUSHclient 中**
 - 在不支持此 API 的客户端上调用会报错（`attempt to call global 'SetPanel' (a nil value)`）
 - 建议使用前检查 API 是否存在：
 
