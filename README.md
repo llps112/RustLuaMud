@@ -25,8 +25,8 @@
 - 仅前台渲染，后台静默记录日志
 
 **限速保护**
-- Lua 侧 burst 控制 + Rust 侧物理间隙限速（可配置，默认 50ms）
-- 双层保护确保任意指令出口都不会触发服务器反 flood 机制
+- Rust 侧令牌桶限速（burst_size + cmds_per_sec + min_interval 三参数）
+- 默认：突发 10 条、每秒 20 条、最小间隔 50ms，确保不触发服务器反 flood 机制
 
 **编码兼容**
 - GBK / UTF-8 双编码，自动检测并转码
@@ -36,6 +36,8 @@
 - 完整 ANSI SGR 解析，彩色输出
 - PageUp/PageDown 翻页查看历史输出
 - 鼠标点击状态栏切换连接
+- 浮动面板：Lua 侧 `SetPanel`/`RemovePanel`/`RegisterPanelHandler` API，支持自定义数据展示和按钮交互
+- 长行自动换行，CJK 宽字符正确对齐
 - 极低资源占用：J1800 + 2GB 内存即可流畅运行 10 连接
 
 ---
@@ -187,10 +189,12 @@ socks5_port = 1080
 # socks5_username = "user"
 # socks5_password = "pass"
 
-# 命令发送速率限制（可选，范围 20~200，默认 50ms）
-# 底层物理限速，独立于 Lua 脚本层的计数限速
-# 推荐值：50（普通玩家）、80（轻度延迟）、120（保守安全）
-# cmd_interval_ms = 50
+# 命令发送令牌桶限速（可选）
+# 三参数协同控制：突发容量、补充速率、最小间隔
+# burst_size = 10          # 令牌桶容量（突发上限），默认 10
+# cmds_per_sec = 20        # 每秒令牌补充速率，默认 20
+# cmd_interval_ms = 50     # 命令间最小间隔（毫秒），默认 50，范围 20~200
+# 推荐值：cmd_interval_ms 50（普通玩家）、80（轻度延迟）、120（保守安全）
 
 # 渲染控制（可选）
 # render_interval = 1000   # 渲染间隔（毫秒），范围 [50, 10000]
@@ -478,6 +482,28 @@ panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀
 
 ## 版本历史
 
+### v0.6.2 (2026-08-04)
+- 看门狗分段睡眠优化，测试从 220s 提速到 5s（42x）
+- 新增 `test_engine_drop_is_fast` 测试守护 drop 性能
+
+### v0.6.1 (2026-08-04)
+- 新增 `RegisterPanelHandler` API，解耦客户端与脚本的面板点击回调
+- GBK 自动同步 pre-commit 钩子
+- 命名空间遗漏检测工具 `tools/check_ns_leak.py`
+
+### v0.6.0 (2026-07-31)
+- 命令限速迁移至 Rust 令牌桶（burst_size + cmds_per_sec + min_interval）
+- 定时器系统优化，标记式禁用取代 closeclass 延迟
+- engine.rs 拆分，trigger/alias/timer 新增 name 索引和 group 索引
+- 修复终端渲染行间颜色泄漏、Lua 打印行切换 session 后丢失
+- 后台 session 面板增量写入，修复 pending_panels 内存泄漏
+
+### v0.5.0 (2026-07-27)
+- `omit_from_output` 文本过滤功能
+- 浮动面板 `SetPanel`/`RemovePanel` API + 长行自动换行
+- bootstrap 支持 Gitee stable 下载
+- CI 工作流添加 paths 过滤，nightly 构建限制为 Rust 源码变更时触发
+
 ### v0.4.0 (2026-07-23)
 - Rust 侧命令发送物理限速（`cmd_interval_ms` 配置项），配合 Lua 侧 burst 控制形成双层限速保护
 - Gitee Release 自动同步
@@ -507,7 +533,7 @@ panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀
 - ANSI SGR 解析、GBK 编码兼容
 - SQLite3 集成、JSON 序列化
 - 可配置渲染频率、连接延迟
-- 629+ 单元测试
+- 809 单元测试
 
 ---
 
