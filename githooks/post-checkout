@@ -1,0 +1,28 @@
+#!/bin/bash
+# post-checkout: 在 git checkout 后触发
+# 用途: 同步 scripts/michen_xkx.lua (本地副本) ← scripts/private/michen_xkx.lua (源)
+#
+# 触发场景:
+#   - 切换分支 (git checkout main)
+#   - git clone 后首次 checkout
+#   - git checkout <file> (单文件检出, 此时 $3 = 0, 钩子仍会运行但内容相同则跳过)
+#
+# 参数:
+#   $1 = 切换前 HEAD 的 ref
+#   $2 = 切换后 HEAD 的 ref
+#   $3 = 1 (分支 checkout) / 0 (文件 checkout)
+
+SRC="scripts/private/michen_xkx.lua"
+DST="scripts/michen_xkx.lua"
+
+# 子模块未检出时静默跳过
+[ -f "$SRC" ] || exit 0
+
+# 内容一致时静默跳过
+if [ -f "$DST" ] && diff -q "$SRC" "$DST" >/dev/null 2>&1; then
+    exit 0
+fi
+
+cp "$SRC" "$DST"
+echo "[post-checkout] 已同步 michen_xkx.lua (本地副本 ← 子模块源)"
+exit 0
