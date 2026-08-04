@@ -2,9 +2,11 @@
 
 ## 重要规则
 
-`scripts/class/` 目录下的所有 `.lua` 文件使用 **GBK 编码**。这些文件是从 MushClient 直接拷贝的原始脚本，实际的脚本触发和执行使用这些文件。
+`scripts/class-utf8/` 是**主要开发源**（UTF-8 编码），所有修改在此进行。
 
-`scripts/class-utf8/` 目录是 `scripts/class/` 的 UTF-8 编码副本，仅用于搜索查阅。
+`scripts/class/` 是 GBK 编码的运行时版本，由 `iconv` 从 UTF-8 版本生成，游戏实际加载此目录。
+
+> 开发机上 `class/` 和 `class-utf8/` 通常是 `private/class` 和 `private/class-utf8` 的符号链接。
 
 ## 编码警告（GBK ≠ UTF-8）
 
@@ -21,6 +23,12 @@
    ```bash
    iconv -f utf-8 -t gbk scripts/class-utf8/xxx.lua -o scripts/class/xxx.lua
    ```
+
+## 自动同步钩子
+
+子模块已配置 `hooks/pre-commit`（通过 `core.hooksPath hooks` 启用），提交时自动检测暂存的 `class-utf8/*.lua` 文件并同步生成 GBK 版本。
+
+> 即使忘记手动 iconv，钩子也会自动补全。但如果 GBK 文件已被手动修改且 UTF-8 未改动，钩子不会触发。
 
 ## 往期事故
 

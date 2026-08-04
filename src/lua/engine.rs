@@ -59,6 +59,7 @@ impl LuaEngine {
             current_encoding: ScriptEncoding::Utf8,
             last_server_data: std::time::Instant::now(),
             pending_panels: Vec::new(),
+            panel_handlers: HashMap::new(),
         }));
 
         let script_dir = Rc::new(RefCell::new(None::<String>));
