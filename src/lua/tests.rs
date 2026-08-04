@@ -227,6 +227,24 @@ fn test_engine_new() {
     assert!(engine.is_ok());
 }
 
+/// 验证 LuaEngine drop 不被看门狗线程的 sleep 阻塞
+/// 修复前：看门狗 sleep(5s) 导致 drop 最多等 5 秒
+/// 修复后：100ms 分段睡眠，drop 最多等 ~100ms
+#[test]
+fn test_engine_drop_is_fast() {
+    let start = std::time::Instant::now();
+    {
+        let _engine = LuaEngine::new().expect("引擎创建失败");
+        // engine 在此作用域结束时 drop
+    }
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "LuaEngine drop 耗时 {:?}, 预期 < 2s（看门狗分段睡眠修复）",
+        elapsed
+    );
+}
+
 #[test]
 fn test_set_script_path() {
     with_engine(|engine| {

@@ -200,11 +200,13 @@ impl LuaEngine {
             .name("lua-watchdog".to_string())
             .spawn(move || {
                 loop {
-                    // 检查停止信号（LuaEngine 被 drop 时触发）
-                    if watchdog_stop.load(Ordering::Relaxed) {
-                        break;
+                    // 分段睡眠：每 100ms 检查停止信号，确保 Drop 时最多等 100ms 而非 5s
+                    for _ in 0..50 {
+                        if watchdog_stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(100));
                     }
-                    thread::sleep(Duration::from_secs(5));
 
                     let start_ns = exec_start.load(Ordering::Relaxed);
                     if start_ns == 0 {
