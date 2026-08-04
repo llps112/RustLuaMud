@@ -356,6 +356,7 @@ mod tests {
             current_encoding: super::super::types::ScriptEncoding::Utf8,
             last_server_data: std::time::Instant::now(),
             pending_panels: Vec::new(),
+            panel_handlers: HashMap::new(),
         };
         state.add_trigger(make_trigger("t1", "group_a"));
         state.add_trigger(make_trigger("t2", "group_a"));
@@ -439,6 +440,7 @@ mod tests {
             current_encoding: super::super::types::ScriptEncoding::Utf8,
             last_server_data: std::time::Instant::now(),
             pending_panels: Vec::new(),
+            panel_handlers: HashMap::new(),
         }
     }
 }
