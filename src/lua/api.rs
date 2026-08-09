@@ -921,7 +921,7 @@ impl LuaEngine {
             } else {
                 String::new()
             };
-            let is_regex = (flags & 32) != 0;
+            let is_regex = (flags & 128) != 0;
             let do_replace = (flags & 1024) != 0;
 
             // Replace flag (1024): 先删除同名 alias
@@ -1781,14 +1781,22 @@ impl LuaEngine {
         trigger_flag.set("OneShot", 8192i64)?;
         globals.set("trigger_flag", trigger_flag)?;
 
-        // alias_flag
+        // alias_flag — 严格按 MushClient 官方定义
+        // https://www.mushclient.com/scripts/function.php?name=AddAlias
         let alias_flag = lua.create_table()?;
         alias_flag.set("Enabled", 1i64)?;
-        alias_flag.set("IgnoreCase", 16i64)?;
-        alias_flag.set("RegularExpression", 32i64)?;
-        alias_flag.set("ExpandVariables", 64i64)?;
+        alias_flag.set("KeepEvaluating", 8i64)?;
+        alias_flag.set("IgnoreAliasCase", 32i64)?;
+        alias_flag.set("OmitFromLogFile", 64i64)?;
+        alias_flag.set("RegularExpression", 128i64)?;
+        alias_flag.set("ExpandVariables", 512i64)?;
         alias_flag.set("Replace", 1024i64)?;
-        alias_flag.set("Temporary", 4096i64)?;
+        alias_flag.set("AliasSpeedWalk", 2048i64)?;
+        alias_flag.set("AliasQueue", 4096i64)?;
+        alias_flag.set("AliasMenu", 8192i64)?;
+        alias_flag.set("Temporary", 16384i64)?;
+        // RustLuaMud 扩展：OneShot（与 AliasMenu 共用 8192 位，
+        // MushClient 未实现 AliasMenu，RustLuaMud 将此位用于 OneShot 行为）
         alias_flag.set("OneShot", 8192i64)?;
         globals.set("alias_flag", alias_flag)?;
 

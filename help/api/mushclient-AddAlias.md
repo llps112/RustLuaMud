@@ -60,3 +60,11 @@ AddAlias("food_alias", "eat", "eat food", alias_flag.Enabled, "")
 
 - 以字母 (A-Z) 开头
 - 后跟字母 (A-Z)、数字 (0-9) 或下划线 (_)
+
+## RustLuaMud 扩展
+
+| Lua 常量 | 值 | 说明 |
+|----------|-----|------|
+| `alias_flag.OneShot` | 8192 | 一次性别名，匹配后自动删除（与 AliasMenu 共用 8192 位，MushClient 未实现 AliasMenu） |
+
+MushClient 的 alias 没有 OneShot flag，但 trigger 和 timer 有。RustLuaMud 扩展支持 alias OneShot，行为与 trigger OneShot 一致：alias 匹配执行后自动删除。

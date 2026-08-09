@@ -943,7 +943,7 @@ fn test_add_alias_regex() {
     with_engine(|engine| {
         let result: i64 = eval(
             engine,
-            r#"return AddAlias('regex_alias', [[^go (\w+)$]], '', 33)"#,
+            r#"return AddAlias('regex_alias', [[^go (\w+)$]], '', alias_flag.Enabled + alias_flag.RegularExpression)"#,
         )
         .unwrap();
         assert_eq!(result, 0);
@@ -971,10 +971,10 @@ fn test_delete_alias_not_found() {
 #[test]
 fn test_alias_oneshot_deleted_after_match() {
     with_engine(|engine| {
-        // OneShot alias: flags = Enabled(1) + RegularExpression(32) + OneShot(8192) = 8225
+        // OneShot alias: Enabled(1) + RegularExpression(128) + OneShot(8192)
         exec(
             engine,
-            r#"AddAlias('oneshot_alias', [[^yes (.*)$]], [[]], 8225)"#,
+            r#"AddAlias('oneshot_alias', [[^yes (.*)$]], [[]], alias_flag.Enabled + alias_flag.RegularExpression + alias_flag.OneShot)"#,
         )
         .unwrap();
         assert_eq!(engine.alias_count(), 1);
@@ -990,10 +990,10 @@ fn test_alias_oneshot_deleted_after_match() {
 #[test]
 fn test_alias_non_oneshot_kept_after_match() {
     with_engine(|engine| {
-        // 普通 alias: flags = Enabled(1) + RegularExpression(32) = 33
+        // 普通 alias: Enabled(1) + RegularExpression(128)
         exec(
             engine,
-            r#"AddAlias('normal_alias', [[^go (\w+)$]], [[]], 33)"#,
+            r#"AddAlias('normal_alias', [[^go (\w+)$]], [[]], alias_flag.Enabled + alias_flag.RegularExpression)"#,
         )
         .unwrap();
         assert_eq!(engine.alias_count(), 1);
@@ -1027,12 +1027,12 @@ fn test_process_input_cfg_skill_xue_alias() {
         // 注册两个别名：无参数（显示）和有参数（设置）
         exec(
             engine,
-            r#"AddAlias('test_skill_xue_display', [[^#cfg skill_xue$]], [[cfg.skill_xue()]], 33)"#,
+            r#"AddAlias('test_skill_xue_display', [[^#cfg skill_xue$]], [[cfg.skill_xue()]], alias_flag.Enabled + alias_flag.RegularExpression)"#,
         )
         .unwrap();
         exec(
             engine,
-            r#"AddAlias('test_skill_xue_set', [[^#cfg skill_xue\s+(.+)$]], [[cfg.skill_xue('%1')]], 33)"#,
+            r#"AddAlias('test_skill_xue_set', [[^#cfg skill_xue\s+(.+)$]], [[cfg.skill_xue('%1')]], alias_flag.Enabled + alias_flag.RegularExpression)"#,
         )
         .unwrap();
         // 测试1：匹配并设置值
@@ -1067,7 +1067,7 @@ fn test_process_input_cfg_skill_lingwu_alias() {
         .unwrap();
         exec(
             engine,
-            r#"AddAlias('test_skill_lingwu_set', [[^#cfg skill_lingwu\s+(.+)$]], [[cfg.skill_lingwu('%1')]], 33)"#,
+            r#"AddAlias('test_skill_lingwu_set', [[^#cfg skill_lingwu\s+(.+)$]], [[cfg.skill_lingwu('%1')]], 129)"#,
         )
         .unwrap();
         let handled = engine.process_input("#cfg skill_lingwu parry|dodge");
@@ -1125,7 +1125,7 @@ fn test_alias_response_send_to_script() {
     with_engine(|engine| {
         exec(
             engine,
-            r#"AddAlias("cfg_test", "^#cfg test$", "send('alias_executed')", 33)"#,
+            r#"AddAlias("cfg_test", "^#cfg test$", "send('alias_executed')", 129)"#,
         )
         .unwrap();
         let handled = engine.process_input("#cfg test");
@@ -1141,7 +1141,7 @@ fn test_alias_response_with_capture_groups() {
     with_engine(|engine| {
         exec(
             engine,
-            r#"AddAlias("cfg_set", "^#cfg (\\w+) (.*)$", "send('set:'..'%1'..'='..'%2')", 33)"#,
+            r#"AddAlias("cfg_set", "^#cfg (\\w+) (.*)$", "send('set:'..'%1'..'='..'%2')", 129)"#,
         )
         .unwrap();
         let handled = engine.process_input("#cfg neili_job 80");
@@ -1205,7 +1205,7 @@ fn test_alias_regex_matching() {
     with_engine(|engine| {
         exec(engine, r#"
             regex_alias_result = nil
-            AddAlias('regex_al', [[^go (\w+)$]], '', 33, 'function(n, l, w) regex_alias_result = w[1] end')
+            AddAlias('regex_al', [[^go (\w+)$]], '', 129, 'function(n, l, w) regex_alias_result = w[1] end')
         "#).unwrap();
         let matched = engine.process_input("go north");
         assert!(matched);
@@ -1891,10 +1891,33 @@ fn test_trigger_flag_constants() {
 #[test]
 fn test_alias_flag_constants() {
     with_engine(|engine| {
+        // MushClient 官方 alias_flag 定义
+        // https://www.mushclient.com/scripts/function.php?name=AddAlias
         let enabled: i64 = eval(engine, "return alias_flag.Enabled").unwrap();
         assert_eq!(enabled, 1);
+        let keep_eval: i64 = eval(engine, "return alias_flag.KeepEvaluating").unwrap();
+        assert_eq!(keep_eval, 8);
+        let ignore_case: i64 = eval(engine, "return alias_flag.IgnoreAliasCase").unwrap();
+        assert_eq!(ignore_case, 32);
+        let omit_log: i64 = eval(engine, "return alias_flag.OmitFromLogFile").unwrap();
+        assert_eq!(omit_log, 64);
         let regex: i64 = eval(engine, "return alias_flag.RegularExpression").unwrap();
-        assert_eq!(regex, 32);
+        assert_eq!(regex, 128);
+        let expand: i64 = eval(engine, "return alias_flag.ExpandVariables").unwrap();
+        assert_eq!(expand, 512);
+        let replace: i64 = eval(engine, "return alias_flag.Replace").unwrap();
+        assert_eq!(replace, 1024);
+        let speedwalk: i64 = eval(engine, "return alias_flag.AliasSpeedWalk").unwrap();
+        assert_eq!(speedwalk, 2048);
+        let queue: i64 = eval(engine, "return alias_flag.AliasQueue").unwrap();
+        assert_eq!(queue, 4096);
+        let menu: i64 = eval(engine, "return alias_flag.AliasMenu").unwrap();
+        assert_eq!(menu, 8192);
+        let temp: i64 = eval(engine, "return alias_flag.Temporary").unwrap();
+        assert_eq!(temp, 16384);
+        // RustLuaMud 扩展
+        let oneshot: i64 = eval(engine, "return alias_flag.OneShot").unwrap();
+        assert_eq!(oneshot, 8192);
     });
 }
 
@@ -2477,7 +2500,7 @@ fn test_trigger_count_alias_count_timer_count() {
         "AddTrigger('t1', 'test', '', 33, 0, 0, '', '', 0, 0)",
     )
     .unwrap();
-    exec(&engine, "AddAlias('a1', 'go', '', 33)").unwrap();
+    exec(&engine, "AddAlias('a1', 'go', '', 129)").unwrap();
     exec(&engine, "AddTimer('tm1', 0, 0, 10, '', 1)").unwrap();
 
     assert_eq!(engine.trigger_count(), 1);
@@ -2604,7 +2627,7 @@ fn test_get_info_56() {
 #[test]
 fn test_set_alias_option_enabled() {
     with_engine(|engine| {
-        exec(engine, "AddAlias('a1', 'go', '', 33)").unwrap();
+        exec(engine, "AddAlias('a1', 'go', '', 129)").unwrap();
         exec(engine, "SetAliasOption('a1', 'enabled', false)").unwrap();
         // Verify via GetAliasList or re-enable
         exec(engine, "SetAliasOption('a1', 'enabled', true)").unwrap();
@@ -3245,7 +3268,7 @@ fn test_alias_callback_sends_command() {
         exec(
             engine,
             r#"
-            AddAlias('go_alias', 'go', '', 33, 'function() send("north") end')
+            AddAlias('go_alias', 'go', '', 129, 'function() send("north") end')
         "#,
         )
         .unwrap();
@@ -3310,7 +3333,7 @@ fn test_delete_trigger_clears() {
 #[test]
 fn test_delete_alias_clears() {
     with_engine(|engine| {
-        exec(engine, "AddAlias('del_me', 'go', '', 33)").unwrap();
+        exec(engine, "AddAlias('del_me', 'go', '', 129)").unwrap();
         assert_eq!(engine.alias_count(), 1);
         exec(engine, "DeleteAlias('del_me')").unwrap();
         assert_eq!(engine.alias_count(), 0);
@@ -3358,7 +3381,7 @@ fn test_enable_trigger_group_via_api() {
 fn test_enable_alias_group_via_set_option() {
     with_engine(|engine| {
         // No EnableAliasGroup API, use SetAliasOption to set group then enable/disable
-        exec(engine, "AddAlias('g1_a1', 'x', '', 33)").unwrap();
+        exec(engine, "AddAlias('g1_a1', 'x', '', 129)").unwrap();
         exec(engine, "SetAliasOption('g1_a1', 'group', 'grp_b')").unwrap();
         exec(engine, "SetAliasOption('g1_a1', 'enabled', false)").unwrap();
         // Verify disabled
@@ -4038,8 +4061,8 @@ fn test_alias_priority_first_match() {
     with_engine(|engine| {
         exec(engine, r#"
             priority_result = nil
-            AddAlias('specific', 'kill goblin', '', 33, 'function() priority_result = "specific" end')
-            AddAlias('general', 'kill *', '', 33, 'function() priority_result = "general" end')
+            AddAlias('specific', 'kill goblin', '', 129, 'function() priority_result = "specific" end')
+            AddAlias('general', 'kill *', '', 129, 'function() priority_result = "general" end')
         "#).unwrap();
         let handled = engine.process_input("kill goblin");
         assert!(handled);
@@ -4064,7 +4087,7 @@ fn test_alias_sends_command() {
         exec(
             engine,
             r#"
-            AddAlias('kk', 'kk', '', 33, 'function() send("kill") end')
+            AddAlias('kk', 'kk', '', 129, 'function() send("kill") end')
         "#,
         )
         .unwrap();
@@ -4140,7 +4163,7 @@ fn test_alias_regex_pattern() {
             engine,
             r#"
             regex_al_result = nil
-            AddAlias('regex_a', [[^#(\d+)$]], '', 33, 'function(n, l, w) regex_al_result = w[1] end')
+            AddAlias('regex_a', [[^#(\d+)$]], '', 129, 'function(n, l, w) regex_al_result = w[1] end')
         "#,
         )
         .unwrap();
@@ -4162,7 +4185,7 @@ fn test_alias_case_insensitive() {
             engine,
             r#"
             ci_alias_result = nil
-            AddAlias('ci_al', 'HELLO', '', 33, 'function() ci_alias_result = true end')
+            AddAlias('ci_al', 'HELLO', '', 129, 'function() ci_alias_result = true end')
         "#,
         )
         .unwrap();
@@ -4171,7 +4194,7 @@ fn test_alias_case_insensitive() {
             engine,
             r#"
             ci_alias_result2 = nil
-            AddAlias('ci_al2', [[(?i)^hello$]], '', 33, 'function() ci_alias_result2 = true end')
+            AddAlias('ci_al2', [[(?i)^hello$]], '', 129, 'function() ci_alias_result2 = true end')
         "#,
         )
         .unwrap();
@@ -4200,7 +4223,7 @@ fn test_alias_callback_error_handled() {
         exec(
             engine,
             r#"
-            AddAlias('err_al', 'boom', '', 33, 'function() error("alias error") end')
+            AddAlias('err_al', 'boom', '', 129, 'function() error("alias error") end')
         "#,
         )
         .unwrap();
@@ -4231,7 +4254,7 @@ fn test_alias_input_passed_as_arg0() {
 #[test]
 fn test_get_alias_info_match_text() {
     with_engine(|engine| {
-        exec(engine, r#"AddAlias('test_ai', 'kill *', '', 33)"#).unwrap();
+        exec(engine, r#"AddAlias('test_ai', 'kill *', '', 129)"#).unwrap();
         let result: Option<String> = eval(engine, r#"return GetAliasInfo('test_ai', 1)"#).unwrap();
         assert_eq!(result, Some("kill *".to_string()));
     });
@@ -4240,7 +4263,7 @@ fn test_get_alias_info_match_text() {
 #[test]
 fn test_get_alias_info_response_text() {
     with_engine(|engine| {
-        exec(engine, r#"AddAlias('test_ai2', 'go *', 'go_command', 33)"#).unwrap();
+        exec(engine, r#"AddAlias('test_ai2', 'go *', 'go_command', 129)"#).unwrap();
         let result: Option<String> = eval(engine, r#"return GetAliasInfo('test_ai2', 2)"#).unwrap();
         assert_eq!(result, Some("go_command".to_string()));
     });
@@ -4261,7 +4284,7 @@ fn test_get_alias_info_send_to() {
         // response non-empty, no 5th arg => send_to=12
         exec(
             engine,
-            r#"AddAlias('test_ai4', 'test', 'do_something()', 33)"#,
+            r#"AddAlias('test_ai4', 'test', 'do_something()', 129)"#,
         )
         .unwrap();
         let result: Option<i64> = eval(engine, r#"return GetAliasInfo('test_ai4', 18)"#).unwrap();
@@ -4275,7 +4298,7 @@ fn test_get_alias_info_group() {
         exec(
             engine,
             r#"
-            AddAlias('test_ai5', 'test', '', 33)
+            AddAlias('test_ai5', 'test', '', 129)
             SetAliasOption('test_ai5', 'group', 'mygroup')
         "#,
         )
@@ -4394,7 +4417,7 @@ fn test_execute_command_intercepted_by_alias() {
         exec(
             engine,
             r#"
-            AddAlias('alias_war', '^war$', 'warteam()', 33, '')
+            AddAlias('alias_war', '^war$', 'warteam()', 129, '')
             SetAliasOption('alias_war', 'send_to', 12)
             function warteam()
                     Execute('teamwith alice bob')
@@ -4435,7 +4458,7 @@ fn test_execute_command_not_alias_passes_through() {
         exec(
             engine,
             r#"
-            AddAlias('alias_war', '^war$', 'warteam()', 33, '')
+            AddAlias('alias_war', '^war$', 'warteam()', 129, '')
             SetAliasOption('alias_war', 'send_to', 12)
             function warteam()
                     Execute('teamwith alice bob')
@@ -4458,10 +4481,10 @@ fn test_alias_chain_interception() {
             engine,
             r#"
             -- 别名A: "go" → 回调中 Execute("north")
-            AddAlias('go_alias', '^go$', '', 33, 'function() Execute("north") end')
+            AddAlias('go_alias', '^go$', '', 129, 'function() Execute("north") end')
 
             -- 别名B: "north" → 回调中 Execute("n")
-            AddAlias('north_alias', '^north$', '', 33, 'function() Execute("n") end')
+            AddAlias('north_alias', '^north$', '', 129, 'function() Execute("n") end')
         "#,
         )
         .unwrap();
@@ -4573,7 +4596,7 @@ fn test_variable_shared_across_triggers_and_aliases() {
         exec(engine, r#"
             SetVariable('counter', '0')
             AddTrigger('count_trig', 'tick', '', 33, 0, 0, '', 'function() SetVariable("counter", tostring(tonumber(GetVariable("counter")) + 1)) end', 0, 0)
-            AddAlias('show_count', 'count', '', 33, 'function() Note("count=" .. GetVariable("counter")) end')
+            AddAlias('show_count', 'count', '', 129, 'function() Note("count=" .. GetVariable("counter")) end')
         "#).unwrap();
         engine.process_output("tick");
         engine.process_output("tick");
