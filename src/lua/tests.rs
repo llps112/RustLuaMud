@@ -969,7 +969,26 @@ fn test_delete_alias_not_found() {
 }
 
 #[test]
-fn test_alias_kept_after_match() {
+fn test_alias_oneshot_deleted_after_match() {
+    with_engine(|engine| {
+        // OneShot alias: Enabled(1) + RegularExpression(128) + OneShot(32768)
+        exec(
+            engine,
+            r#"AddAlias('oneshot_alias', [[^yes (.*)$]], [[]], alias_flag.Enabled + alias_flag.RegularExpression + alias_flag.OneShot)"#,
+        )
+        .unwrap();
+        assert_eq!(engine.alias_count(), 1);
+
+        // 匹配 alias
+        engine.process_input("yes 123");
+
+        // OneShot alias 匹配后应被自动删除
+        assert_eq!(engine.alias_count(), 0);
+    });
+}
+
+#[test]
+fn test_alias_non_oneshot_kept_after_match() {
     with_engine(|engine| {
         // 普通 alias: Enabled(1) + RegularExpression(128)
         exec(
@@ -982,7 +1001,7 @@ fn test_alias_kept_after_match() {
         // 匹配 alias
         engine.process_input("go north");
 
-        // alias 匹配后仍存在
+        // 非 OneShot alias 匹配后仍存在
         assert_eq!(engine.alias_count(), 1);
     });
 }
@@ -1860,12 +1879,29 @@ fn test_open_log() {
 #[test]
 fn test_trigger_flag_constants() {
     with_engine(|engine| {
+        // MushClient 官方 trigger_flag 定义 (lua_methods.cpp:7211)
         let enabled: i64 = eval(engine, "return trigger_flag.Enabled").unwrap();
         assert_eq!(enabled, 1);
+        let omit_log: i64 = eval(engine, "return trigger_flag.OmitFromLog").unwrap();
+        assert_eq!(omit_log, 2);
+        let omit_output: i64 = eval(engine, "return trigger_flag.OmitFromOutput").unwrap();
+        assert_eq!(omit_output, 4);
+        let keep_eval: i64 = eval(engine, "return trigger_flag.KeepEvaluating").unwrap();
+        assert_eq!(keep_eval, 8);
+        let ignore_case: i64 = eval(engine, "return trigger_flag.IgnoreCase").unwrap();
+        assert_eq!(ignore_case, 16);
         let regex: i64 = eval(engine, "return trigger_flag.RegularExpression").unwrap();
         assert_eq!(regex, 32);
+        let expand: i64 = eval(engine, "return trigger_flag.ExpandVariables").unwrap();
+        assert_eq!(expand, 512);
+        let replace: i64 = eval(engine, "return trigger_flag.Replace").unwrap();
+        assert_eq!(replace, 1024);
+        let lowercase: i64 = eval(engine, "return trigger_flag.LowercaseWildcard").unwrap();
+        assert_eq!(lowercase, 2048);
         let temp: i64 = eval(engine, "return trigger_flag.Temporary").unwrap();
-        assert_eq!(temp, 4096);
+        assert_eq!(temp, 16384);
+        let oneshot: i64 = eval(engine, "return trigger_flag.OneShot").unwrap();
+        assert_eq!(oneshot, 32768);
     });
 }
 
@@ -1896,6 +1932,8 @@ fn test_alias_flag_constants() {
         assert_eq!(menu, 8192);
         let temp: i64 = eval(engine, "return alias_flag.Temporary").unwrap();
         assert_eq!(temp, 16384);
+        let oneshot: i64 = eval(engine, "return alias_flag.OneShot").unwrap();
+        assert_eq!(oneshot, 32768);
     });
 }
 
@@ -1924,28 +1962,68 @@ fn test_timer_flag_constants() {
 #[test]
 fn test_error_code_constants() {
     with_engine(|engine| {
+        // MushClient 官方 error_code 定义 (lua_methods.cpp:7288)
         let eok: i64 = eval(engine, "return error_code.eOK").unwrap();
         assert_eq!(eok, 0);
         let ebad: i64 = eval(engine, "return error_code.eBadRegularExpression").unwrap();
-        assert_eq!(ebad, 3);
+        assert_eq!(ebad, 30021);
+        let eitem: i64 = eval(engine, "return error_code.eItemInUse").unwrap();
+        assert_eq!(eitem, 30063);
+        let ebrush: i64 = eval(engine, "return error_code.eBrushStyleNotValid").unwrap();
+        assert_eq!(ebrush, 30074);
+        // ePluginDoesNotSaveState 和 ePluginCouldNotSaveState 共用 30037
+        let esave1: i64 = eval(engine, "return error_code.ePluginDoesNotSaveState").unwrap();
+        assert_eq!(esave1, 30037);
+        let esave2: i64 = eval(engine, "return error_code.ePluginCouldNotSaveState").unwrap();
+        assert_eq!(esave2, 30037);
     });
 }
 
 #[test]
 fn test_error_desc_constants() {
     with_engine(|engine| {
-        let eok: String = eval(engine, "return error_desc.eOK").unwrap();
-        assert_eq!(eok, "OK");
+        // MushClient 官方 error_desc 定义：key 为数字（错误码）
+        let eok: String = eval(engine, "return error_desc[0]").unwrap();
+        assert_eq!(eok, "No error");
+        let ebad: String = eval(engine, "return error_desc[30021]").unwrap();
+        assert_eq!(ebad, "Bad regular expression syntax");
+        let etime: String = eval(engine, "return error_desc[30022]").unwrap();
+        assert_eq!(etime, "Time given to AddTimer is invalid");
+        let eitem: String = eval(engine, "return error_desc[30063]").unwrap();
+        assert_eq!(
+            eitem,
+            "Cannot delete trigger/alias/timer because it is executing a script"
+        );
     });
 }
 
 #[test]
 fn test_custom_colour_constants() {
     with_engine(|engine| {
-        let black: i64 = eval(engine, "return custom_colour.Black").unwrap();
-        assert_eq!(black, 0);
-        let white: i64 = eval(engine, "return custom_colour.White").unwrap();
-        assert_eq!(white, 15);
+        // MushClient 官方 custom_colour 定义 (lua_methods.cpp:7229)
+        let nochange: i64 = eval(engine, "return custom_colour.NoChange").unwrap();
+        assert_eq!(nochange, -1);
+        let c1: i64 = eval(engine, "return custom_colour.Custom1").unwrap();
+        assert_eq!(c1, 0);
+        let c16: i64 = eval(engine, "return custom_colour.Custom16").unwrap();
+        assert_eq!(c16, 15);
+        let cother: i64 = eval(engine, "return custom_colour.CustomOther").unwrap();
+        assert_eq!(cother, 16);
+    });
+}
+
+#[test]
+fn test_sendto_constants() {
+    with_engine(|engine| {
+        // MushClient 官方 sendto 定义 (lua_methods.cpp:7453)
+        let world: i64 = eval(engine, "return sendto.world").unwrap();
+        assert_eq!(world, 0);
+        let command: i64 = eval(engine, "return sendto.command").unwrap();
+        assert_eq!(command, 1);
+        let script: i64 = eval(engine, "return sendto.script").unwrap();
+        assert_eq!(script, 12);
+        let afteromit: i64 = eval(engine, "return sendto.scriptafteromit").unwrap();
+        assert_eq!(afteromit, 14);
     });
 }
 

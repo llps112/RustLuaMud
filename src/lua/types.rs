@@ -74,6 +74,7 @@ pub struct Alias {
     pub send_to: i64,
     pub response: String,
     pub sequence: i32,
+    pub one_shot: bool,
 }
 
 /// 定时器定义

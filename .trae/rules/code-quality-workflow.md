@@ -29,10 +29,14 @@ cargo clippy -- -D warnings
 ### 3. 测试
 
 ```bash
+# 本地开发机 (4c8t)：默认 8 线程，809 测试约 5 秒
+cargo nextest run
+
+# CI (2vCPU)：限制 3 线程避免资源争抢
 cargo nextest run --test-threads=3
 ```
 
-> 必须全部通过。与 CI 行为一致，`--test-threads=3` 平衡 2vCPU 机器的速度与资源。
+> 必须全部通过。本地用默认线程数即可（看门狗分段睡眠优化后测试很快）。CI 仍限 3 线程。
 
 #### 新增/修改代码必须附带对应的单元测试
 
@@ -46,6 +50,6 @@ cargo nextest run --test-threads=3
 ## 完整提交流程
 
 1. 修改代码
-2. 依次运行：`cargo fmt` → `cargo clippy -- -D warnings` → `cargo nextest run --test-threads=3`
+2. 依次运行：`cargo fmt` → `cargo clippy -- -D warnings` → `cargo nextest run`
 3. 全部通过后，`git add` + `git commit` + `git push`
 4. Push 后确认 GitHub Actions CI 也绿色通过

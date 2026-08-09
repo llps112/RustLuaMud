@@ -160,7 +160,7 @@ function wait.trigger_resume (name, line, wildcards, styles)
 
   end -- if
 
-end -- function trigger_resume
+end -- function trigger_resume 
 
 
 

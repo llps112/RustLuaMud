@@ -20,7 +20,7 @@ impl LuaEngine {
     fn process_input_inner(&self, input: &str) -> bool {
         self.state.borrow_mut().pending_commands.clear();
 
-        let matches: Vec<(usize, Vec<String>, i64, String)> = {
+        let matches: Vec<(usize, Vec<String>, i64, String, bool)> = {
             let state = self.state.borrow();
             let mut result = Vec::new();
             for (i, alias) in state.aliases.iter().enumerate() {
@@ -34,7 +34,13 @@ impl LuaEngine {
                         .flatten()
                         .map(|m| m.as_str().to_string())
                         .collect();
-                    result.push((i, caps_list, alias.send_to, alias.response.clone()));
+                    result.push((
+                        i,
+                        caps_list,
+                        alias.send_to,
+                        alias.response.clone(),
+                        alias.one_shot,
+                    ));
                 }
             }
             result
@@ -44,7 +50,18 @@ impl LuaEngine {
             return false;
         }
 
-        for (idx, caps_list, send_to, response) in matches {
+        // OneShot alias 匹配后自动删除（MushClient 兼容：alias_flag.OneShot = 32768）
+        // 必须在 for 循环消费 matches 之前收集
+        let oneshot_names: Vec<String> = {
+            let state = self.state.borrow();
+            matches
+                .iter()
+                .filter(|(_, _, _, _, one_shot)| *one_shot)
+                .filter_map(|(idx, _, _, _, _)| state.aliases.get(*idx).map(|a| a.name.clone()))
+                .collect()
+        };
+
+        for (idx, caps_list, send_to, response, _one_shot) in matches {
             if send_to == 12 && !response.is_empty() {
                 // send_to=12: 替换 %1, %2... 为捕获文本，作为 Lua 代码执行
                 let mut code = response;
@@ -100,6 +117,14 @@ impl LuaEngine {
                         ));
                     }
                 }
+            }
+        }
+
+        // OneShot alias 匹配后自动删除
+        if !oneshot_names.is_empty() {
+            let mut state = self.state.borrow_mut();
+            for name in &oneshot_names {
+                state.delete_alias(name);
             }
         }
 
