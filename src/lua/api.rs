@@ -768,6 +768,7 @@ impl LuaEngine {
                             let group = t.group.clone();
                             Ok(Value::String(lua.create_string(&group)?))
                         }
+                        36 => Ok(Value::Boolean(t.one_shot)), // 'one shot' flag
                         _ => Ok(Value::Nil),
                     }
                 } else {
@@ -2445,6 +2446,7 @@ impl LuaEngine {
                     lines_to_match: 1,
                     omit_from_output: false,
                     temporary: false,
+                    one_shot: false,
                     send_text: String::new(),
                 });
                 Ok(())
@@ -2592,6 +2594,7 @@ pub(super) fn add_trigger_impl(
         lines_to_match: 1,
         omit_from_output: (flags & 4) != 0,
         temporary: (flags & 16384) != 0,
+        one_shot: (flags & 32768) != 0,
         send_text: String::new(),
     };
 

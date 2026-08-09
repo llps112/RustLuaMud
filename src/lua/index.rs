@@ -321,6 +321,7 @@ mod tests {
             multiline: false,
             lines_to_match: 0,
             omit_from_output: false,
+            one_shot: false,
             send_text: String::new(),
         }
     }

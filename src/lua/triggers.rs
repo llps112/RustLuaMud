@@ -196,6 +196,23 @@ impl LuaEngine {
                 .any(|(idx, _, _, _)| state.triggers[*idx].omit_from_output)
         };
 
+        // OneShot trigger 匹配后自动删除（MushClient 兼容：trigger_flag.OneShot = 32768）
+        // 必须在消费 matches 的 for 循环之前收集
+        let oneshot_names: Vec<String> = {
+            let state = self.state.borrow();
+            matches
+                .iter()
+                .filter_map(|(idx, _, _, _)| {
+                    let t = &state.triggers[*idx];
+                    if t.one_shot {
+                        Some(t.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
         // 逐个触发
         for (idx, full_match, caps_list, _sr) in matches {
             let (callback, send_text, trigger_name) = {
@@ -237,6 +254,14 @@ impl LuaEngine {
             }
             if !send_text.is_empty() {
                 self.state.borrow_mut().pending_commands.push(send_text);
+            }
+        }
+
+        // OneShot trigger 匹配后自动删除
+        if !oneshot_names.is_empty() {
+            let mut state = self.state.borrow_mut();
+            for name in &oneshot_names {
+                state.delete_trigger(name);
             }
         }
 

@@ -1007,6 +1007,68 @@ fn test_alias_non_oneshot_kept_after_match() {
 }
 
 #[test]
+fn test_trigger_oneshot_deleted_after_match() {
+    with_engine(|engine| {
+        // OneShot trigger: Enabled(1) + RegularExpression(32) + OneShot(32768)
+        exec(
+            engine,
+            r#"AddTrigger('oneshot_trig', [[^test$]], '', trigger_flag.Enabled + trigger_flag.RegularExpression + trigger_flag.OneShot, 0, 0, '', '', 0, 0)"#,
+        )
+        .unwrap();
+        assert_eq!(engine.trigger_count(), 1);
+
+        // 匹配 trigger
+        engine.process_output("test");
+
+        // OneShot trigger 匹配后应被自动删除
+        assert_eq!(engine.trigger_count(), 0);
+    });
+}
+
+#[test]
+fn test_trigger_non_oneshot_kept_after_match() {
+    with_engine(|engine| {
+        // 普通 trigger: Enabled(1) + RegularExpression(32)
+        exec(
+            engine,
+            r#"AddTrigger('normal_trig', [[^test$]], '', trigger_flag.Enabled + trigger_flag.RegularExpression, 0, 0, '', '', 0, 0)"#,
+        )
+        .unwrap();
+        assert_eq!(engine.trigger_count(), 1);
+
+        // 匹配 trigger
+        engine.process_output("test");
+
+        // 非 OneShot trigger 匹配后仍存在
+        assert_eq!(engine.trigger_count(), 1);
+    });
+}
+
+#[test]
+fn test_get_trigger_info_one_shot() {
+    with_engine(|engine| {
+        // OneShot trigger: Enabled(1) + RegularExpression(32) + OneShot(32768)
+        exec(
+            engine,
+            r#"AddTrigger('os_trig', [[^test$]], '', trigger_flag.Enabled + trigger_flag.RegularExpression + trigger_flag.OneShot, 0, 0, '', '', 0, 0)"#,
+        )
+        .unwrap();
+        // code 36 = 'one shot' flag
+        let os: bool = eval(engine, "return GetTriggerInfo('os_trig', 36)").unwrap();
+        assert!(os, "one_shot should be true");
+
+        // 非 OneShot trigger 应返回 false
+        exec(
+            engine,
+            r#"AddTrigger('normal_trig2', [[^foo$]], '', trigger_flag.Enabled + trigger_flag.RegularExpression, 0, 0, '', '', 0, 0)"#,
+        )
+        .unwrap();
+        let os2: bool = eval(engine, "return GetTriggerInfo('normal_trig2', 36)").unwrap();
+        assert!(!os2, "one_shot should be false for regular trigger");
+    });
+}
+
+#[test]
 fn test_process_input_cfg_skill_xue_alias() {
     with_engine(|engine| {
         // 设置 cfg 表并定义 skill_xue 函数

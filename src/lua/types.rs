@@ -43,6 +43,7 @@ pub struct Trigger {
     pub lines_to_match: usize,
     #[allow(dead_code)]
     pub omit_from_output: bool,
+    pub one_shot: bool,
     pub send_text: String,
 }
 
