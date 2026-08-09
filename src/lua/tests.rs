@@ -969,6 +969,44 @@ fn test_delete_alias_not_found() {
 }
 
 #[test]
+fn test_alias_oneshot_deleted_after_match() {
+    with_engine(|engine| {
+        // OneShot alias: flags = Enabled(1) + RegularExpression(32) + OneShot(8192) = 8225
+        exec(
+            engine,
+            r#"AddAlias('oneshot_alias', [[^yes (.*)$]], [[]], 8225)"#,
+        )
+        .unwrap();
+        assert_eq!(engine.alias_count(), 1);
+
+        // 匹配 alias
+        engine.process_input("yes 123");
+
+        // OneShot alias 匹配后应被自动删除
+        assert_eq!(engine.alias_count(), 0);
+    });
+}
+
+#[test]
+fn test_alias_non_oneshot_kept_after_match() {
+    with_engine(|engine| {
+        // 普通 alias: flags = Enabled(1) + RegularExpression(32) = 33
+        exec(
+            engine,
+            r#"AddAlias('normal_alias', [[^go (\w+)$]], [[]], 33)"#,
+        )
+        .unwrap();
+        assert_eq!(engine.alias_count(), 1);
+
+        // 匹配 alias
+        engine.process_input("go north");
+
+        // 非 OneShot alias 匹配后仍存在
+        assert_eq!(engine.alias_count(), 1);
+    });
+}
+
+#[test]
 fn test_process_input_cfg_skill_xue_alias() {
     with_engine(|engine| {
         // 设置 cfg 表并定义 skill_xue 函数

@@ -975,6 +975,7 @@ impl LuaEngine {
                 send_to,
                 response,
                 sequence: 0,
+                one_shot: (flags & 8192) != 0,
             });
             Ok(Value::Integer(0))
         })?;
@@ -1788,6 +1789,7 @@ impl LuaEngine {
         alias_flag.set("ExpandVariables", 64i64)?;
         alias_flag.set("Replace", 1024i64)?;
         alias_flag.set("Temporary", 4096i64)?;
+        alias_flag.set("OneShot", 8192i64)?;
         globals.set("alias_flag", alias_flag)?;
 
         // timer_flag — 严格按 MushClient 官方定义
@@ -2279,6 +2281,7 @@ impl LuaEngine {
                     send_to: 0,
                     response: String::new(),
                     sequence: 0,
+                    one_shot: false,
                 });
                 Ok(())
             })?;
