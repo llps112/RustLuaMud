@@ -975,7 +975,6 @@ impl LuaEngine {
                 send_to,
                 response,
                 sequence: 0,
-                one_shot: (flags & 8192) != 0,
             });
             Ok(Value::Integer(0))
         })?;
@@ -1795,9 +1794,6 @@ impl LuaEngine {
         alias_flag.set("AliasQueue", 4096i64)?;
         alias_flag.set("AliasMenu", 8192i64)?;
         alias_flag.set("Temporary", 16384i64)?;
-        // RustLuaMud 扩展：OneShot（与 AliasMenu 共用 8192 位，
-        // MushClient 未实现 AliasMenu，RustLuaMud 将此位用于 OneShot 行为）
-        alias_flag.set("OneShot", 8192i64)?;
         globals.set("alias_flag", alias_flag)?;
 
         // timer_flag — 严格按 MushClient 官方定义
@@ -2289,7 +2285,6 @@ impl LuaEngine {
                     send_to: 0,
                     response: String::new(),
                     sequence: 0,
-                    one_shot: false,
                 });
                 Ok(())
             })?;

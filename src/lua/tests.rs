@@ -969,26 +969,7 @@ fn test_delete_alias_not_found() {
 }
 
 #[test]
-fn test_alias_oneshot_deleted_after_match() {
-    with_engine(|engine| {
-        // OneShot alias: Enabled(1) + RegularExpression(128) + OneShot(8192)
-        exec(
-            engine,
-            r#"AddAlias('oneshot_alias', [[^yes (.*)$]], [[]], alias_flag.Enabled + alias_flag.RegularExpression + alias_flag.OneShot)"#,
-        )
-        .unwrap();
-        assert_eq!(engine.alias_count(), 1);
-
-        // 匹配 alias
-        engine.process_input("yes 123");
-
-        // OneShot alias 匹配后应被自动删除
-        assert_eq!(engine.alias_count(), 0);
-    });
-}
-
-#[test]
-fn test_alias_non_oneshot_kept_after_match() {
+fn test_alias_kept_after_match() {
     with_engine(|engine| {
         // 普通 alias: Enabled(1) + RegularExpression(128)
         exec(
@@ -1001,7 +982,7 @@ fn test_alias_non_oneshot_kept_after_match() {
         // 匹配 alias
         engine.process_input("go north");
 
-        // 非 OneShot alias 匹配后仍存在
+        // alias 匹配后仍存在
         assert_eq!(engine.alias_count(), 1);
     });
 }
@@ -1915,9 +1896,6 @@ fn test_alias_flag_constants() {
         assert_eq!(menu, 8192);
         let temp: i64 = eval(engine, "return alias_flag.Temporary").unwrap();
         assert_eq!(temp, 16384);
-        // RustLuaMud 扩展
-        let oneshot: i64 = eval(engine, "return alias_flag.OneShot").unwrap();
-        assert_eq!(oneshot, 8192);
     });
 }
 
