@@ -180,6 +180,51 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
     result
 }
 
+/// 按显示宽度截取含 ANSI CSI 转义序列的字符串
+/// - ANSI CSI 序列（\x1b[...letter）不计入宽度，且不会被截断在中间
+/// - CJK 字符按 Unicode 显示宽度计宽
+///
+/// 用于在面板覆盖行截断输出文本，避免文本延伸到面板区域
+fn truncate_ansi_to_width(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    let mut visible = 0usize;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            // CSI 序列：完整消费，不计入可见宽度
+            result.push(ch);
+            result.push('[');
+            chars.next(); // consume '['
+            while let Some(&next) = chars.peek() {
+                result.push(next);
+                chars.next();
+                // final byte 0x40-0x7E 标志序列结束
+                if ('\x40'..='\x7e').contains(&next) {
+                    break;
+                }
+            }
+        } else if ch == '\x1b' {
+            // 非 CSI 转义（罕见）：消费该字符和下一个
+            result.push(ch);
+            if let Some(&next) = chars.peek() {
+                result.push(next);
+                chars.next();
+            }
+        } else {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if visible + cw > max_width {
+                break;
+            }
+            result.push(ch);
+            visible += cw;
+        }
+    }
+    result
+}
+
 /// 计算字符串的可见宽度（忽略 ANSI 转义序列）
 fn visible_width(s: &str) -> usize {
     let stripped = AnsiParser::strip_ansi(s);
@@ -857,6 +902,46 @@ impl TerminalState {
         (abs_x, abs_y)
     }
 
+    /// 计算输出区每行的面板覆盖范围
+    /// 返回 `Vec<Option<(u16, u16)>>`，索引为输出区内的行号（0 = 输出区顶部）
+    /// 每个元素为 `Some((min_abs_x, max_abs_end))`：该行被面板覆盖的最左列和最右列（exclusive）
+    /// `None` 表示该行无面板覆盖
+    /// 注意：同一行上多个不重叠面板之间的间隙不会被标记为覆盖（这是已知限制，极为罕见）
+    fn panel_coverage_mask(&self) -> Vec<Option<(u16, u16)>> {
+        let output_top = self.status_height;
+        let output_bottom = self
+            .height
+            .saturating_sub(self.lua_status_height + self.input_height);
+        let output_h = (output_bottom.saturating_sub(output_top)) as usize;
+        let mut mask = vec![None; output_h];
+
+        for panel in &self.panels {
+            let (abs_x, abs_y) = self.resolve_panel_position(panel);
+            if abs_y >= output_bottom || abs_x >= self.width {
+                continue;
+            }
+            let max_rows = (output_bottom - abs_y) as usize;
+            let rows_to_draw = (panel.height as usize).min(max_rows);
+            let abs_end = (abs_x.saturating_add(panel.width)).min(self.width);
+
+            for i in 0..rows_to_draw {
+                let row = abs_y + i as u16;
+                let idx = (row - output_top) as usize;
+                if idx < output_h {
+                    let entry = &mut mask[idx];
+                    match entry {
+                        None => *entry = Some((abs_x, abs_end)),
+                        Some((min_x, max_end)) => {
+                            *min_x = (*min_x).min(abs_x);
+                            *max_end = (*max_end).max(abs_end);
+                        }
+                    }
+                }
+            }
+        }
+        mask
+    }
+
     /// 获取输入行显示内容（考虑滚动）
     pub fn input_display(&self) -> (String, usize) {
         use unicode_width::UnicodeWidthChar;
@@ -1033,20 +1118,65 @@ impl Terminal {
         let start = flat.len().saturating_sub(output_height);
         let to_render = &flat[start..];
 
+        // 计算面板覆盖范围，避免擦除面板区域导致闪烁
+        let panel_mask = self.state.panel_coverage_mask();
+        let term_width = self.state.width;
+
         // 渲染
         for (i, seg) in to_render.iter().enumerate() {
             let row = self.state.status_height + i as u16;
-            queue!(stdout, cursor::MoveTo(0, row))?;
-            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-            queue!(stdout, style::ResetColor)?; // 确保每行从默认颜色开始，避免行间颜色泄漏
-            queue!(stdout, Print(seg))?;
+            match panel_mask.get(i).copied().flatten() {
+                None => {
+                    // 无面板覆盖：整行清除并打印（与原逻辑一致）
+                    queue!(stdout, cursor::MoveTo(0, row))?;
+                    queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+                    queue!(stdout, style::ResetColor)?;
+                    queue!(stdout, Print(seg))?;
+                }
+                Some((min_x, max_end)) => {
+                    // 面板覆盖该行 [min_x, max_end)：
+                    // 只绘制 [0, min_x) 部分，不 Clear、不触碰面板区域，避免闪烁
+                    let truncated = truncate_ansi_to_width(seg, min_x as usize);
+                    let trunc_w = visible_width(&truncated);
+                    let padding = (min_x as usize).saturating_sub(trunc_w);
+                    queue!(stdout, cursor::MoveTo(0, row))?;
+                    queue!(stdout, style::ResetColor)?;
+                    queue!(stdout, Print(&truncated))?;
+                    // 用空格清除左侧残留（旧内容可能比新内容长）
+                    queue!(stdout, style::ResetColor)?;
+                    queue!(stdout, Print(&" ".repeat(padding)))?;
+                    // 清除面板右侧间隙（面板未到右边缘时）
+                    if max_end < term_width {
+                        let gap = (term_width - max_end) as usize;
+                        queue!(stdout, cursor::MoveTo(max_end, row))?;
+                        queue!(stdout, style::ResetColor)?;
+                        queue!(stdout, Print(&" ".repeat(gap)))?;
+                    }
+                }
+            }
         }
 
         // 清除剩余行
         for i in to_render.len()..output_height {
             let row = self.state.status_height + i as u16;
-            queue!(stdout, cursor::MoveTo(0, row))?;
-            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+            match panel_mask.get(i).copied().flatten() {
+                None => {
+                    queue!(stdout, cursor::MoveTo(0, row))?;
+                    queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
+                }
+                Some((min_x, max_end)) => {
+                    // 只清除左侧，不触碰面板区域
+                    queue!(stdout, cursor::MoveTo(0, row))?;
+                    queue!(stdout, style::ResetColor)?;
+                    queue!(stdout, Print(&" ".repeat(min_x as usize)))?;
+                    if max_end < term_width {
+                        let gap = (term_width - max_end) as usize;
+                        queue!(stdout, cursor::MoveTo(max_end, row))?;
+                        queue!(stdout, style::ResetColor)?;
+                        queue!(stdout, Print(&" ".repeat(gap)))?;
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -2853,5 +2983,126 @@ mod tests {
         assert!(segs[0].contains("Red"));
         // 后续段应保持红色
         assert!(segs[1].starts_with("\x1b[31m"));
+    }
+
+    // === truncate_ansi_to_width 测试 ===
+
+    #[test]
+    fn test_truncate_ansi_plain() {
+        assert_eq!(truncate_ansi_to_width("hello", 3), "hel");
+        assert_eq!(truncate_ansi_to_width("hi", 5), "hi");
+        assert_eq!(truncate_ansi_to_width("", 5), "");
+    }
+
+    #[test]
+    fn test_truncate_ansi_zero_width() {
+        assert_eq!(truncate_ansi_to_width("hello", 0), "");
+    }
+
+    #[test]
+    fn test_truncate_ansi_cjk() {
+        // CJK 字符宽度为 2
+        assert_eq!(truncate_ansi_to_width("你好", 3), "你");
+        assert_eq!(truncate_ansi_to_width("你好", 2), "你");
+        assert_eq!(truncate_ansi_to_width("你好", 1), "");
+    }
+
+    #[test]
+    fn test_truncate_ansi_preserves_sgr() {
+        // ANSI SGR 序列不计入宽度，应完整保留
+        let result = truncate_ansi_to_width("\x1b[31mhello\x1b[0m", 3);
+        assert_eq!(result, "\x1b[31mhel");
+        // 完整宽度时保留全部内容和 reset
+        let full = truncate_ansi_to_width("\x1b[31mhi\x1b[0m", 2);
+        assert_eq!(full, "\x1b[31mhi\x1b[0m");
+    }
+
+    #[test]
+    fn test_truncate_ansi_256_color() {
+        // 256 色序列不计入宽度
+        let result = truncate_ansi_to_width("\x1b[38;5;196mred\x1b[0m", 3);
+        assert_eq!(result, "\x1b[38;5;196mred\x1b[0m");
+    }
+
+    #[test]
+    fn test_truncate_ansi_non_sgr_csi() {
+        // 非 SGR 的 CSI 序列（如 \x1b[?25h）也不计入宽度
+        let result = truncate_ansi_to_width("\x1b[?25habc", 2);
+        assert_eq!(result, "\x1b[?25hab");
+    }
+
+    #[test]
+    fn test_truncate_ansi_mixed_cjk_and_color() {
+        // ANSI 颜色 + CJK 混合
+        let result = truncate_ansi_to_width("\x1b[32m你好世界\x1b[0m", 5);
+        assert_eq!(result, "\x1b[32m你好");
+    }
+
+    // === panel_coverage_mask 测试 ===
+
+    #[test]
+    fn test_panel_mask_no_panels() {
+        let state = TerminalState::new(80, 24);
+        let mask = state.panel_coverage_mask();
+        // output_height = 24 - 1 - 1 - 1 = 21
+        assert_eq!(mask.len(), 21);
+        assert!(mask.iter().all(|m| m.is_none()));
+    }
+
+    #[test]
+    fn test_panel_mask_single_right_aligned() {
+        let mut state = TerminalState::new(80, 24);
+        // 右上角面板：x=-20 → abs_x=60, y=0 → abs_y=1, width=20, height=5
+        state.set_panel("stat", -20, 0, 20, 5, vec!["line".to_string()], vec![]);
+        let mask = state.panel_coverage_mask();
+        // output_height = 21, 面板覆盖 output 行 0..4 (abs_y=1, output_top=1, idx=0..4)
+        assert_eq!(mask.len(), 21);
+        for i in 0..5 {
+            assert_eq!(mask[i], Some((60, 80)), "row {} should be covered", i);
+        }
+        for i in 5..21 {
+            assert_eq!(mask[i], None, "row {} should not be covered", i);
+        }
+    }
+
+    #[test]
+    fn test_panel_mask_multiple_overlapping() {
+        let mut state = TerminalState::new(80, 24);
+        // 面板A: abs_x=50, width=20 → [50,70), 面板B: abs_x=55, width=15 → [55,70)
+        state.set_panel("a", -30, 0, 20, 3, vec![], vec![]);
+        state.set_panel("b", -25, 0, 15, 3, vec![], vec![]);
+        let mask = state.panel_coverage_mask();
+        // 两面板重叠行 0..2：min_x=50, max_end=70
+        for i in 0..3 {
+            assert_eq!(mask[i], Some((50, 70)), "row {}", i);
+        }
+    }
+
+    #[test]
+    fn test_panel_mask_clipped_to_output_area() {
+        let mut state = TerminalState::new(80, 24);
+        // 面板超出输出区底部：height=50, 但 output_height=21
+        state.set_panel("big", -20, 0, 20, 50, vec![], vec![]);
+        let mask = state.panel_coverage_mask();
+        // 应被裁剪到 output_height
+        assert_eq!(mask.len(), 21);
+        for i in 0..21 {
+            assert_eq!(mask[i], Some((60, 80)), "row {}", i);
+        }
+    }
+
+    #[test]
+    fn test_panel_mask_negative_y() {
+        let mut state = TerminalState::new(80, 24);
+        // output_bottom = 24 - 1(lua) - 1(input) = 22
+        // y=-5 → abs_y = 22 - 5 = 17, output idx = 17 - 1(status) = 16
+        state.set_panel("stat", -20, -5, 20, 3, vec![], vec![]);
+        let mask = state.panel_coverage_mask();
+        for i in 0..16 {
+            assert_eq!(mask[i], None, "row {} should not be covered", i);
+        }
+        for i in 16..19 {
+            assert_eq!(mask[i], Some((60, 80)), "row {} should be covered", i);
+        }
     }
 }
