@@ -276,7 +276,7 @@ socks5_port = 1080
 | `GetTriggerInfo(name, code)` | 获取信息 |
 | `SetTriggerOption(name, option, value)` | 设置选项 |
 
-回调：`function(name, line, wildcards, styles)`，`wildcards[0]` = 完整匹配文本。
+回调：`function(name, line, wildcards, styles)`，`wildcards[0]` = 完整匹配文本。`OneShot`（32768）标志：触发后自动删除。
 
 ### 别名
 
@@ -286,6 +286,8 @@ socks5_port = 1080
 | `DeleteAlias(name)` | 删除别名 |
 | `GetAliasInfo(name, code)` / `GetAliasList()` | 获取信息/列表 |
 | `SetAliasOption(name, option, value)` | 设置选项 |
+
+`OneShot`（32768）标志：匹配后自动删除。
 
 ### 定时器
 
@@ -388,9 +390,11 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 | `trigger_flag` | 触发器标志位 |
 | `alias_flag` | 别名标志位 |
 | `timer_flag` | 定时器标志位 |
+| `custom_colour` | 自定义颜色编号 |
+| `sendto` | 发送目标 |
 | `error_code` / `error_desc` | 错误码与描述 |
 
-常用值：`Enabled=1`、`KeepEvaluating=8`、`RegularExpression=32`、`Replace=1024`、`Temporary=4096`（触发器）/ `OneShot=8192`（定时器）。
+常用值：`Enabled=1`、`KeepEvaluating=8`、`RegularExpression=32`、`Replace=1024`、`Temporary=16384`（三者统一）、`OneShot=32768`（触发器/别名）/ `OneShot=4`（定时器）。
 
 ---
 
@@ -406,12 +410,13 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 │   └── commands/          # 命令指南
 ├── src/
 │   ├── main.rs            # 入口
+│   ├── lib.rs             # 库入口（集成测试入口）
 │   ├── app.rs             # 应用主逻辑
 │   ├── config.rs          # 配置解析
-│   ├── connection/        # 连接管理（manager.rs + session.rs）
-│   ├── ui/                # 终端 UI（terminal.rs / input.rs / ansi.rs）
-│   ├── log/               # 日志系统（logger.rs / panic_hook.rs）
-│   └── lua/               # Lua 引擎 + API 实现（engine.rs）
+│   ├── connection/        # 连接管理（manager / session / rate_limiter）
+│   ├── ui/                # 终端 UI（terminal / input / ansi）
+│   ├── log/               # 日志系统（logger / panic_hook / debug）
+│   └── lua/               # Lua 引擎 + API（engine / api / triggers / aliases / timers / commands / database / helpers / index / types）
 ├── .github/workflows/     # CI/CD
 └── Cargo.toml
 ```
@@ -538,7 +543,7 @@ panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀
 - ANSI SGR 解析、GBK 编码兼容
 - SQLite3 集成、JSON 序列化
 - 可配置渲染频率、连接延迟
-- 809 单元测试
+- 827 单元测试
 
 ---
 
