@@ -174,9 +174,11 @@ impl LuaEngine {
                     let _ = entry.set("italic", sr.italic);
                     let _ = entry.set("underline", sr.underline);
                     // text 字段：MUSHclient 兼容，表示该样式区间的文本内容
+                    // 使用 get() 防止 sr.start/end 不在 UTF-8 字符边界上时 panic
                     if sr.start < clean_line.len() {
                         let end = std::cmp::min(sr.start + sr.length, clean_line.len());
-                        let _ = entry.set("text", &clean_line[sr.start..end]);
+                        let text = clean_line.get(sr.start..end).unwrap_or("");
+                        let _ = entry.set("text", text);
                     }
                     let _ = t.set(i + 1, entry);
                 }
@@ -308,8 +310,9 @@ impl LuaEngine {
             if ch == '\x1b' {
                 // ANSI 转义序列
                 chars.next(); // 消耗 \x1b
-                if chars.next() == Some('[') {
-                    // CSI 序列
+                if chars.peek() == Some(&'[') {
+                    chars.next(); // 消耗 '['
+                                  // CSI 序列
                     let mut params = String::new();
                     while let Some(&c) = chars.peek() {
                         if ('\x30'..='\x3f').contains(&c) || ('\x20'..='\x2f').contains(&c) {
