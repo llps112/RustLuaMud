@@ -543,10 +543,9 @@ impl Session {
     /// 发送命令到服务器
     pub fn send(&self, cmd: &str) -> Result<(), String> {
         if let Some(tx) = &self.send_tx {
-            tx.try_send(cmd.to_string()).map_err(|e| {
-                eprintln!("[session] 发送队列满或已关闭: {} | cmd={}", e, cmd);
-                format!("发送队列满或已关闭: {}", e)
-            })
+            // 错误经返回值传递给上层显示（带去重），不再 eprintln 避免 stderr 重复刷屏
+            tx.try_send(cmd.to_string())
+                .map_err(|e| format!("发送队列满或已关闭: {}", e))
         } else {
             Err("未连接".to_string())
         }

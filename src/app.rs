@@ -302,6 +302,24 @@ fn format_lua_error(err: &str) -> Vec<String> {
     lines
 }
 
+/// 发送错误去重状态更新（命令通道与原始数据通道共用）
+///
+/// 成功时清除该 session 的已展示标记（后续失败会再次报告）；
+/// 失败时仅首次（标记不存在）返回 true，表示应输出错误。
+/// TCP 半死时发送队列填满导致连续失败，借此防止以轮询频率刷屏。
+fn update_send_err_state(
+    err_shown: &mut HashSet<SessionId>,
+    session_id: SessionId,
+    is_ok: bool,
+) -> bool {
+    if is_ok {
+        err_shown.remove(&session_id);
+        false
+    } else {
+        err_shown.insert(session_id)
+    }
+}
+
 /// 应用主结构
 pub struct App {
     config: AppConfig,
@@ -320,6 +338,8 @@ pub struct App {
     render_tick_cancels: HashMap<SessionId, oneshot::Sender<()>>,
     /// 已展示过原始数据发送错误的 session 集合（用于错误去重，防止刷屏）
     raw_send_err_shown: HashSet<SessionId>,
+    /// 已展示过命令发送错误的 session 集合（用于错误去重，防止刷屏）
+    cmd_send_err_shown: HashSet<SessionId>,
 }
 
 impl App {
@@ -369,6 +389,7 @@ impl App {
             render_tick_rx,
             render_tick_cancels: HashMap::new(),
             raw_send_err_shown: HashSet::new(),
+            cmd_send_err_shown: HashSet::new(),
         })
     }
 
@@ -531,9 +552,7 @@ impl App {
                     };
                     for cmd in &queued_cmds {
                         self.logger.log_command(&name, cmd);
-                        if let Err(e) = self.manager.send_to(session_id, cmd) {
-                            self.terminal.append_output(&format!("[发送错误] {}", e))?;
-                        }
+                        self.send_cmd_checked(session_id, cmd)?;
                     }
                     self.drain_lua_logs(session_id)?;
                     self.send_lua_raw(session_id)?;
@@ -669,10 +688,7 @@ impl App {
                                     }
                                 } else {
                                     self.logger.log_command(&name, cmd);
-                                    if let Err(e) = self.manager.send_to(session_id, cmd) {
-                                        self.terminal
-                                            .append_output(&format!("[发送错误] {}", e))?;
-                                    }
+                                    self.send_cmd_checked(session_id, cmd)?;
                                 }
                             }
 
@@ -733,9 +749,7 @@ impl App {
                         };
                         for cmd in &queued_cmds {
                             self.logger.log_command(&name, cmd);
-                            if let Err(e) = self.manager.send_to(session_id, cmd) {
-                                self.terminal.append_output(&format!("[发送错误] {}", e))?;
-                            }
+                            self.send_cmd_checked(session_id, cmd)?;
                         }
                         self.drain_lua_logs(session_id)?;
                         self.send_lua_raw(session_id)?;
@@ -861,9 +875,7 @@ impl App {
                     // 无别名匹配，直接发送到 MUD
                     self.logger.log_command(&name, &cmd);
                     if self.is_session_connected(session_id) {
-                        if let Err(e) = self.manager.send_to(session_id, &cmd) {
-                            self.terminal.append_output(&format!("[发送错误] {}", e))?;
-                        }
+                        self.send_cmd_checked(session_id, &cmd)?;
                     }
                 }
                 depth += 1;
@@ -871,9 +883,7 @@ impl App {
                 // 超过嵌套深度，直接发送防止无限递归
                 self.logger.log_command(&name, &cmd);
                 if self.is_session_connected(session_id) {
-                    if let Err(e) = self.manager.send_to(session_id, &cmd) {
-                        self.terminal.append_output(&format!("[发送错误] {}", e))?;
-                    }
+                    self.send_cmd_checked(session_id, &cmd)?;
                 }
             }
         }
@@ -886,6 +896,19 @@ impl App {
             .get_by_id(session_id)
             .map(|s| s.state == crate::connection::SessionState::Connected)
             .unwrap_or(false)
+    }
+
+    /// 发送命令到服务器，失败时按 session 去重输出错误
+    /// TCP 半死时写任务阻塞，命令队列（256）填满后连续失败，
+    /// 仅首次失败输出一条 [发送错误]，防止刷屏；发送恢复后重置
+    fn send_cmd_checked(&mut self, session_id: SessionId, cmd: &str) -> io::Result<()> {
+        let result = self.manager.send_to(session_id, cmd);
+        if update_send_err_state(&mut self.cmd_send_err_shown, session_id, result.is_ok()) {
+            if let Err(e) = result {
+                self.terminal.append_output(&format!("[发送错误] {}", e))?;
+            }
+        }
+        Ok(())
     }
 
     /// 发送 Lua 引擎产生的原始数据包（SendPkt 压入的）
@@ -901,18 +924,11 @@ impl App {
             .map(|engine| engine.drain_raw())
             .unwrap_or_default();
         for data in raw_packets {
-            match self.manager.send_raw(session_id, data) {
-                Ok(()) => {
-                    // 发送恢复正常，清除错误已展示标记，后续失败会再次报告
-                    self.raw_send_err_shown.remove(&session_id);
-                }
-                Err(e) => {
-                    // 写任务阻塞（TCP 半死）时原始数据队列填满，连续失败以轮询
-                    // 频率发生；仅首次失败时输出一条错误，防止刷屏
-                    if self.raw_send_err_shown.insert(session_id) {
-                        self.terminal
-                            .append_output(&format!("[发送原始数据错误] {}", e))?;
-                    }
+            let result = self.manager.send_raw(session_id, data);
+            if update_send_err_state(&mut self.raw_send_err_shown, session_id, result.is_ok()) {
+                if let Err(e) = result {
+                    self.terminal
+                        .append_output(&format!("[发送原始数据错误] {}", e))?;
                 }
             }
         }
@@ -1511,6 +1527,7 @@ impl App {
                 self.stop_render_tick_timer(session_id);
                 // 清理该 session 的发送错误去重标记
                 self.raw_send_err_shown.remove(&session_id);
+                self.cmd_send_err_shown.remove(&session_id);
 
                 match self.manager.remove_session(session_id) {
                     Ok(name) => {
@@ -2556,6 +2573,55 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ================================================================
+    // 发送错误去重状态机（update_send_err_state）
+    // ================================================================
+
+    /// 首次失败返回 true（应输出），连续失败返回 false（静默）
+    #[test]
+    fn test_send_err_state_first_failure_only() {
+        let mut shown = HashSet::new();
+        let sid = SessionId(1);
+        // 首次失败：输出
+        assert!(update_send_err_state(&mut shown, sid, false));
+        // 连续失败：静默（TCP 半死刷屏场景）
+        assert!(!update_send_err_state(&mut shown, sid, false));
+        assert!(!update_send_err_state(&mut shown, sid, false));
+    }
+
+    /// 成功发送后清除标记，后续失败会再次输出（每轮故障报一次）
+    #[test]
+    fn test_send_err_state_reset_on_success() {
+        let mut shown = HashSet::new();
+        let sid = SessionId(1);
+        assert!(update_send_err_state(&mut shown, sid, false));
+        // 恢复成功：不输出且清除标记
+        assert!(!update_send_err_state(&mut shown, sid, true));
+        // 再次失败：重新输出
+        assert!(update_send_err_state(&mut shown, sid, false));
+    }
+
+    /// 持续成功时始终不输出
+    #[test]
+    fn test_send_err_state_stays_silent_on_success() {
+        let mut shown = HashSet::new();
+        let sid = SessionId(1);
+        assert!(!update_send_err_state(&mut shown, sid, true));
+        assert!(!update_send_err_state(&mut shown, sid, true));
+    }
+
+    /// 多 session 隔离：一个 session 的失败不影响另一个 session 的首次输出
+    #[test]
+    fn test_send_err_state_session_isolation() {
+        let mut shown = HashSet::new();
+        let sid_a = SessionId(1);
+        let sid_b = SessionId(2);
+        assert!(update_send_err_state(&mut shown, sid_a, false));
+        // sid_a 已展示，sid_b 仍是首次失败：应输出
+        assert!(!update_send_err_state(&mut shown, sid_a, false));
+        assert!(update_send_err_state(&mut shown, sid_b, false));
+    }
 
     #[test]
     fn test_parse_connect_args_host_port() {
