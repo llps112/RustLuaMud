@@ -555,10 +555,9 @@ impl Session {
     /// 发送原始数据包到服务器
     pub fn send_raw(&self, data: Vec<u8>) -> Result<(), String> {
         if let Some(tx) = &self.send_raw_tx {
-            tx.try_send(data).map_err(|e| {
-                eprintln!("[session] 原始数据发送队列满或已关闭: {}", e);
-                format!("原始数据发送队列满或已关闭: {}", e)
-            })
+            // 错误经返回值传递给上层显示（带去重），不再 eprintln 避免 stderr 重复刷屏
+            tx.try_send(data)
+                .map_err(|e| format!("原始数据发送队列满或已关闭: {}", e))
         } else {
             Err("未连接".to_string())
         }

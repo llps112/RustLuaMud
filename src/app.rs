@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -318,6 +318,8 @@ pub struct App {
     render_tick_tx: mpsc::Sender<RenderTickRequest>,
     render_tick_rx: mpsc::Receiver<RenderTickRequest>,
     render_tick_cancels: HashMap<SessionId, oneshot::Sender<()>>,
+    /// 已展示过原始数据发送错误的 session 集合（用于错误去重，防止刷屏）
+    raw_send_err_shown: HashSet<SessionId>,
 }
 
 impl App {
@@ -366,6 +368,7 @@ impl App {
             render_tick_tx,
             render_tick_rx,
             render_tick_cancels: HashMap::new(),
+            raw_send_err_shown: HashSet::new(),
         })
     }
 
@@ -898,9 +901,19 @@ impl App {
             .map(|engine| engine.drain_raw())
             .unwrap_or_default();
         for data in raw_packets {
-            if let Err(e) = self.manager.send_raw(session_id, data) {
-                self.terminal
-                    .append_output(&format!("[发送原始数据错误] {}", e))?;
+            match self.manager.send_raw(session_id, data) {
+                Ok(()) => {
+                    // 发送恢复正常，清除错误已展示标记，后续失败会再次报告
+                    self.raw_send_err_shown.remove(&session_id);
+                }
+                Err(e) => {
+                    // 写任务阻塞（TCP 半死）时原始数据队列填满，连续失败以轮询
+                    // 频率发生；仅首次失败时输出一条错误，防止刷屏
+                    if self.raw_send_err_shown.insert(session_id) {
+                        self.terminal
+                            .append_output(&format!("[发送原始数据错误] {}", e))?;
+                    }
+                }
             }
         }
         Ok(())
@@ -1496,6 +1509,8 @@ impl App {
                 let display_pos = self.manager.display_number_of(session_id);
                 // 清理定时器：停止目标 session 的渲染刷新定时器
                 self.stop_render_tick_timer(session_id);
+                // 清理该 session 的发送错误去重标记
+                self.raw_send_err_shown.remove(&session_id);
 
                 match self.manager.remove_session(session_id) {
                     Ok(name) => {

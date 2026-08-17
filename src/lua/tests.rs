@@ -2636,6 +2636,71 @@ fn test_timer_intervals_with_disabled() {
     });
 }
 
+// ================================================================
+// 空闲心跳（IAC NOP）节流
+// ================================================================
+
+/// 辅助：将引擎的空闲时钟回拨指定秒数（模拟服务器静默）
+fn backdate_idle(engine: &LuaEngine, idle_secs: u64, keepalive_ago_secs: u64) {
+    let mut state = engine.state.borrow_mut();
+    let now = std::time::Instant::now();
+    state.last_server_data = now - std::time::Duration::from_secs(idle_secs);
+    state.last_keepalive = now - std::time::Duration::from_secs(keepalive_ago_secs);
+}
+
+/// 未达空闲阈值（<30s）不发送心跳
+#[test]
+fn test_keepalive_not_idle() {
+    with_engine(|engine| {
+        // 引擎刚创建，last_server_data = now，空闲 0s
+        engine.fire_keepalive_if_idle();
+        engine.fire_keepalive_if_idle();
+        assert!(engine.state.borrow().pending_raw.is_empty());
+    });
+}
+
+/// 空闲超 30s 发送首个心跳；节流期内（<30s）连续调用不再发送
+/// 修复前：空闲超 30s 后每次轮询（50ms）都发送，形成 20 包/秒心跳风暴
+#[test]
+fn test_keepalive_throttled_to_one_per_interval() {
+    with_engine(|engine| {
+        // 空闲 35s，距上次心跳 35s（首次触发条件满足）
+        backdate_idle(engine, 35, 35);
+        engine.fire_keepalive_if_idle();
+        assert_eq!(
+            engine.state.borrow().pending_raw,
+            vec![vec![0xff, 0xf1]],
+            "空闲超 30s 应发送首个 IAC NOP 心跳"
+        );
+
+        // 模拟轮询高频调用：节流期内不再发送
+        for _ in 0..100 {
+            engine.fire_keepalive_if_idle();
+        }
+        assert_eq!(
+            engine.state.borrow().pending_raw.len(),
+            1,
+            "节流期内连续调用只允许 1 个心跳包，防止队列被填满"
+        );
+    });
+}
+
+/// 距上次心跳超 30s 后恢复发送（持续静默时每 30s 一个，维持保活语义）
+#[test]
+fn test_keepalive_next_after_interval_elapsed() {
+    with_engine(|engine| {
+        // 空闲 70s，上次心跳 35s 前：节流期已过，允许发送
+        backdate_idle(engine, 70, 35);
+        engine.fire_keepalive_if_idle();
+        assert_eq!(engine.state.borrow().pending_raw.len(), 1);
+
+        // 服务器有新数据后空闲归零，即使心跳间隔已过也不再发送
+        engine.state.borrow_mut().last_server_data = std::time::Instant::now();
+        engine.fire_keepalive_if_idle();
+        assert_eq!(engine.state.borrow().pending_raw.len(), 1);
+    });
+}
+
 #[test]
 fn test_enable_timer_via_api() {
     with_engine(|engine| {

@@ -58,6 +58,7 @@ impl LuaEngine {
             status_text: String::new(),
             current_encoding: ScriptEncoding::Utf8,
             last_server_data: std::time::Instant::now(),
+            last_keepalive: std::time::Instant::now(),
             pending_panels: Vec::new(),
             panel_handlers: HashMap::new(),
         }));

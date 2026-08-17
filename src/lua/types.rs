@@ -137,6 +137,8 @@ pub(crate) struct ScriptState {
     pub current_encoding: ScriptEncoding,
     /// 上次收到服务器数据的时间（用于空闲心跳检测）
     pub last_server_data: Instant,
+    /// 上次发送空闲心跳（IAC NOP）的时间（用于心跳节流，每 30s 最多 1 个）
+    pub last_keepalive: Instant,
     /// 待处理的面板更新（由 SetPanel/RemovePanel 产生）
     pub pending_panels: Vec<PanelUpdate>,
     /// 面板点击回调注册表: panel_name → 回调函数

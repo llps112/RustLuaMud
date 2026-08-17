@@ -11,22 +11,26 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::types::LuaEngine;
 
 impl LuaEngine {
     /// 检查服务器是否长时间无响应，是则发送 IAC NOP 心跳包保持连接
-    /// 空闲超过 30 秒则发送一次 IAC NOP
+    /// 空闲超过 30 秒后，每 30 秒发送一次 IAC NOP（节流）
+    ///
+    /// 若不节流，空闲期间每次轮询（50ms）都会压入心跳包；
+    /// 服务器超时（TCP 半死）导致写任务阻塞不消费队列时，
+    /// 原始数据通道（容量 256）约 13 秒即被填满，之后每次
+    /// 发送都失败并以轮询频率向终端刷错误信息。
     pub fn fire_keepalive_if_idle(&self) {
         let idle_threshold = Duration::from_secs(30);
-        let idle_time = {
-            let state = self.state.borrow();
-            state.last_server_data.elapsed()
-        };
-        if idle_time >= idle_threshold {
+        let mut state = self.state.borrow_mut();
+        let idle_time = state.last_server_data.elapsed();
+        if idle_time >= idle_threshold && state.last_keepalive.elapsed() >= idle_threshold {
             // IAC NOP = \xff\xf1，telnet 标准心跳
-            self.state.borrow_mut().pending_raw.push(vec![0xff, 0xf1]);
+            state.pending_raw.push(vec![0xff, 0xf1]);
+            state.last_keepalive = Instant::now();
         }
     }
 

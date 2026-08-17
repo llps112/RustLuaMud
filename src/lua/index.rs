@@ -356,6 +356,7 @@ mod tests {
             status_text: String::new(),
             current_encoding: super::super::types::ScriptEncoding::Utf8,
             last_server_data: std::time::Instant::now(),
+            last_keepalive: std::time::Instant::now(),
             pending_panels: Vec::new(),
             panel_handlers: HashMap::new(),
         };
@@ -440,6 +441,7 @@ mod tests {
             status_text: String::new(),
             current_encoding: super::super::types::ScriptEncoding::Utf8,
             last_server_data: std::time::Instant::now(),
+            last_keepalive: std::time::Instant::now(),
             pending_panels: Vec::new(),
             panel_handlers: HashMap::new(),
         }
