@@ -28,17 +28,27 @@
 - 如果一次提交中已经包含了其他功能性修改（如 always.lua、michen_yb.lua 等），可以顺带包含 `war_members_data.lua` 的更新
 - 如果距离上次提交该文件不到 24 小时，且没有功能性代码变更，**跳过**该文件的提交
 
+## Release 发布规则
+
+发布流程：bump 版本号 → commit + push → 创建 tag `vX.Y.Z` → push tag。
+
+**监控原则**：push tag 后，只要通过 `gh run list` 确认 GitHub Actions release workflow **已触发并开始构建**，即视为发布完成，无需继续等待构建结果。GitHub Actions 会自动完成二进制编译、Release 创建和 Gitee 同步。
+
 ## michen_xkx.lua 同步规则
 
 `scripts/private/michen_xkx.lua` 是子模块中的加载清单（**唯一源文件**），`scripts/michen_xkx.lua` 是主仓库中的本地配置副本。两者需要保持同步。
 
 **修改原则**：
 - **只修改** `scripts/private/michen_xkx.lua`，**禁止**直接编辑 `scripts/michen_xkx.lua`
-- 修改完成后，**必须同步**到 `scripts/michen_xkx.lua`
+- 修改完成后，**必须立即同步**到 `scripts/michen_xkx.lua`，不可拖延到提交前
 - 同步方式：直接复制文件内容（注意 `scripts/michen_xkx.lua` 不在 git 跟踪中，是本地配置）
-- 同步时机：在子模块提交前完成同步，确保本地测试环境使用最新的加载清单
+- 同步时机：**修改 michen_xkx.lua 的同一个任务内必须执行同步命令**，确保本地测试环境使用最新的加载清单
+- **不同步的后果**：运行时加载的本地副本缺少新增文件，对应全局变量为 nil，触发 `attempt to index global 'xxx' (a nil value)` 错误
 
 **执行命令**：
 ```bash
 cp scripts/private/michen_xkx.lua scripts/michen_xkx.lua
 ```
+
+**往期事故**：
+- 2026-08-13：子模块源文件已添加 `workflow_shadow.lua`（第46行），但未同步到本地配置副本，运行时 `workflow_shadow` 全局变量为 nil，导致 `michen_alias_workflow.lua:93` 调用 `workflow_shadow.run()` 时崩溃，押镖流程中断。

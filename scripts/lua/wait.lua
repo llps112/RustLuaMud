@@ -95,9 +95,32 @@ local threads = {}
 
 
 -- ----------------------------------------------------------
+-- wait.stop_all: discard all waiting threads (called by #stop)
+--
+-- wait 的 timer/trigger（wait_timer_NNN/wait_trigger_NNN）无组，
+-- EnableTimerGroup/EnableTriggerGroup（closeclass）无法关闭它们，
+-- 挂起协程会在 #stop 后照常恢复继续执行。此函数将挂起协程全部
+-- 丢弃（threads 置空后 timer_resume/trigger_resume 找不到线程
+-- 直接返回），并删除残留的一次性 timer/trigger。
+-- ----------------------------------------------------------
 
+function wait.stop_all ()
+
+  for name in pairs (threads) do
+
+    pcall (DeleteTimer, name)
+
+    pcall (DeleteTrigger, name)
+
+  end -- for each thread
+
+  threads = {}  -- discard all waiting threads
+
+end -- stop_all
+
+
+-- ----------------------------------------------------------
 -- wait.timer_resume: called by a timer to resume a thread
-
 -- ----------------------------------------------------------
 
 function wait.timer_resume (name)
