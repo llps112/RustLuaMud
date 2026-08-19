@@ -6,6 +6,9 @@ logs/
 .git-crypt-key
 .trae/
 
+# Qoder: 忽略本地项目设置，保留 rules/ 供团队共享
+.qoder/settings.local.json
+
 # profiles: 只保留 example.toml
 profiles/*
 !profiles/example.toml
