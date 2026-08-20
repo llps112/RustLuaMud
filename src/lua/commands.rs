@@ -94,6 +94,8 @@ impl LuaEngine {
         // 连接刚建立时，调用 OnConnect() 抽象接口
         // Lua 脚本可通过覆盖 OnConnect() 实现连接后的初始化逻辑
         if connected && !was_connected {
+            self.state.borrow_mut().connect_time = Some(std::time::Instant::now());
+            self.state.borrow_mut().reconnecting = false;
             // 延迟触发机制：由定时器轮询检查并执行
             // 延迟时间从 Session 配置获取，通过 set_connect_delay 设置
             // 若未设置延迟（delay_ms == 0），则立即执行
@@ -138,6 +140,51 @@ impl LuaEngine {
     /// 设置 OnConnect 延迟触发时间（毫秒）
     pub fn set_connect_delay(&mut self, delay_ms: u64) {
         self.connect_delay_ms = delay_ms;
+    }
+
+    /// 通知 Lua 引擎连接已断开，并调用 OnDisconnect(reason) 回调
+    pub fn notify_disconnect(&mut self, reason: &str) {
+        {
+            let mut state = self.state.borrow_mut();
+            state.connected = false;
+            state.connect_time = None;
+            state.reconnecting = true;
+            state.last_disconnect_reason = Some(reason.to_string());
+            self.pending_on_connect = None;
+            self.delayed_commands.borrow_mut().clear();
+        }
+        // 调用 OnDisconnect(reason)
+        let code = format!(
+            "if type(OnDisconnect) == 'function' then OnDisconnect('{}') end",
+            reason.replace('\'', "\\'")
+        );
+        let lua_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            if let Err(e) = self.eval_code(&code) {
+                self.log_error(&format!("OnDisconnect() 执行失败: {}", e));
+            }
+        }));
+        if lua_result.is_err() {
+            self.log_error("OnDisconnect() 执行中发生 panic，已捕获以防止崩溃");
+        }
+    }
+
+    /// 从 Session 层同步连接统计数据到 Lua 引擎
+    pub fn update_session_stats(
+        &mut self,
+        reconnect_count: u64,
+        reconnect_attempt: u32,
+        reconnecting: bool,
+        next_retry_secs: u64,
+        bytes_recv: u64,
+        bytes_sent: u64,
+    ) {
+        let mut state = self.state.borrow_mut();
+        state.reconnect_count = reconnect_count;
+        state.reconnect_attempt = reconnect_attempt;
+        state.reconnecting = reconnecting;
+        state.next_retry_secs = next_retry_secs;
+        state.bytes_recv = bytes_recv;
+        state.bytes_sent = bytes_sent;
     }
 
     /// 检查延迟排空是否到期，到期则返回 true

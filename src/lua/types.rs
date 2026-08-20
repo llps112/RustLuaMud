@@ -145,6 +145,22 @@ pub(crate) struct ScriptState {
     /// 由 RegisterPanelHandler API 注册, handle_panel_click 查找调用
     /// 解耦客户端与脚本: 客户端不再硬编码脚本侧函数名
     pub panel_handlers: HashMap<String, Function>,
+    /// 连接建立时间（None = 未连接）
+    pub connect_time: Option<Instant>,
+    /// 累计接收字节数
+    pub bytes_recv: u64,
+    /// 累计发送字节数
+    pub bytes_sent: u64,
+    /// 累计重连成功次数（从 Session 同步）
+    pub reconnect_count: u64,
+    /// 当前连续重连尝试次数（从 Session 同步）
+    pub reconnect_attempt: u32,
+    /// 是否正在重连中
+    pub reconnecting: bool,
+    /// 上次断线原因
+    pub last_disconnect_reason: Option<String>,
+    /// 下次重连等待秒数（0 = 已连接或不在重连）
+    pub next_retry_secs: u64,
 }
 
 /// 浮动面板更新指令（由 Lua API 产生，drain 后应用到 TerminalState）

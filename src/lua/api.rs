@@ -1520,9 +1520,103 @@ impl LuaEngine {
                 let count = state_rc_gi.borrow().packet_count;
                 Ok(Value::Integer(i64_to_lua_integer(count as i64)))
             }
+            88 => {
+                // MushClient (GitHub only): GetInfo(88) = Window Title
+                // 本引擎无窗口标题，返回 world name
+                let name = state_rc_gi.borrow().world_name.clone();
+                Ok(Value::String(lua.create_string(&name)?))
+            }
+            89 => {
+                // MushClient (GitHub only): GetInfo(89) = Main Window Title
+                Ok(Value::String(lua.create_string("RustLuaMud")?))
+            }
+            106 => {
+                // MushClient: GetInfo(106) = Disconnected flag (1=disconnected)
+                let disconnected = !state_rc_gi.borrow().connected;
+                Ok(Value::Integer(i64_to_lua_integer(if disconnected {
+                    1
+                } else {
+                    0
+                })))
+            }
+            107 => {
+                // MushClient: GetInfo(107) = Currently-connecting flag
+                let reconnecting = state_rc_gi.borrow().reconnecting;
+                Ok(Value::Integer(i64_to_lua_integer(if reconnecting {
+                    1
+                } else {
+                    0
+                })))
+            }
+            216 => {
+                // MushClient: GetInfo(216) = Total bytes received
+                let bytes = state_rc_gi.borrow().bytes_recv;
+                Ok(Value::Integer(i64_to_lua_integer(bytes as i64)))
+            }
+            217 => {
+                // MushClient: GetInfo(217) = Total bytes sent
+                let bytes = state_rc_gi.borrow().bytes_sent;
+                Ok(Value::Integer(i64_to_lua_integer(bytes as i64)))
+            }
+            227 => {
+                // MushClient: GetInfo(227) = Connect phase
+                // 0=disconnected, 1=connecting, 2=connected
+                let state = state_rc_gi.borrow();
+                let phase = if state.connected {
+                    2
+                } else if state.reconnecting {
+                    1
+                } else {
+                    0
+                };
+                Ok(Value::Integer(i64_to_lua_integer(phase)))
+            }
+            301 => {
+                // MushClient: GetInfo(301) = Time connected (seconds since connect)
+                let state = state_rc_gi.borrow();
+                let secs = state
+                    .connect_time
+                    .map(|t| t.elapsed().as_secs() as i64)
+                    .unwrap_or(0);
+                Ok(Value::Integer(i64_to_lua_integer(secs)))
+            }
             _ => Ok(Value::String(lua.create_string("")?)),
         })?;
         globals.set("GetInfo", get_info_fn)?;
+
+        // GetSessionStats() — RustLuaMud 扩展 API，返回连接统计信息
+        let state_rc_ss = state_rc.clone();
+        let get_session_stats_fn = lua.create_function_mut(move |lua, ()| {
+            let state = state_rc_ss.borrow();
+            let t = lua.create_table()?;
+            // uptime: 连接持续时间（秒）
+            let uptime = state
+                .connect_time
+                .map(|t| t.elapsed().as_secs() as f64)
+                .unwrap_or(0.0);
+            t.set("uptime", uptime)?;
+            // last_recv_secs: 距上次收到数据的时间（秒）
+            let last_recv = state.last_server_data.elapsed().as_secs() as f64;
+            t.set("last_recv_secs", last_recv)?;
+            t.set("reconnect_count", state.reconnect_count as f64)?;
+            t.set("reconnect_attempt", state.reconnect_attempt as f64)?;
+            t.set("next_retry_secs", state.next_retry_secs as f64)?;
+            t.set("bytes_recv", state.bytes_recv as f64)?;
+            t.set("bytes_sent", state.bytes_sent as f64)?;
+            t.set("connected", state.connected)?;
+            t.set("reconnecting", state.reconnecting)?;
+            // last_disconnect_reason: string 或 nil
+            match &state.last_disconnect_reason {
+                Some(reason) => t.set("last_disconnect_reason", reason.as_str())?,
+                None => t.set("last_disconnect_reason", Value::Nil)?,
+            }
+            Ok(Value::Table(t))
+        })?;
+        globals.set("GetSessionStats", get_session_stats_fn)?;
+
+        // OnDisconnect(reason) — 默认空函数，Lua 脚本可覆盖
+        let on_disconnect_fn = lua.create_function(move |_, _reason: String| Ok(()))?;
+        globals.set("OnDisconnect", on_disconnect_fn)?;
 
         // SetOption(name, value)
         let set_option_fn = lua.create_function(move |lua, (name, value): (String, Value)| {

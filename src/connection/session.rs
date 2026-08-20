@@ -62,8 +62,16 @@ pub struct Session {
     pub encoding: Encoding,
     pub auto_reconnect: bool,
     pub reconnect_delay_secs: u64,
-    /// 当前重连退避秒数（失败后翻倍，成功后重置为 reconnect_delay_secs）
-    pub reconnect_backoff_secs: u64,
+    /// 重连退避最大间隔（秒），指数退避上限
+    pub reconnect_max_secs: u64,
+    /// 当前连续重连尝试次数（成功连接后重置为 0）
+    pub reconnect_attempt: u32,
+    /// 累计重连成功次数
+    pub reconnect_count: u64,
+    /// 上次断线原因
+    pub last_disconnect_reason: Option<String>,
+    /// 断线时间（用于计算重连停机时长）
+    pub disconnect_time: Option<std::time::Instant>,
     pub state: SessionState,
 
     /// 该连接的输出缓冲区（前台切换时恢复用）
@@ -112,6 +120,16 @@ pub struct Session {
     pub burst_size: u64,
     /// 每秒令牌补充速率，默认 20
     pub cmds_per_sec: u64,
+    /// 空闲超时（秒），超过此时间无服务器数据则发送心跳
+    pub idle_timeout_secs: u64,
+    /// 心跳命令内容，空字符串表示不启用
+    pub heartbeat_cmd: String,
+    /// 心跳响应超时（秒），超时则断连
+    pub heartbeat_timeout_secs: u64,
+    /// 最后收到服务器数据的时间
+    pub last_recv_time: std::time::Instant,
+    /// 心跳发送时间（Some = 已发送等待响应）
+    pub heartbeat_sent: Option<std::time::Instant>,
 
     // 发送命令的通道
     pub(crate) send_tx: Option<mpsc::Sender<String>>,
@@ -197,7 +215,11 @@ impl Session {
             encoding,
             auto_reconnect: config.auto_reconnect,
             reconnect_delay_secs: config.reconnect_delay_secs,
-            reconnect_backoff_secs: config.reconnect_delay_secs,
+            reconnect_max_secs: config.reconnect_max_secs,
+            reconnect_attempt: 0,
+            reconnect_count: 0,
+            last_disconnect_reason: None,
+            disconnect_time: None,
             state: SessionState::Disconnected,
             output_lines: Vec::new(),
             input_state: crate::ui::terminal::InputState::default(),
@@ -220,6 +242,11 @@ impl Session {
             cmd_interval_ms: config.cmd_interval_ms.clamp(20, 200),
             burst_size: config.burst_size.max(1),
             cmds_per_sec: config.cmds_per_sec.max(1),
+            idle_timeout_secs: config.idle_timeout_secs,
+            heartbeat_cmd: config.heartbeat_cmd.clone(),
+            heartbeat_timeout_secs: config.heartbeat_timeout_secs,
+            last_recv_time: std::time::Instant::now(),
+            heartbeat_sent: None,
             send_tx: None,
             send_raw_tx: None,
             cancel_tx: None,
@@ -585,6 +612,39 @@ impl Session {
         self.send_raw_tx = None;
         self.state = SessionState::Disconnected;
     }
+
+    /// 计算当前重连退避延迟（秒）
+    /// 公式: min(base * 2^attempt, max_secs)
+    pub fn current_backoff_secs(&self) -> u64 {
+        let base = self.reconnect_delay_secs.max(1);
+        let exp = 1u64.checked_shl(self.reconnect_attempt).unwrap_or(u64::MAX);
+        let delay = base.saturating_mul(exp);
+        delay.min(self.reconnect_max_secs)
+    }
+
+    /// 连接成功后重置重连统计
+    pub fn on_connect_success(&mut self) {
+        self.reconnect_attempt = 0;
+        self.reconnect_count += 1;
+    }
+
+    /// 重连失败后递增尝试次数
+    pub fn on_reconnect_failure(&mut self) {
+        self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);
+    }
+
+    /// 设置断线原因并记录断线时间
+    pub fn set_disconnect_reason(&mut self, reason: String) {
+        self.last_disconnect_reason = Some(reason);
+        self.disconnect_time = Some(std::time::Instant::now());
+    }
+
+    /// 获取自断线以来的停机时长（秒），若无记录则返回 0
+    pub fn downtime_secs(&self) -> u64 {
+        self.disconnect_time
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -721,6 +781,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(1), &config);
         assert_eq!(session.name, "test");
@@ -755,6 +819,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(1), &config);
         assert_eq!(session.render_interval, 2000);
@@ -787,6 +855,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.send("hello").is_err());
@@ -817,6 +889,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let mut session = Session::new(SessionId(1), &config);
         session.disconnect();
@@ -848,6 +924,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(2), &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -878,6 +958,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(3), &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -908,6 +992,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(5), &config);
         assert_eq!(session.script_path, Some("/path/to/script.lua".to_string()));
@@ -938,6 +1026,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(6), &config);
         assert_eq!(session.username, Some("player".to_string()));
@@ -969,6 +1061,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(7), &config);
         assert!(session.auto_connect);
@@ -1001,6 +1097,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(8), &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -1031,6 +1131,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(9), &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -1109,6 +1213,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.output_lines.is_empty());
@@ -1139,6 +1247,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.lua_engine.is_none());
@@ -1169,6 +1281,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let mut session = Session::new(SessionId(1), &config);
         session.disconnect();
@@ -1208,6 +1324,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(!session.socks5_enable);
@@ -1240,6 +1360,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1272,6 +1396,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1307,6 +1435,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1339,10 +1471,124 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
         assert_eq!(session.socks5_host, Some("".to_string()));
+    }
+
+    // === 指数退避重连单元测试 ===
+
+    #[test]
+    fn test_backoff_sequence() {
+        let mut config = make_test_config("test", 4000);
+        config.reconnect_delay_secs = 1;
+        config.reconnect_max_secs = 1800;
+        let mut session = Session::new(SessionId(1), &config);
+        assert_eq!(session.current_backoff_secs(), 1);
+        session.on_reconnect_failure();
+        assert_eq!(session.current_backoff_secs(), 2);
+        session.on_reconnect_failure();
+        assert_eq!(session.current_backoff_secs(), 4);
+        session.on_reconnect_failure();
+        assert_eq!(session.current_backoff_secs(), 8);
+        session.on_reconnect_failure();
+        assert_eq!(session.current_backoff_secs(), 16);
+    }
+
+    #[test]
+    fn test_backoff_max_cap() {
+        let mut config = make_test_config("test", 4000);
+        config.reconnect_delay_secs = 10;
+        config.reconnect_max_secs = 60;
+        let mut session = Session::new(SessionId(1), &config);
+        assert_eq!(session.current_backoff_secs(), 10);
+        session.on_reconnect_failure();
+        assert_eq!(session.current_backoff_secs(), 20);
+        session.on_reconnect_failure();
+        assert_eq!(session.current_backoff_secs(), 40);
+        session.on_reconnect_failure();
+        assert_eq!(session.current_backoff_secs(), 60); // capped at max
+        session.on_reconnect_failure();
+        assert_eq!(session.current_backoff_secs(), 60); // still capped
+    }
+
+    #[test]
+    fn test_backoff_reset_on_success() {
+        let mut config = make_test_config("test", 4000);
+        config.reconnect_delay_secs = 5;
+        config.reconnect_max_secs = 1800;
+        let mut session = Session::new(SessionId(1), &config);
+        session.on_reconnect_failure();
+        session.on_reconnect_failure();
+        session.on_reconnect_failure();
+        assert_eq!(session.current_backoff_secs(), 40); // 5 * 2^3
+        assert_eq!(session.reconnect_count, 0);
+        session.on_connect_success();
+        assert_eq!(session.reconnect_attempt, 0);
+        assert_eq!(session.reconnect_count, 1);
+        assert_eq!(session.current_backoff_secs(), 5); // back to base
+    }
+
+    #[test]
+    fn test_backoff_saturating_overflow() {
+        let mut config = make_test_config("test", 4000);
+        config.reconnect_delay_secs = 1;
+        config.reconnect_max_secs = 1800;
+        let mut session = Session::new(SessionId(1), &config);
+        session.reconnect_attempt = 64; // 2^64 would overflow
+        assert_eq!(session.current_backoff_secs(), 1800); // capped at max
+    }
+
+    #[test]
+    fn test_backoff_zero_base_defaults_to_one() {
+        let mut config = make_test_config("test", 4000);
+        config.reconnect_delay_secs = 0;
+        config.reconnect_max_secs = 1800;
+        let session = Session::new(SessionId(1), &config);
+        assert_eq!(session.current_backoff_secs(), 1); // base clamped to 1
+    }
+
+    #[test]
+    fn test_disconnect_reason() {
+        let config = make_test_config("test", 4000);
+        let mut session = Session::new(SessionId(1), &config);
+        assert!(session.last_disconnect_reason.is_none());
+        session.set_disconnect_reason("timeout".to_string());
+        assert_eq!(session.last_disconnect_reason.as_deref(), Some("timeout"));
+        session.set_disconnect_reason("server_close".to_string());
+        assert_eq!(
+            session.last_disconnect_reason.as_deref(),
+            Some("server_close")
+        );
+    }
+
+    #[test]
+    fn test_disconnect_time_and_downtime() {
+        let config = make_test_config("test", 4000);
+        let mut session = Session::new(SessionId(1), &config);
+        // 初始无断线时间
+        assert!(session.disconnect_time.is_none());
+        assert_eq!(session.downtime_secs(), 0);
+        // 设置断线原因后记录时间
+        session.set_disconnect_reason("test".to_string());
+        assert!(session.disconnect_time.is_some());
+        // 停机时长应很小（刚设置）
+        assert!(session.downtime_secs() < 2);
+    }
+
+    #[test]
+    fn test_reconnect_attempt_saturating_add() {
+        let mut config = make_test_config("test", 4000);
+        config.reconnect_max_secs = 1800;
+        let mut session = Session::new(SessionId(1), &config);
+        session.reconnect_attempt = u32::MAX;
+        session.on_reconnect_failure();
+        assert_eq!(session.reconnect_attempt, u32::MAX); // no overflow
     }
 
     // === 异步集成测试（本地 TCP 回环对） ===
@@ -1371,6 +1617,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         }
     }
 
@@ -1398,6 +1648,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         }
     }
 

@@ -105,6 +105,19 @@ pub struct ConnectionConfig {
     /// 控制长期平均发送速率，对应 Lua 侧原 cmd.setnums
     #[serde(default = "default_cmds_per_sec")]
     pub cmds_per_sec: u64,
+    /// 重连退避最大间隔（秒），默认 1800（30分钟）
+    /// 指数退避上限，实际等待 = min(base * 2^attempt, max_secs)
+    #[serde(default = "default_reconnect_max_secs")]
+    pub reconnect_max_secs: u64,
+    /// 空闲超时（秒），超过此时间无服务器数据则发送心跳，默认 300（5分钟）
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    /// 心跳命令内容，空字符串表示不启用心跳检测
+    #[serde(default)]
+    pub heartbeat_cmd: String,
+    /// 心跳响应超时（秒），发送心跳后超过此时间无响应则断连，默认 60
+    #[serde(default = "default_heartbeat_timeout_secs")]
+    pub heartbeat_timeout_secs: u64,
 }
 
 fn default_true() -> bool {
@@ -130,6 +143,15 @@ fn default_burst_size() -> u64 {
 }
 fn default_cmds_per_sec() -> u64 {
     20
+}
+fn default_reconnect_max_secs() -> u64 {
+    1800
+}
+fn default_idle_timeout_secs() -> u64 {
+    300
+}
+fn default_heartbeat_timeout_secs() -> u64 {
+    60
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -584,5 +606,57 @@ port = 6000"#
         "#;
         let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.connect_delay_ms, 0);
+    }
+
+    #[test]
+    fn test_heartbeat_defaults() {
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.idle_timeout_secs, 300);
+        assert_eq!(config.heartbeat_cmd, "");
+        assert_eq!(config.heartbeat_timeout_secs, 60);
+    }
+
+    #[test]
+    fn test_heartbeat_custom() {
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+            idle_timeout_secs = 120
+            heartbeat_cmd = "look"
+            heartbeat_timeout_secs = 30
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.idle_timeout_secs, 120);
+        assert_eq!(config.heartbeat_cmd, "look");
+        assert_eq!(config.heartbeat_timeout_secs, 30);
+    }
+
+    #[test]
+    fn test_reconnect_max_secs_default() {
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.reconnect_max_secs, 1800);
+    }
+
+    #[test]
+    fn test_reconnect_max_secs_custom() {
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+            reconnect_max_secs = 600
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.reconnect_max_secs, 600);
     }
 }

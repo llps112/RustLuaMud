@@ -563,10 +563,11 @@ impl App {
                 if session_id == self.manager.foreground_id {
                     self.update_status_bar()?;
                 }
-                // 重置退避计时
+                // 重连成功，记录停机时长并重置退避计时
                 if let Some(session) = self.manager.get_mut_by_id(session_id) {
-                    let base = session.reconnect_delay_secs;
-                    session.reconnect_backoff_secs = base;
+                    let downtime = session.downtime_secs();
+                    self.logger.log_reconnect(&name, downtime);
+                    session.on_connect_success();
                 }
             }
             Err(e) => {
@@ -576,16 +577,15 @@ impl App {
                 if let Some(session) = self.manager.get_mut_by_id(session_id) {
                     session.state = crate::connection::SessionState::Disconnected;
                 }
-                // 计算下次退避延迟（翻倍，上限 300 秒）
+                // 计算指数退避延迟
                 let (backoff, auto_reconnect) = self
                     .manager
                     .get_by_id(session_id)
-                    .map(|s| (s.reconnect_backoff_secs, s.auto_reconnect))
+                    .map(|s| (s.current_backoff_secs(), s.auto_reconnect))
                     .unwrap_or((5, false));
                 if auto_reconnect {
-                    let next_backoff = (backoff * 2).min(300);
                     if let Some(session) = self.manager.get_mut_by_id(session_id) {
-                        session.reconnect_backoff_secs = next_backoff;
+                        session.on_reconnect_failure();
                     }
                     self.terminal.append_output(&format!(
                         "[系统] {} 秒后再次尝试重连 {}...",
@@ -1007,6 +1007,44 @@ impl App {
             engine.fire_keepalive_if_idle();
         }
         self.send_lua_raw(session_id)?;
+
+        // 应用层心跳检测：空闲超时发送心跳，超时未响应则断连
+        if let Some(session) = self.manager.get_by_id(session_id) {
+            if session.state == SessionState::Connected && !session.heartbeat_cmd.is_empty() {
+                let idle_secs = session.last_recv_time.elapsed().as_secs();
+                let idle_timeout = session.idle_timeout_secs;
+                let hb_timeout = session.heartbeat_timeout_secs;
+                let hb_sent = session.heartbeat_sent;
+                let hb_cmd = session.heartbeat_cmd.clone();
+
+                if let Some(sent_at) = hb_sent {
+                    // 已发送心跳，检查响应超时
+                    if sent_at.elapsed().as_secs() >= hb_timeout {
+                        if let Some(session) = self.manager.get_mut_by_id(session_id) {
+                            session.set_disconnect_reason("heartbeat_timeout".to_string());
+                            session.disconnect();
+                        }
+                        let name = self
+                            .manager
+                            .get_by_id(session_id)
+                            .map(|s| s.name.clone())
+                            .unwrap_or_default();
+                        let display_pos = self.manager.display_number_of(session_id);
+                        self.terminal.append_output(&format!(
+                            "[系统] 连接 {} ({}) 心跳超时 ({}s)，主动断开",
+                            display_pos, name, hb_timeout
+                        ))?;
+                    }
+                } else if idle_secs >= idle_timeout {
+                    // 空闲超时，发送心跳
+                    if let Some(session) = self.manager.get_mut_by_id(session_id) {
+                        session.heartbeat_sent = Some(std::time::Instant::now());
+                        let _ = session.send(&hb_cmd);
+                    }
+                }
+            }
+        }
+
         // 仅在定时器真正触发时才刷新状态栏（避免每 50ms 写终端，破坏鼠标选中）
         if any_fired && session_id == self.manager.foreground_id {
             self.update_status_bar()?;
@@ -1415,6 +1453,10 @@ impl App {
                     cmd_interval_ms: 50,
                     burst_size: 10,
                     cmds_per_sec: 20,
+                    reconnect_max_secs: 1800,
+                    idle_timeout_secs: 300,
+                    heartbeat_cmd: String::new(),
+                    heartbeat_timeout_secs: 60,
                 };
 
                 let session_id = match self.manager.add_connection_dynamic(&conn_config) {
@@ -2029,6 +2071,11 @@ impl App {
                 if self.manager.get_by_id(id).is_none() {
                     return Ok(());
                 }
+                // 更新心跳计时器
+                if let Some(session) = self.manager.get_mut_by_id(id) {
+                    session.last_recv_time = std::time::Instant::now();
+                    session.heartbeat_sent = None;
+                }
                 let is_realtime = self
                     .manager
                     .get_by_id(id)
@@ -2182,9 +2229,17 @@ impl App {
                     session.state = state.clone();
                     // 同步 Lua 引擎的连接状态（同步到对应 session，不限于前台）
                     if let Some(ref mut engine) = session.lua_engine {
-                        engine.set_connected(matches!(state, SessionState::Connected));
+                        if state == SessionState::Connected {
+                            engine.set_connected(true);
+                        } else if state == SessionState::Disconnected {
+                            let reason = session
+                                .last_disconnect_reason
+                                .clone()
+                                .unwrap_or_else(|| "disconnected".to_string());
+                            engine.notify_disconnect(&reason);
+                        }
                     }
-                    // 断线时清理发送通道，避免 Lua 引擎通过已关闭通道发送数据触发"channel closed"错误刷屏
+                    // 断线时清理发送通道，避免 Lua 引擎通过已关闭通道发送数据触发“channel closed”错误刷屏
                     if state == SessionState::Disconnected {
                         session.send_tx = None;
                         session.send_raw_tx = None;
@@ -2212,18 +2267,34 @@ impl App {
 
                 // 自动重连：断开时启动延迟重连任务
                 if state == SessionState::Disconnected {
-                    let (auto_reconnect, delay) = self
+                    // 仅在未预设原因时设置默认断线原因（心跳超时等场景已预设）
+                    if let Some(session) = self.manager.get_mut_by_id(id) {
+                        if session.last_disconnect_reason.is_none() {
+                            session.set_disconnect_reason("disconnected".to_string());
+                        }
+                    }
+                    let (backoff, auto_reconnect) = self
                         .manager
                         .get_by_id(id)
-                        .map(|s| (s.auto_reconnect, s.reconnect_delay_secs))
-                        .unwrap_or((false, 5));
+                        .map(|s| (s.current_backoff_secs(), s.auto_reconnect))
+                        .unwrap_or((5, false));
+                    // 记录断线日志 [DCN]
+                    if let Some(session) = self.manager.get_by_id(id) {
+                        let reason = session
+                            .last_disconnect_reason
+                            .as_deref()
+                            .unwrap_or("unknown");
+                        self.logger.log_disconnect(&name, reason, backoff);
+                    }
                     if auto_reconnect {
-                        self.terminal
-                            .append_output(&format!("[系统] {} 秒后尝试重连 {}...", delay, name))?;
+                        self.terminal.append_output(&format!(
+                            "[系统] {} 秒后尝试重连 {}...",
+                            backoff, name
+                        ))?;
                         // 启动延迟重连任务
                         let tx = self.reconnect_tx.clone();
                         tokio::spawn(async move {
-                            tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
+                            tokio::time::sleep(tokio::time::Duration::from_secs(backoff)).await;
                             let _ = tx.send(ReconnectRequest { session_id: id }).await;
                         });
                     }

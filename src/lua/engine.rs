@@ -61,6 +61,14 @@ impl LuaEngine {
             last_keepalive: std::time::Instant::now(),
             pending_panels: Vec::new(),
             panel_handlers: HashMap::new(),
+            connect_time: None,
+            bytes_recv: 0,
+            bytes_sent: 0,
+            reconnect_count: 0,
+            reconnect_attempt: 0,
+            reconnecting: false,
+            last_disconnect_reason: None,
+            next_retry_secs: 0,
         }));
 
         let script_dir = Rc::new(RefCell::new(None::<String>));

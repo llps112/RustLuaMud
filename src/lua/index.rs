@@ -359,6 +359,14 @@ mod tests {
             last_keepalive: std::time::Instant::now(),
             pending_panels: Vec::new(),
             panel_handlers: HashMap::new(),
+            connect_time: None,
+            bytes_recv: 0,
+            bytes_sent: 0,
+            reconnect_count: 0,
+            reconnect_attempt: 0,
+            reconnecting: false,
+            last_disconnect_reason: None,
+            next_retry_secs: 0,
         };
         state.add_trigger(make_trigger("t1", "group_a"));
         state.add_trigger(make_trigger("t2", "group_a"));
@@ -444,6 +452,14 @@ mod tests {
             last_keepalive: std::time::Instant::now(),
             pending_panels: Vec::new(),
             panel_handlers: HashMap::new(),
+            connect_time: None,
+            bytes_recv: 0,
+            bytes_sent: 0,
+            reconnect_count: 0,
+            reconnect_attempt: 0,
+            reconnecting: false,
+            last_disconnect_reason: None,
+            next_retry_secs: 0,
         }
     }
 }

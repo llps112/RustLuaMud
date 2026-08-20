@@ -292,6 +292,10 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
         }
     }
 

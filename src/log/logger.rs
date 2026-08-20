@@ -20,6 +20,10 @@ pub enum LogCategory {
     Debug,
     /// Rust panic 信息
     Panic,
+    /// 断线事件
+    Disconnect,
+    /// 重连事件
+    Reconnect,
 }
 
 impl LogCategory {
@@ -30,6 +34,8 @@ impl LogCategory {
             LogCategory::Lua => "LUA",
             LogCategory::Debug => "DBG",
             LogCategory::Panic => "PNC",
+            LogCategory::Disconnect => "DCN",
+            LogCategory::Reconnect => "RCN",
         }
     }
 }
@@ -145,6 +151,24 @@ impl Logger {
     /// 记录调试信息
     pub fn log_debug(&self, session_name: &str, msg: &str) {
         self.log_cat(session_name, LogCategory::Debug, msg);
+    }
+
+    /// 记录断线事件
+    pub fn log_disconnect(&self, session_name: &str, reason: &str, retry_secs: u64) {
+        self.log_cat(
+            session_name,
+            LogCategory::Disconnect,
+            &format!("reason={}, retry_in={}s", reason, retry_secs),
+        );
+    }
+
+    /// 记录重连成功事件
+    pub fn log_reconnect(&self, session_name: &str, downtime_secs: u64) {
+        self.log_cat(
+            session_name,
+            LogCategory::Reconnect,
+            &format!("reconnected, downtime={}s", downtime_secs),
+        );
     }
 
     /// 记录 panic 信息（带 backtrace）
@@ -370,5 +394,31 @@ mod tests {
         logger.log("sess", "first line");
         let log_file = dir.path().join(format!("sess_{}.log", ts()));
         assert!(log_file.exists());
+    }
+
+    #[test]
+    fn test_log_disconnect_writes_dcn_tag() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        logger.log_disconnect("mud", "heartbeat_timeout", 60);
+
+        let log_file = dir.path().join(format!("mud_{}.log", ts()));
+        let content = fs::read_to_string(&log_file).unwrap();
+        assert!(content.contains("[DCN]"));
+        assert!(content.contains("reason=heartbeat_timeout"));
+        assert!(content.contains("retry_in=60s"));
+    }
+
+    #[test]
+    fn test_log_reconnect_writes_rcn_tag() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        logger.log_reconnect("mud", 120);
+
+        let log_file = dir.path().join(format!("mud_{}.log", ts()));
+        let content = fs::read_to_string(&log_file).unwrap();
+        assert!(content.contains("[RCN]"));
+        assert!(content.contains("reconnected"));
+        assert!(content.contains("downtime=120s"));
     }
 }

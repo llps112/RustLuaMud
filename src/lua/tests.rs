@@ -6909,3 +6909,151 @@ fn test_get_style_all_ansi_colours_round_trip() {
         }
     });
 }
+
+// ================================================================
+// GetInfo 新编号 + GetSessionStats + OnDisconnect
+// ================================================================
+
+#[test]
+fn test_get_info_88_window_title() {
+    with_engine(|engine| {
+        // GetInfo(88) = Window Title → returns world_name
+        let title: String = eval(engine, "return GetInfo(88)").unwrap();
+        assert_eq!(title, ""); // world_name starts empty
+    });
+}
+
+#[test]
+fn test_get_info_89_main_window_title() {
+    with_engine(|engine| {
+        let title: String = eval(engine, "return GetInfo(89)").unwrap();
+        assert_eq!(title, "RustLuaMud");
+    });
+}
+
+#[test]
+fn test_get_info_106_disconnected_flag() {
+    with_engine(|engine| {
+        let flag: i64 = eval(engine, "return GetInfo(106)").unwrap();
+        assert_eq!(flag, 1);
+        engine.set_connected(true);
+        let flag: i64 = eval(engine, "return GetInfo(106)").unwrap();
+        assert_eq!(flag, 0);
+    });
+}
+
+#[test]
+fn test_get_info_107_connecting_flag() {
+    with_engine(|engine| {
+        let flag: i64 = eval(engine, "return GetInfo(107)").unwrap();
+        assert_eq!(flag, 0);
+        engine.state.borrow_mut().reconnecting = true;
+        let flag: i64 = eval(engine, "return GetInfo(107)").unwrap();
+        assert_eq!(flag, 1);
+    });
+}
+
+#[test]
+fn test_get_info_216_217_bytes() {
+    with_engine(|engine| {
+        let recv: i64 = eval(engine, "return GetInfo(216)").unwrap();
+        assert_eq!(recv, 0);
+        let sent: i64 = eval(engine, "return GetInfo(217)").unwrap();
+        assert_eq!(sent, 0);
+        engine.update_session_stats(0, 0, false, 0, 1024, 512);
+        let recv: i64 = eval(engine, "return GetInfo(216)").unwrap();
+        assert_eq!(recv, 1024);
+        let sent: i64 = eval(engine, "return GetInfo(217)").unwrap();
+        assert_eq!(sent, 512);
+    });
+}
+
+#[test]
+fn test_get_info_227_connect_phase() {
+    with_engine(|engine| {
+        let phase: i64 = eval(engine, "return GetInfo(227)").unwrap();
+        assert_eq!(phase, 0);
+        engine.set_connected(true);
+        let phase: i64 = eval(engine, "return GetInfo(227)").unwrap();
+        assert_eq!(phase, 2);
+    });
+}
+
+#[test]
+fn test_get_info_301_time_connected() {
+    with_engine(|engine| {
+        let secs: i64 = eval(engine, "return GetInfo(301)").unwrap();
+        assert_eq!(secs, 0);
+        engine.set_connected(true);
+        let secs: i64 = eval(engine, "return GetInfo(301)").unwrap();
+        assert!(secs >= 0);
+    });
+}
+
+#[test]
+fn test_get_session_stats() {
+    with_engine(|engine| {
+        engine.update_session_stats(3, 1, true, 10, 2048, 1024);
+        let reconnecting: bool = eval(engine, "return GetSessionStats().reconnecting").unwrap();
+        assert!(reconnecting);
+        let count: f64 = eval(engine, "return GetSessionStats().reconnect_count").unwrap();
+        assert_eq!(count, 3.0);
+        let attempt: f64 = eval(engine, "return GetSessionStats().reconnect_attempt").unwrap();
+        assert_eq!(attempt, 1.0);
+        let recv: f64 = eval(engine, "return GetSessionStats().bytes_recv").unwrap();
+        assert_eq!(recv, 2048.0);
+        let sent: f64 = eval(engine, "return GetSessionStats().bytes_sent").unwrap();
+        assert_eq!(sent, 1024.0);
+        let reason: mlua::Value =
+            eval(engine, "return GetSessionStats().last_disconnect_reason").unwrap();
+        assert!(matches!(reason, mlua::Value::Nil));
+    });
+}
+
+#[test]
+fn test_get_session_stats_with_disconnect_reason() {
+    with_engine(|engine| {
+        engine.state.borrow_mut().last_disconnect_reason = Some("timeout".to_string());
+        let reason: String =
+            eval(engine, "return GetSessionStats().last_disconnect_reason").unwrap();
+        assert_eq!(reason, "timeout");
+    });
+}
+
+#[test]
+fn test_on_disconnect_callback() {
+    with_engine(|engine| {
+        exec(
+            engine,
+            r#"
+            disconnect_reason = nil
+            OnDisconnect = function(reason)
+                disconnect_reason = reason
+            end
+            "#,
+        )
+        .unwrap();
+        engine.notify_disconnect("server_close");
+        let reason: String = eval(engine, "return disconnect_reason").unwrap();
+        assert_eq!(reason, "server_close");
+        assert!(!engine.state.borrow().connected);
+        assert!(engine.state.borrow().reconnecting);
+    });
+}
+
+#[test]
+fn test_on_disconnect_default_noop() {
+    with_engine(|engine| {
+        engine.notify_disconnect("network_error");
+        assert!(engine.state.borrow().last_disconnect_reason.is_some());
+    });
+}
+
+#[test]
+fn test_set_connected_sets_connect_time() {
+    with_engine(|engine| {
+        assert!(engine.state.borrow().connect_time.is_none());
+        engine.set_connected(true);
+        assert!(engine.state.borrow().connect_time.is_some());
+    });
+}
