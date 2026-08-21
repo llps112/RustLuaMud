@@ -1010,6 +1010,10 @@ impl Terminal {
     pub fn new() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
         let (width, height) = terminal::size()?;
+        // 尺寸保底：异常环境（如 headless pty 未设置 winsize）可能返回 0，
+        // 会导致渲染代码的减法运算溢出 panic
+        let width = width.max(20);
+        let height = height.max(5);
         // 启用鼠标点击追踪（仅 ?1000h，不含 ?1002h 拖拽追踪）
         // 终端处于鼠标应用模式时，按住 Shift 拖拽可绕过应用模式进行原生文本选中
         write!(io::stdout(), "\x1b[?1000h\x1b[?1006h")?;
@@ -1996,6 +2000,17 @@ mod tests {
         let (display, cursor_x) = state.input_display();
         assert_eq!(display, "hello");
         assert_eq!(cursor_x, 7); // 2 (prompt) + 5
+    }
+
+    #[test]
+    fn test_state_min_clamped_size_no_overflow() {
+        // Terminal::new 的尺寸保底为 20x5（headless pty 可能返回 0x0），
+        // 验证保底尺寸下 input_display 不 panic（回归：0 宽时减法溢出）
+        let mut state = TerminalState::new(20, 5);
+        state.input_buffer = "a".repeat(50);
+        state.input_cursor = 50;
+        let (display, _cursor_x) = state.input_display();
+        assert!(!display.is_empty());
     }
 
     #[test]

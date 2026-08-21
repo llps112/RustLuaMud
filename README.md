@@ -40,6 +40,9 @@
 - 长行自动换行，CJK 宽字符正确对齐
 - 极低资源占用：J1800 + 2GB 内存即可流畅运行 10 连接
 
+**部署运维**
+- 守护进程模式：`--daemon` fork + setsid，ssh 断开不中断，配合 `--daemon stop/status` 管理，适合 7x24 挂机
+
 ---
 
 ## 快速开始
@@ -150,6 +153,20 @@ cargo build --release
 # 实例二（使用不同配置目录）
 ./target/release/RustLuaMud --profiles profiles2
 ```
+
+#### 守护进程模式
+
+```bash
+# 启动守护进程（fork + setsid，ssh 断开不中断，适合 7x24 挂机）
+./target/release/RustLuaMud --daemon
+
+# 查询状态 / 停止（PID 文件位于 profiles 目录）
+./target/release/RustLuaMud --daemon status
+./target/release/RustLuaMud --daemon stop
+```
+
+> daemon 模式同样支持 `--profiles`，每个配置目录独立一个守护进程（各自的 `daemon.pid`）。
+> 停止通过 SIGTERM 优雅退出；前台模式收到 SIGTERM 也会优雅退出。
 
 ---
 

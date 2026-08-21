@@ -1,5 +1,6 @@
 use rust_lua_mud::app::App;
 use rust_lua_mud::config::AppConfig;
+use rust_lua_mud::daemon;
 
 fn main() {
     // TODO(v1.0): 正式发布前必须移除此行，把 RUST_BACKTRACE 控制权交给用户
@@ -13,6 +14,42 @@ fn main() {
         .map(|w| w[1].as_str())
         .unwrap_or("profiles")
         .to_string();
+
+    // 解析 --daemon [stop|status] 参数
+    let daemon_mode = args.iter().any(|a| a == "--daemon");
+    if daemon_mode {
+        let pid_path = daemon::pid_file_path(&profiles_dir);
+        let sub = args
+            .windows(2)
+            .find(|w| w[0] == "--daemon")
+            .map(|w| w[1].as_str())
+            .unwrap_or("");
+        match sub {
+            "stop" => match daemon::stop_daemon(&pid_path) {
+                Ok(msg) => {
+                    println!("{}", msg);
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            },
+            "status" => {
+                println!("{}", daemon::status_daemon(&pid_path));
+                return;
+            }
+            _ => {
+                // 守护进程化：父进程打印提示后退出，子进程继续主流程
+                // （必须在创建 tokio runtime 之前调用，fork 只在单线程阶段安全）
+                if let Err(e) = daemon::daemonize(&pid_path) {
+                    eprintln!("守护进程化失败: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+    let pid_path = daemon::pid_file_path(&profiles_dir);
 
     let config = AppConfig::load_default(&profiles_dir);
 
@@ -33,9 +70,15 @@ fn main() {
                 return;
             }
         };
+        app.set_daemon_mode(daemon_mode);
 
         if let Err(e) = app.run().await {
             eprintln!("运行错误: {}", e);
         }
     });
+
+    // daemon 模式正常退出后清理 PID 文件
+    if daemon_mode {
+        let _ = std::fs::remove_file(&pid_path);
+    }
 }
