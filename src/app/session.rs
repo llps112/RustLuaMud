@@ -297,6 +297,10 @@ impl App {
             Some(s) => s,
             None => return,
         };
+        // 显式取消旧的定时器任务，避免新旧任务短暂并存
+        if let Some(tx) = session.timer_cancel_tx.take() {
+            let _ = tx.send(());
+        }
         let (timer_cancel_tx, mut timer_cancel_rx) = oneshot::channel();
         session.timer_cancel_tx = Some(timer_cancel_tx);
 

@@ -246,13 +246,7 @@ impl App {
                     .get_by_id(fg_id)
                     .and_then(|s| s.lua_engine.as_ref())
                     .and_then(|e| e.script_path());
-                // 保存原 engine 的变量（如 char_name 等）
-                let saved_vars = self
-                    .manager
-                    .get_by_id(fg_id)
-                    .and_then(|s| s.lua_engine.as_ref())
-                    .map(|e| e.get_variables());
-                // 保存原 engine 的连接状态
+                // 保存原 engine 的连接状态（host/port/char_name 等，供 GetInfo 返回）
                 let saved_conn_state = self
                     .manager
                     .get_by_id(fg_id)
@@ -266,14 +260,7 @@ impl App {
                 if let Some(path) = script_path {
                     match crate::lua::LuaEngine::new() {
                         Ok(mut engine) => {
-                            // 恢复之前保存的变量
-                            if let Some(ref vars) = saved_vars {
-                                for (k, v) in vars {
-                                    engine.set_variable(k, v);
-                                    engine.set_global(k, v);
-                                }
-                            }
-                            // 恢复之前保存的连接状态
+                            // 恢复连接状态（GetInfo 需要），不恢复 variables——脚本顶层代码会重新初始化
                             if let Some(ref conn_state) = saved_conn_state {
                                 engine.restore_connection_state(conn_state);
                             }
@@ -733,6 +720,7 @@ impl App {
                 let is_reload =
                     parts[0] == "reload" || parts.get(1).is_some_and(|&p| p == "reload");
                 let mut executed = 0usize;
+                let mut reloaded_sids = Vec::new();
                 for &sid in &session_ids {
                     let name = self
                         .manager
@@ -746,11 +734,7 @@ impl App {
                             .and_then(|s| s.lua_engine.as_ref())
                             .and_then(|e| e.script_path());
                         if let Some(path) = path {
-                            let saved_vars = self
-                                .manager
-                                .get_by_id(sid)
-                                .and_then(|s| s.lua_engine.as_ref())
-                                .map(|e| e.get_variables());
+                            // 保存连接状态（host/port/char_name 等，供 GetInfo 返回）
                             let saved_conn = self
                                 .manager
                                 .get_by_id(sid)
@@ -758,12 +742,7 @@ impl App {
                                 .map(|e| e.get_connection_state());
                             match crate::lua::LuaEngine::new() {
                                 Ok(mut engine) => {
-                                    if let Some(ref vars) = saved_vars {
-                                        for (k, v) in vars {
-                                            engine.set_variable(k, v);
-                                            engine.set_global(k, v);
-                                        }
-                                    }
+                                    // 恢复连接状态（GetInfo 需要），不恢复 variables——脚本顶层代码会重新初始化
                                     if let Some(ref conn) = saved_conn {
                                         engine.restore_connection_state(conn);
                                     }
@@ -775,6 +754,7 @@ impl App {
                                             }
                                             self.drain_lua_logs(sid)?;
                                             executed += 1;
+                                            reloaded_sids.push(sid);
                                         }
                                         Err(e) => {
                                             self.terminal.append_output(&format!(
@@ -824,8 +804,8 @@ impl App {
                         }
                     }
                 }
-                if is_reload && executed > 0 {
-                    for &sid in &session_ids {
+                if is_reload {
+                    for &sid in &reloaded_sids {
                         self.start_timers_for_session(sid);
                     }
                 }

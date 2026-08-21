@@ -7,7 +7,6 @@
 //! - 面板点击处理（handle_panel_click）
 //! - 统计信息（trigger_count / alias_count / timer_count）
 
-use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 
 use super::types::{ConnectionState, LuaEngine, PanelUpdate};
@@ -56,11 +55,6 @@ impl LuaEngine {
     pub fn set_global(&self, name: &str, value: &str) {
         let globals = self.lua.globals();
         let _ = globals.set(name, value);
-    }
-
-    /// 获取所有变量（用于 reload 时恢复）
-    pub fn get_variables(&self) -> HashMap<String, String> {
-        self.state.borrow().variables.clone()
     }
 
     /// 获取连接状态（用于 reload 时恢复）
