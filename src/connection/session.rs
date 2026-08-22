@@ -77,9 +77,6 @@ pub struct Session {
     /// 该连接的输出缓冲区（前台切换时恢复用）
     pub output_lines: Vec<String>,
 
-    /// 上一行输出（跨包持久化，用于 ANSI 调试上下文捕获）
-    pub prev_output_line: Option<String>,
-
     /// 该连接的输入状态（前台切换时保存/恢复）
     pub input_state: crate::ui::terminal::InputState,
 
@@ -225,7 +222,6 @@ impl Session {
             disconnect_time: None,
             state: SessionState::Disconnected,
             output_lines: Vec::new(),
-            prev_output_line: None,
             input_state: crate::ui::terminal::InputState::default(),
             lua_engine: None,
             script_path: config.script.clone(),

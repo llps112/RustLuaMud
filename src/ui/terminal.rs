@@ -149,8 +149,8 @@ fn wrap_line_to_width(line: &str, max_width: usize) -> Vec<String> {
                 false
             };
             if is_sgr {
-                // SGR 序列：更新状态
-                if seq == "\x1b[0m" || seq == "\x1b[00m" {
+                // SGR 序列：更新状态（兼容 \x1b[0;0m 等重置变体，与 push_output 的判定保持一致）
+                if sgr_is_reset(&seq) {
                     sgr_state.clear();
                 } else {
                     sgr_state.push_str(&seq);
@@ -490,10 +490,16 @@ impl TerminalState {
 
                 if stripped.is_empty() {
                     // 纯 ANSI 行（不可见）：只更新状态，不加入输出
-                    if has_reset {
+                    // 优先用行尾最后一个 SGR（如 \x1b[0;0m\x1b[1;37m 的末尾是 \x1b[1;37m）
+                    // 只有当 last_sgr 为 None 时才根据 has_reset 清空
+                    if let Some(sgr) = &last_sgr {
+                        if sgr_is_reset(sgr) {
+                            self.last_ansi_sgr.clear();
+                        } else {
+                            self.last_ansi_sgr = sgr.clone();
+                        }
+                    } else if has_reset {
                         self.last_ansi_sgr.clear();
-                    } else if let Some(sgr) = last_sgr {
-                        self.last_ansi_sgr = sgr;
                     }
                 } else if last_sgr.is_some() {
                     // 有可见文本且自身带 ANSI：行首若是纯文本则补继承色（修复颜色截断：
@@ -503,8 +509,9 @@ impl TerminalState {
                     } else {
                         trimmed.to_string()
                     };
-                    // 保存颜色：行末最后一个 SGR 若为重置语义则清空继承状态（原逻辑仅识别 \x1b[0m）
-                    if has_reset || last_sgr.as_deref().is_some_and(sgr_is_reset) {
+                    // 保存颜色：行末最后一个 SGR 决定状态（与纯 ANSI 分支一致）；
+                    // 行中部的 reset 不影响跨行继承（如 ...<ESC>[0;0m<ESC>[1;37m后文，行末亮白应保留）
+                    if last_sgr.as_deref().is_some_and(sgr_is_reset) {
                         self.last_ansi_sgr.clear();
                     } else if let Some(sgr) = &last_sgr {
                         self.last_ansi_sgr = sgr.clone();
@@ -1655,6 +1662,31 @@ mod tests {
         assert_eq!(state.output_lines[0], "\x1b[1;32m第一行\x1b[0m");
         assert_eq!(state.output_lines[1], "\x1b[1;32m第二行\x1b[0m");
         assert_eq!(state.output_lines[3], "第四行");
+    }
+
+    #[test]
+    fn test_state_push_output_pure_ansi_with_reset_and_color() {
+        // 纯 ANSI 行同时包含 reset 和后续颜色码：优先用行尾最后一个 SGR
+        // 场景：服务端发送 \x1b[0;0m\x1b[1;37m（先重置再设亮白），状态应为亮白
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("\x1b[0;0m\x1b[1;37m"); // 纯 ANSI 行：reset + 亮白
+        state.push_output("你运起纯阳神通功..."); // 应继承亮白
+        assert_eq!(
+            state.output_lines[0],
+            "\x1b[1;37m你运起纯阳神通功...\x1b[0m"
+        );
+        assert_eq!(state.last_ansi_sgr, "\x1b[1;37m");
+    }
+
+    #[test]
+    fn test_state_push_output_visible_line_mid_reset_trailing_color() {
+        // 可见行中部含 reset、行末为颜色码：状态应保留行末颜色（最后 SGR 决定）
+        // 场景：合并战斗消息 ...<ESC>[0;0m<ESC>[1;37m只听见...被划开一道口子。
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("前文\x1b[0;0m\x1b[1;37m后文");
+        state.push_output("下一行"); // 应继承行末亮白，而非被中部 reset 清空
+        assert_eq!(state.output_lines[1], "\x1b[1;37m下一行\x1b[0m");
+        assert_eq!(state.last_ansi_sgr, "\x1b[1;37m");
     }
 
     #[test]
@@ -3024,6 +3056,19 @@ mod tests {
         // 第三段：同样
         assert!(segs[2].starts_with("\x1b[31m"));
         assert!(segs[2].ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn test_wrap_reset_variant_0_0m() {
+        // 重置变体 \x1b[0;0m 应被识别为重置：重置后的文本折行时续段不应重新上色
+        // 修复前：\x1b[0;0m 被追加进 sgr_state，续段被补上 "\x1b[31m\x1b[0;0m" 脏状态
+        let line = format!("\x1b[31mAB\x1b[0;0m{}", "c".repeat(6));
+        let segs = wrap_line_to_width(&line, 4);
+        // AB(2) + cc(2) 填满第一段，剩余 4 个 c 为第二段（处于重置后区域）
+        assert_eq!(segs.len(), 2);
+        assert!(segs[0].starts_with("\x1b[31m"));
+        // 第二段不应携带任何颜色恢复前缀
+        assert_eq!(segs[1], "cccc");
     }
 
     #[test]

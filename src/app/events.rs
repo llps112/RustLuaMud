@@ -241,7 +241,6 @@ impl App {
                 // ===== 阶段 2：显示 + 回看缓冲（按 omit 标志逐行决定）=====
                 // omit_from_output=true 的行：跳过 output_lines 入栈 + 跳过终端显示
                 // 日志文件不受 omit_from_output 影响（MUSHclient 语义，omit_from_log 才影响日志）
-                let mut output_current_as_after_context = false;
 
                 for (i, part) in data.split_inclusive('\n').enumerate() {
                     let trimmed = part.trim_end_matches(['\r', '\n']);
@@ -249,61 +248,6 @@ impl App {
                         continue;
                     }
 
-                    // DEBUG: 记录每行原始 ANSI 到日志（诊断颜色继承问题）
-                    if let Some(session) = self.manager.get_by_id(id) {
-                        let raw_line = trimmed.replace('\x1b', "<ESC>");
-                        self.logger
-                            .log_debug(&session.name, &format!("[RAW] {}", raw_line));
-                    }
-
-                    // 如果上一轮标记了需要输出当前行作为 [CONTEXT AFTER]
-                    if output_current_as_after_context {
-                        let context_msg =
-                            format!("[CONTEXT AFTER] {}", trimmed.replace('\x1b', "<ESC>"));
-                        if let Some(session) = self.manager.get_by_id(id) {
-                            self.logger.log_debug(&session.name, &context_msg);
-                        }
-                        output_current_as_after_context = false;
-                    }
-
-                    // DEBUG: 检测包含特定关键词的行，显示原始 ANSI 码
-                    let is_keyword_line = trimmed.contains("纯阳神通功")
-                        || trimmed.contains("断云")
-                        || trimmed.contains("止风");
-
-                    if is_keyword_line {
-                        // 先输出上一行作为 [CONTEXT BEFORE]（跨包持久化）
-                        if let Some(session) = self.manager.get_by_id(id) {
-                            if let Some(prev) = session.prev_output_line.as_ref() {
-                                let context_msg =
-                                    format!("[CONTEXT BEFORE] {}", prev.replace('\x1b', "<ESC>"));
-                                self.logger.log_debug(&session.name, &context_msg);
-                            }
-                        }
-
-                        // 输出当前行作为 [DEBUG ANSI]
-                        let debug_line = trimmed.replace('\x1b', "<ESC>");
-                        let debug_msg = format!("[DEBUG ANSI] {}", debug_line);
-                        if let Some(session) = self.manager.get_by_id(id) {
-                            self.logger.log_debug(&session.name, &debug_msg);
-                        }
-                        if let Some(session) = self.manager.get_mut_by_id(id) {
-                            session
-                                .output_lines
-                                .push(format!("\x1b[33m{}\x1b[0m", debug_msg));
-                        }
-                        if id == self.manager.foreground_id {
-                            self.terminal
-                                .append_output(&format!("\x1b[33m{}\x1b[0m", debug_msg))?;
-                        }
-                        // 标记下一行作为 [CONTEXT AFTER]
-                        output_current_as_after_context = true;
-                    }
-
-                    // 保存当前行作为下一轮的"上一行"（跨包持久化）
-                    if let Some(session) = self.manager.get_mut_by_id(id) {
-                        session.prev_output_line = Some(trimmed.to_string());
-                    }
                     let omitted = omit_flags.get(i).copied().unwrap_or(false);
                     if omitted {
                         continue;
