@@ -252,7 +252,8 @@ impl App {
 
                     // 如果上一轮标记了需要输出当前行作为 [CONTEXT AFTER]
                     if output_current_as_after_context {
-                        let context_msg = format!("[CONTEXT AFTER] {}", trimmed.replace('\x1b', "<ESC>"));
+                        let context_msg =
+                            format!("[CONTEXT AFTER] {}", trimmed.replace('\x1b', "<ESC>"));
                         if let Some(session) = self.manager.get_by_id(id) {
                             self.logger.log_debug(&session.name, &context_msg);
                         }
@@ -267,7 +268,8 @@ impl App {
                     if is_keyword_line {
                         // 先输出上一行作为 [CONTEXT BEFORE]
                         if let Some(prev) = prev_line.take() {
-                            let context_msg = format!("[CONTEXT BEFORE] {}", prev.replace('\x1b', "<ESC>"));
+                            let context_msg =
+                                format!("[CONTEXT BEFORE] {}", prev.replace('\x1b', "<ESC>"));
                             if let Some(session) = self.manager.get_by_id(id) {
                                 self.logger.log_debug(&session.name, &context_msg);
                             }
