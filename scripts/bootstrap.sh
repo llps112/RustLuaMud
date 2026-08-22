@@ -49,7 +49,7 @@ if [ "$USE_GITEE" = true ]; then
         BINARY_URL="https://gitee.com/bai-yifei180/RustLuaMud/releases/download/nightly/RustLuaMud-${ARCH}.tar.gz"
         CHANNEL_LABEL="nightly (Gitee)"
     else
-        LATEST_TAG=$(curl -sS "https://gitee.com/api/v5/repos/bai-yifei180/RustLuaMud/releases" | python3 -c "
+        LATEST_TAG=$(curl -sS "https://gitee.com/api/v5/repos/bai-yifei180/RustLuaMud/releases?per_page=100" | python3 -c "
 import sys, json
 releases = json.load(sys.stdin)
 # 排除 nightly，按语义版本号排序取最高版本
