@@ -70,6 +70,37 @@ fn extract_last_sgr(s: &str) -> Option<String> {
     }
     last
 }
+
+/// 判断 SGR 序列是否为重置语义（参数全为空或 0，如 \x1b[0m、\x1b[0;0m、\x1b[m）
+fn sgr_is_reset(seq: &str) -> bool {
+    let inner = seq
+        .strip_prefix("\x1b[")
+        .and_then(|s| s.strip_suffix('m'))
+        .unwrap_or("");
+    inner.split(';').all(|p| p.is_empty() || p == "0")
+}
+
+/// 扫描行内所有 SGR 序列，任一为重置语义即视为含重置（兼容 \x1b[0;0m 等变体）
+fn line_contains_reset(s: &str) -> bool {
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            let mut seq = String::from("\x1b[");
+            chars.next(); // consume '['
+            while let Some(&next) = chars.peek() {
+                seq.push(next);
+                chars.next();
+                if next == 'm' {
+                    break;
+                }
+            }
+            if seq.ends_with('m') && sgr_is_reset(&seq) {
+                return true;
+            }
+        }
+    }
+    false
+}
 /// 终端驱动会按当前光标列位置执行 TAB 跳格，与 MushClient 行为一致
 fn expand_tabs(s: &str) -> String {
     s.to_string()
@@ -453,9 +484,9 @@ impl TerminalState {
             let trimmed = part.trim_end_matches('\n').trim_end_matches('\r');
             if !trimmed.is_empty() {
                 let stripped = AnsiParser::strip_ansi(trimmed);
-                // 提取本行的 SGR 序列和 reset 标记
+                // 提取本行的 SGR 序列和 reset 标记（兼容 \x1b[0;0m 等重置变体）
                 let last_sgr = extract_last_sgr(trimmed);
-                let has_reset = trimmed.contains("\x1b[0m");
+                let has_reset = line_contains_reset(trimmed);
 
                 if stripped.is_empty() {
                     // 纯 ANSI 行（不可见）：只更新状态，不加入输出
@@ -465,21 +496,28 @@ impl TerminalState {
                         self.last_ansi_sgr = sgr;
                     }
                 } else if last_sgr.is_some() {
-                    // 有可见文本且自身带 ANSI：保存颜色，加入输出（附 reset）
-                    if !has_reset {
-                        if let Some(sgr) = &last_sgr {
-                            self.last_ansi_sgr = sgr.clone();
-                        }
+                    // 有可见文本且自身带 ANSI：行首若是纯文本则补继承色（修复颜色截断：
+                    // 如上一行末尾为绿色，本行开头"据说当年..."应继承绿色而非默认灰白）
+                    let line = if !trimmed.starts_with('\x1b') && !self.last_ansi_sgr.is_empty() {
+                        format!("{}{}", self.last_ansi_sgr, trimmed)
                     } else {
+                        trimmed.to_string()
+                    };
+                    // 保存颜色：行末最后一个 SGR 若为重置语义则清空继承状态（原逻辑仅识别 \x1b[0m）
+                    if has_reset || last_sgr.as_deref().is_some_and(sgr_is_reset) {
                         self.last_ansi_sgr.clear();
+                    } else if let Some(sgr) = &last_sgr {
+                        self.last_ansi_sgr = sgr.clone();
                     }
-                    self.output_lines.push(ensure_ansi_reset(trimmed));
+                    self.output_lines.push(ensure_ansi_reset(&line));
                 } else if !self.last_ansi_sgr.is_empty() {
-                    // 可见文本，无自身 ANSI，但有继承的颜色：补上颜色
+                    // 可见文本，无自身 ANSI，但有继承的颜色：补上颜色；
+                    // 行末追加 reset 后同步清空继承状态，限制继承仅限一行，防止污染链式扩散
                     let mut final_line = String::new();
                     final_line.push_str(&self.last_ansi_sgr);
                     final_line.push_str(trimmed);
                     final_line.push_str("\x1b[0m");
+                    self.last_ansi_sgr.clear();
                     self.output_lines.push(final_line);
                 } else {
                     // 纯文本，无颜色继承：直接加入
@@ -1565,6 +1603,56 @@ mod tests {
         }
         assert_eq!(state.output_lines.len(), 5000);
         assert_eq!(state.output_lines[0], "line 5");
+    }
+
+    #[test]
+    fn test_state_push_output_line_start_inherit_color() {
+        // 行首继承色补全（复现纯阳神通功场景）：上一行末尾绿色，本行行首纯文本 + 行内 ANSI
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("\x1b[1;32m绿色行");
+        state.push_output("纯文本前缀\x1b[1;33m黄");
+        assert_eq!(
+            state.output_lines[1],
+            "\x1b[1;32m纯文本前缀\x1b[1;33m黄\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn test_state_push_output_line_start_with_ansi_no_prepend() {
+        // 行首自带 ANSI 不重复补色
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("\x1b[1;32m绿色行");
+        state.push_output("\x1b[1;33m黄色开头");
+        assert_eq!(state.output_lines[1], "\x1b[1;33m黄色开头\x1b[0m");
+    }
+
+    #[test]
+    fn test_state_push_output_no_inherit_state_no_prepend() {
+        // 无继承状态（首行）：行首纯文本 + 行内 ANSI，原样输出仅补行末 reset
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("纯文本前缀\x1b[1;33m黄");
+        assert_eq!(state.output_lines[0], "纯文本前缀\x1b[1;33m黄\x1b[0m");
+    }
+
+    #[test]
+    fn test_state_push_output_reset_variant_clears_state() {
+        // \x1b[0;0m 重置变体识别：行末已重置，后续纯文本行不应继承颜色
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("\x1b[1;32m绿色行\x1b[0;0m");
+        state.push_output("普通文本");
+        assert_eq!(state.output_lines[1], "普通文本");
+        assert!(state.last_ansi_sgr.is_empty());
+    }
+
+    #[test]
+    fn test_state_push_output_inherit_no_pollution_chain() {
+        // 污染不扩散：无 ANSI 行继承颜色后末尾重置并清空继承状态，下一行不再继承（继承仅限一行）
+        let mut state = TerminalState::new(80, 24);
+        state.push_output("\x1b[1;32m绿色行");
+        state.push_output("继承行");
+        state.push_output("第三行");
+        assert_eq!(state.output_lines[1], "\x1b[1;32m继承行\x1b[0m");
+        assert_eq!(state.output_lines[2], "第三行");
     }
 
     #[test]
