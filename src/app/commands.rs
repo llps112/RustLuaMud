@@ -12,7 +12,57 @@ use super::parse::{format_lua_error, parse_builtin_command, BuiltinCommand, Prof
 use super::session::{ConnectRequest, ReconnectRequest};
 use super::{App, TermSettings};
 
+/// 注入 session 登录凭证到新建引擎（与 init_lua_for_session 对齐）：
+/// 脚本顶层 me.charid=char_name 依赖 char_name 全局变量
+fn inject_session_credentials(
+    engine: &mut crate::lua::LuaEngine,
+    username: &Option<String>,
+    password: &Option<String>,
+) {
+    if let Some(uname) = username {
+        if !uname.is_empty() {
+            engine.set_variable("char_name", uname);
+            engine.set_global("char_name", uname);
+            engine.set_char_name(uname);
+        }
+    }
+    if let Some(pwd) = password {
+        if !pwd.is_empty() {
+            engine.set_variable("char_password", pwd);
+            engine.set_global("char_password", pwd);
+        }
+    }
+}
+
 impl App {
+    /// 排空引擎在脚本加载期间 run/Execute 压入的命令并分发：
+    /// '/' 前缀按 Lua 代码执行（嵌套产生的命令继续排空），其余发给服务端。
+    /// 必须排到零残留，否则下次 timer tick 会触发
+    /// debug_assert!(pending_commands.is_empty()) panic（timers.rs）。
+    fn drain_engine_commands(
+        &mut self,
+        session_id: SessionId,
+        engine: &mut crate::lua::LuaEngine,
+        name: &str,
+    ) -> io::Result<()> {
+        let mut queue: std::collections::VecDeque<String> = engine.drain_commands().into();
+        while let Some(cmd) = queue.pop_front() {
+            if let Some(lua_code) = cmd.strip_prefix('/') {
+                if let Err(e) = engine.eval_code(lua_code) {
+                    self.terminal
+                        .append_output(&format!("[Lua] 执行排队命令失败: {}", e))?;
+                } else {
+                    // eval_code 内部可能再次 Execute/run 入队，继续排空防残留
+                    queue.extend(engine.drain_commands());
+                }
+            } else {
+                self.logger.log_command(name, &cmd);
+                self.send_cmd_checked(session_id, &cmd)?;
+            }
+        }
+        Ok(())
+    }
+
     /// 处理内置命令（基于 parse_builtin_command 分发）
     pub(crate) fn handle_builtin_command(&mut self, cmd: &str) -> io::Result<()> {
         match parse_builtin_command(cmd) {
@@ -206,26 +256,52 @@ impl App {
                     self.terminal.append_output("[错误] 无前台连接")?;
                     return Ok(());
                 }
+                let fg_name = self
+                    .manager
+                    .get_by_id(fg_id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                // /load 与连接路径对齐：恢复连接状态 + 注入凭证 + log_dir，
+                // 否则脚本顶层 char_name 为 nil 且加载期入队命令无人排空
+                let saved_conn_state = self
+                    .manager
+                    .get_by_id(fg_id)
+                    .and_then(|s| s.lua_engine.as_ref())
+                    .map(|e| e.get_connection_state());
+                let (fg_username, fg_password) = self
+                    .manager
+                    .get_by_id(fg_id)
+                    .map(|s| (s.username.clone(), s.password.clone()))
+                    .unwrap_or_default();
                 match crate::lua::LuaEngine::new() {
-                    Ok(mut engine) => match engine.load_script(&path) {
-                        Ok(()) => {
-                            if let Some(session) = self.manager.get_mut_by_id(fg_id) {
-                                session.lua_engine = Some(engine);
-                            }
-                            self.terminal.append_output(&format!(
-                                "\x1b[36m[Lua] 脚本已加载: {}\x1b[0m",
-                                path
-                            ))?;
-                            self.start_timers_for_session(fg_id);
+                    Ok(mut engine) => {
+                        if let Some(ref conn_state) = saved_conn_state {
+                            engine.restore_connection_state(conn_state);
                         }
-                        Err(e) => {
-                            let err_msg = e.to_string();
-                            for line in format_lua_error(&err_msg) {
-                                self.terminal
-                                    .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", line))?;
+                        inject_session_credentials(&mut engine, &fg_username, &fg_password);
+                        engine.set_log_dir(&self.config.general.log_dir);
+                        match engine.load_script(&path) {
+                            Ok(()) => {
+                                self.drain_engine_commands(fg_id, &mut engine, &fg_name)?;
+                                if let Some(session) = self.manager.get_mut_by_id(fg_id) {
+                                    session.lua_engine = Some(engine);
+                                }
+                                self.drain_lua_logs(fg_id)?;
+                                self.terminal.append_output(&format!(
+                                    "\x1b[36m[Lua] 脚本已加载: {}\x1b[0m",
+                                    path
+                                ))?;
+                                self.start_timers_for_session(fg_id);
+                            }
+                            Err(e) => {
+                                let err_msg = e.to_string();
+                                for line in format_lua_error(&err_msg) {
+                                    self.terminal
+                                        .append_output(&format!("\x1b[36m[Lua] {}\x1b[0m", line))?;
+                                }
                             }
                         }
-                    },
+                    }
                     Err(e) => {
                         self.terminal.append_output(&format!(
                             "\x1b[36m[Lua] 引擎初始化失败: {}\x1b[0m",
@@ -257,6 +333,12 @@ impl App {
                     .get_by_id(fg_id)
                     .map(|s| s.name.clone())
                     .unwrap_or_default();
+                // 保存 session 的登录凭证（reload 后需重新注入 Lua 全局变量 char_name/char_password）
+                let (fg_username, fg_password) = self
+                    .manager
+                    .get_by_id(fg_id)
+                    .map(|s| (s.username.clone(), s.password.clone()))
+                    .unwrap_or_default();
                 if let Some(path) = script_path {
                     match crate::lua::LuaEngine::new() {
                         Ok(mut engine) => {
@@ -264,8 +346,16 @@ impl App {
                             if let Some(ref conn_state) = saved_conn_state {
                                 engine.restore_connection_state(conn_state);
                             }
+                            // 重新注入登录凭证（与 init_lua_for_session 一致）：
+                            // 脚本顶层 me.charid=char_name 依赖该全局变量
+                            inject_session_credentials(&mut engine, &fg_username, &fg_password);
+                            // 重新注入日志目录（供 GetInfo(58) 返回，不在 ConnectionState 中）
+                            engine.set_log_dir(&self.config.general.log_dir);
                             match engine.load_script(&path) {
                                 Ok(()) => {
+                                    // 排空脚本加载期间 run/Execute 压入的命令，避免下次 timer tick
+                                    // 触发 debug_assert!(pending_commands.is_empty()) 崩溃
+                                    self.drain_engine_commands(fg_id, &mut engine, &fg_name)?;
                                     // 排空 Lua 日志（drain_lua_logs 会处理日志写入和终端输出）
                                     if let Some(session) = self.manager.get_mut_by_id(fg_id) {
                                         session.lua_engine = Some(engine);
@@ -720,7 +810,6 @@ impl App {
                 let is_reload =
                     parts[0] == "reload" || parts.get(1).is_some_and(|&p| p == "reload");
                 let mut executed = 0usize;
-                let mut reloaded_sids = Vec::new();
                 for &sid in &session_ids {
                     let name = self
                         .manager
@@ -740,21 +829,41 @@ impl App {
                                 .get_by_id(sid)
                                 .and_then(|s| s.lua_engine.as_ref())
                                 .map(|e| e.get_connection_state());
+                            // 保存 session 的登录凭证（reload 后需重新注入 Lua 全局变量）
+                            let (s_username, s_password) = self
+                                .manager
+                                .get_by_id(sid)
+                                .map(|s| (s.username.clone(), s.password.clone()))
+                                .unwrap_or_default();
                             match crate::lua::LuaEngine::new() {
                                 Ok(mut engine) => {
                                     // 恢复连接状态（GetInfo 需要），不恢复 variables——脚本顶层代码会重新初始化
                                     if let Some(ref conn) = saved_conn {
                                         engine.restore_connection_state(conn);
                                     }
+                                    // 重新注入登录凭证（与 init_lua_for_session 一致）：
+                                    // 脚本顶层 me.charid=char_name 依赖该全局变量
+                                    inject_session_credentials(
+                                        &mut engine,
+                                        &s_username,
+                                        &s_password,
+                                    );
+                                    // 重新注入日志目录（供 GetInfo(58) 返回，不在 ConnectionState 中）
+                                    engine.set_log_dir(&self.config.general.log_dir);
                                     match engine.load_script(&path) {
                                         Ok(()) => {
+                                            // 排空脚本加载期间 run/Execute 压入的命令，避免下次
+                                            // timer tick 触发 debug_assert! 崩溃
+                                            self.drain_engine_commands(sid, &mut engine, &name)?;
                                             // 排空脚本加载期间的 Lua 日志
                                             if let Some(session) = self.manager.get_mut_by_id(sid) {
                                                 session.lua_engine = Some(engine);
                                             }
                                             self.drain_lua_logs(sid)?;
+                                            // 立即重启该 session 的 timer：即使后续 session 处理
+                                            // 中途出错提前返回，已 reload 成功的定时器不受影响
+                                            self.start_timers_for_session(sid);
                                             executed += 1;
-                                            reloaded_sids.push(sid);
                                         }
                                         Err(e) => {
                                             self.terminal.append_output(&format!(
@@ -779,22 +888,42 @@ impl App {
                         }
                     } else {
                         let path = parts[1].to_string();
+                        // /all /load 与连接路径对齐：恢复连接状态 + 注入凭证 + log_dir + drain
+                        let saved_conn = self
+                            .manager
+                            .get_by_id(sid)
+                            .and_then(|s| s.lua_engine.as_ref())
+                            .map(|e| e.get_connection_state());
+                        let (l_username, l_password) = self
+                            .manager
+                            .get_by_id(sid)
+                            .map(|s| (s.username.clone(), s.password.clone()))
+                            .unwrap_or_default();
                         match crate::lua::LuaEngine::new() {
-                            Ok(mut engine) => match engine.load_script(&path) {
-                                Ok(()) => {
-                                    if let Some(session) = self.manager.get_mut_by_id(sid) {
-                                        session.lua_engine = Some(engine);
+                            Ok(mut engine) => {
+                                if let Some(ref conn) = saved_conn {
+                                    engine.restore_connection_state(conn);
+                                }
+                                inject_session_credentials(&mut engine, &l_username, &l_password);
+                                engine.set_log_dir(&self.config.general.log_dir);
+                                match engine.load_script(&path) {
+                                    Ok(()) => {
+                                        self.drain_engine_commands(sid, &mut engine, &name)?;
+                                        if let Some(session) = self.manager.get_mut_by_id(sid) {
+                                            session.lua_engine = Some(engine);
+                                        }
+                                        self.drain_lua_logs(sid)?;
+                                        self.start_timers_for_session(sid);
+                                        executed += 1;
                                     }
-                                    self.start_timers_for_session(sid);
-                                    executed += 1;
+                                    Err(e) => {
+                                        self.terminal.append_output(&format!(
+                                            "[错误] /all /load [{}]: {}",
+                                            name, e
+                                        ))?;
+                                    }
                                 }
-                                Err(e) => {
-                                    self.terminal.append_output(&format!(
-                                        "[错误] /all /load [{}]: {}",
-                                        name, e
-                                    ))?;
-                                }
-                            },
+                            }
                             Err(e) => {
                                 self.terminal.append_output(&format!(
                                     "[错误] /all /load [{}]: {}",
@@ -802,11 +931,6 @@ impl App {
                                 ))?;
                             }
                         }
-                    }
-                }
-                if is_reload {
-                    for &sid in &reloaded_sids {
-                        self.start_timers_for_session(sid);
                     }
                 }
                 self.terminal.append_output(&format!(

@@ -2582,6 +2582,129 @@ fn test_load_script_nonexistent() {
     assert!(result.is_err());
 }
 
+/// 回归测试：热重载序列（新引擎 → 注入凭证 → load_script）下脚本顶层可访问 char_name。
+/// 2026-08-21：/reload 只恢复 ConnectionState 未注入登录凭证，
+/// 脚本顶层 me.charid=char_name 得到 nil，拼接时崩溃。
+#[test]
+fn test_reload_sequence_injected_globals_visible_to_script() {
+    // 模拟脚本顶层：michen_xkx.lua L16-18 的 char_name 取值与拼接
+    let script = "local me={}\nme.charid=char_name\nme.pwd=char_password\n_G._test_path='config_'..me.charid..'.lua'\n";
+    let path = std::env::temp_dir().join(format!("rlm_test_reload_seq_{}.lua", std::process::id()));
+    std::fs::write(&path, script).unwrap();
+
+    let mut engine = LuaEngine::new().unwrap();
+    // 与 init_lua_for_session / LoadReload 修复后的注入一致
+    engine.set_variable("char_name", "fcriar");
+    engine.set_global("char_name", "fcriar");
+    engine.set_char_name("fcriar");
+    engine.set_variable("char_password", "secret");
+    engine.set_global("char_password", "secret");
+    let result = engine.load_script(path.to_str().unwrap());
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        result.is_ok(),
+        "注入凭证后脚本应加载成功: {:?}",
+        result.err()
+    );
+    let val: String = eval(&engine, "return _test_path").unwrap();
+    assert_eq!(val, "config_fcriar.lua");
+    // char_name 同时作为 GetInfo(3) 状态被注入
+    let name: String = eval(&engine, "return GetInfo(3)").unwrap();
+    assert_eq!(name, "fcriar");
+}
+
+/// 反向用例：未注入凭证的全新引擎加载依赖 char_name 的脚本应失败（复现原 bug）
+#[test]
+fn test_reload_sequence_without_injection_fails() {
+    let script = "local me={}\nme.charid=char_name\nlocal _s='config_'..me.charid..'.lua'\n";
+    let path = std::env::temp_dir().join(format!(
+        "rlm_test_reload_seq_nil_{}.lua",
+        std::process::id()
+    ));
+    std::fs::write(&path, script).unwrap();
+
+    let mut engine = LuaEngine::new().unwrap();
+    let result = engine.load_script(path.to_str().unwrap());
+    let _ = std::fs::remove_file(&path);
+    let err = result.expect_err("未注入 char_name 时拼接应失败");
+    assert!(err.contains("concatenate"), "错误应为 nil 拼接: {}", err);
+}
+
+/// 回归测试：reload 序列（新引擎 → 注入凭证 → load_script）后脚本加载期间 run()
+/// 入队的命令必须通过 drain_commands 清空，否则下个 timer tick 的
+/// debug_assert!(pending_commands.is_empty()) 会 panic（debug 构建下）。
+/// 2026-08-21 事故复现：fcriar reload 后首个 timer tick 崩溃于 timers.rs:178。
+#[test]
+fn test_reload_sequence_script_run_must_be_drained() {
+    // 脚本顶层无条件 run，模拟 michen_xkx.lua 的 if IsConnected() then run("score;hp;cha;jifa")
+    let script = "Execute('score;hp;cha;jifa')\n";
+    let path =
+        std::env::temp_dir().join(format!("rlm_test_reload_drain_{}.lua", std::process::id()));
+    std::fs::write(&path, script).unwrap();
+
+    let mut engine = LuaEngine::new().unwrap();
+    engine.set_global("char_name", "test");
+    engine.set_variable("char_name", "test");
+    engine
+        .load_script(path.to_str().unwrap())
+        .expect("加载应成功");
+    let _ = std::fs::remove_file(&path);
+
+    // load_script 执行期间脚本入队了 run 命令
+    let queued = engine.drain_commands();
+    assert!(
+        !queued.is_empty(),
+        "脚本 run 应入队命令（复现 reload 崩溃场景）"
+    );
+    // 清空后 fire_due_timers 的 debug_assert 才能通过
+    assert!(
+        engine.drain_commands().is_empty(),
+        "drain_commands 后 pending_commands 必须为空，否则下个 timer tick 会 panic"
+    );
+}
+
+/// 复现崩溃点（锁定真实故障模式）：load_script 后不 drain，下个 timer tick
+/// fire_due_timers 入口的 debug_assert 直接 panic（2026-08-21 timers.rs:178 事故）。
+/// 若将来有入口再次漏调 drain_commands，本测试会红（debug 构建）。
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "pending_commands should be empty")]
+fn test_reload_sequence_undrained_commands_panic_on_timer_tick() {
+    let script = "Execute('score')\n";
+    let path =
+        std::env::temp_dir().join(format!("rlm_test_reload_panic_{}.lua", std::process::id()));
+    std::fs::write(&path, script).unwrap();
+
+    let mut engine = LuaEngine::new().unwrap();
+    engine
+        .load_script(path.to_str().unwrap())
+        .expect("加载应成功");
+    let _ = std::fs::remove_file(&path);
+    // 故意不 drain：pending_commands 非空 → 复现 timers.rs 的 panic
+    engine.fire_due_timers();
+}
+
+/// 与上例对照：drain 之后再触发 timer tick 不 panic
+#[cfg(debug_assertions)]
+#[test]
+fn test_reload_sequence_drained_commands_no_panic_on_timer_tick() {
+    let script = "Execute('score')\n";
+    let path = std::env::temp_dir().join(format!(
+        "rlm_test_reload_nopanic_{}.lua",
+        std::process::id()
+    ));
+    std::fs::write(&path, script).unwrap();
+
+    let mut engine = LuaEngine::new().unwrap();
+    engine
+        .load_script(path.to_str().unwrap())
+        .expect("加载应成功");
+    let _ = std::fs::remove_file(&path);
+    // drain 后队列清空，timer tick 安全
+    engine.drain_commands();
+    engine.fire_due_timers();
+}
+
 #[test]
 fn test_eval_code_error_returns_message() {
     let engine = LuaEngine::new().unwrap();

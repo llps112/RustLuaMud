@@ -3072,11 +3072,11 @@ mod tests {
         let mask = state.panel_coverage_mask();
         // output_height = 21, 面板覆盖 output 行 0..4 (abs_y=1, output_top=1, idx=0..4)
         assert_eq!(mask.len(), 21);
-        for i in 0..5 {
-            assert_eq!(mask[i], Some((60, 80)), "row {} should be covered", i);
+        for (i, m) in mask.iter().enumerate().take(5) {
+            assert_eq!(*m, Some((60, 80)), "row {} should be covered", i);
         }
-        for i in 5..21 {
-            assert_eq!(mask[i], None, "row {} should not be covered", i);
+        for (i, m) in mask.iter().enumerate().skip(5) {
+            assert_eq!(*m, None, "row {} should not be covered", i);
         }
     }
 
@@ -3088,8 +3088,8 @@ mod tests {
         state.set_panel("b", -25, 0, 15, 3, vec![], vec![]);
         let mask = state.panel_coverage_mask();
         // 两面板重叠行 0..2：min_x=50, max_end=70
-        for i in 0..3 {
-            assert_eq!(mask[i], Some((50, 70)), "row {}", i);
+        for (i, m) in mask.iter().enumerate().take(3) {
+            assert_eq!(*m, Some((50, 70)), "row {}", i);
         }
     }
 
@@ -3101,8 +3101,8 @@ mod tests {
         let mask = state.panel_coverage_mask();
         // 应被裁剪到 output_height
         assert_eq!(mask.len(), 21);
-        for i in 0..21 {
-            assert_eq!(mask[i], Some((60, 80)), "row {}", i);
+        for (i, m) in mask.iter().enumerate() {
+            assert_eq!(*m, Some((60, 80)), "row {}", i);
         }
     }
 
@@ -3113,11 +3113,11 @@ mod tests {
         // y=-5 → abs_y = 22 - 5 = 17, output idx = 17 - 1(status) = 16
         state.set_panel("stat", -20, -5, 20, 3, vec![], vec![]);
         let mask = state.panel_coverage_mask();
-        for i in 0..16 {
-            assert_eq!(mask[i], None, "row {} should not be covered", i);
+        for (i, m) in mask.iter().enumerate().take(16) {
+            assert_eq!(*m, None, "row {} should not be covered", i);
         }
-        for i in 16..19 {
-            assert_eq!(mask[i], Some((60, 80)), "row {} should be covered", i);
+        for (i, m) in mask.iter().enumerate().skip(16).take(3) {
+            assert_eq!(*m, Some((60, 80)), "row {} should be covered", i);
         }
     }
 }

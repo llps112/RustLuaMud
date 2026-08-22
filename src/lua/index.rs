@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(state.triggers[1].name, "t3"); // t3 被移动
         assert_eq!(state.trigger_by_name.get("t1"), Some(&0));
         assert_eq!(state.trigger_by_name.get("t3"), Some(&1)); // 索引更新
-        assert!(state.trigger_by_name.get("t2").is_none());
+        assert!(!state.trigger_by_name.contains_key("t2"));
         // group 索引更新
         let g1 = state.trigger_groups.get("g1").unwrap();
         assert!(g1.contains(&0));
