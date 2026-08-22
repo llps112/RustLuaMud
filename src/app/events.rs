@@ -241,13 +241,19 @@ impl App {
                 // ===== 阶段 2：显示 + 回看缓冲（按 omit 标志逐行决定）=====
                 // omit_from_output=true 的行：跳过 output_lines 入栈 + 跳过终端显示
                 // 日志文件不受 omit_from_output 影响（MUSHclient 语义，omit_from_log 才影响日志）
-                let mut prev_line: Option<String> = None;
                 let mut output_current_as_after_context = false;
 
                 for (i, part) in data.split_inclusive('\n').enumerate() {
                     let trimmed = part.trim_end_matches(['\r', '\n']);
                     if trimmed.is_empty() {
                         continue;
+                    }
+
+                    // DEBUG: 记录每行原始 ANSI 到日志（诊断颜色继承问题）
+                    if let Some(session) = self.manager.get_by_id(id) {
+                        let raw_line = trimmed.replace('\x1b', "<ESC>");
+                        self.logger
+                            .log_debug(&session.name, &format!("[RAW] {}", raw_line));
                     }
 
                     // 如果上一轮标记了需要输出当前行作为 [CONTEXT AFTER]
@@ -266,11 +272,11 @@ impl App {
                         || trimmed.contains("止风");
 
                     if is_keyword_line {
-                        // 先输出上一行作为 [CONTEXT BEFORE]
-                        if let Some(prev) = prev_line.take() {
-                            let context_msg =
-                                format!("[CONTEXT BEFORE] {}", prev.replace('\x1b', "<ESC>"));
-                            if let Some(session) = self.manager.get_by_id(id) {
+                        // 先输出上一行作为 [CONTEXT BEFORE]（跨包持久化）
+                        if let Some(session) = self.manager.get_by_id(id) {
+                            if let Some(prev) = session.prev_output_line.as_ref() {
+                                let context_msg =
+                                    format!("[CONTEXT BEFORE] {}", prev.replace('\x1b', "<ESC>"));
                                 self.logger.log_debug(&session.name, &context_msg);
                             }
                         }
@@ -294,8 +300,10 @@ impl App {
                         output_current_as_after_context = true;
                     }
 
-                    // 保存当前行作为下一轮的"上一行"
-                    prev_line = Some(trimmed.to_string());
+                    // 保存当前行作为下一轮的"上一行"（跨包持久化）
+                    if let Some(session) = self.manager.get_mut_by_id(id) {
+                        session.prev_output_line = Some(trimmed.to_string());
+                    }
                     let omitted = omit_flags.get(i).copied().unwrap_or(false);
                     if omitted {
                         continue;
