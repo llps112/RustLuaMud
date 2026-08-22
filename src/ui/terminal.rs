@@ -512,12 +512,11 @@ impl TerminalState {
                     self.output_lines.push(ensure_ansi_reset(&line));
                 } else if !self.last_ansi_sgr.is_empty() {
                     // 可见文本，无自身 ANSI，但有继承的颜色：补上颜色；
-                    // 行末追加 reset 后同步清空继承状态，限制继承仅限一行，防止污染链式扩散
+                    // 行末追加 reset 保证自包含，但不清空继承状态——颜色持续直到服务端发送 reset
                     let mut final_line = String::new();
                     final_line.push_str(&self.last_ansi_sgr);
                     final_line.push_str(trimmed);
                     final_line.push_str("\x1b[0m");
-                    self.last_ansi_sgr.clear();
                     self.output_lines.push(final_line);
                 } else {
                     // 纯文本，无颜色继承：直接加入
@@ -1645,14 +1644,17 @@ mod tests {
     }
 
     #[test]
-    fn test_state_push_output_inherit_no_pollution_chain() {
-        // 污染不扩散：无 ANSI 行继承颜色后末尾重置并清空继承状态，下一行不再继承（继承仅限一行）
+    fn test_state_push_output_inherit_persists_until_reset() {
+        // 颜色持续：无 ANSI 行继承颜色后，状态不清空，后续行继续继承，直到服务端发送 reset
         let mut state = TerminalState::new(80, 24);
-        state.push_output("\x1b[1;32m绿色行");
-        state.push_output("继承行");
-        state.push_output("第三行");
-        assert_eq!(state.output_lines[1], "\x1b[1;32m继承行\x1b[0m");
-        assert_eq!(state.output_lines[2], "第三行");
+        state.push_output("\x1b[1;32m"); // 服务端单独发绿色码
+        state.push_output("第一行"); // 继承绿色
+        state.push_output("第二行"); // 继续继承绿色
+        state.push_output("\x1b[0m重置"); // 遇到 reset
+        state.push_output("第四行"); // 无颜色
+        assert_eq!(state.output_lines[0], "\x1b[1;32m第一行\x1b[0m");
+        assert_eq!(state.output_lines[1], "\x1b[1;32m第二行\x1b[0m");
+        assert_eq!(state.output_lines[3], "第四行");
     }
 
     #[test]
