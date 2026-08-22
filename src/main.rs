@@ -6,8 +6,16 @@ fn main() {
     // TODO(v1.0): 正式发布前必须移除此行，把 RUST_BACKTRACE 控制权交给用户
     std::env::set_var("RUST_BACKTRACE", "1");
 
-    // 解析 --profiles 参数
+    // 解析命令行参数
     let args: Vec<String> = std::env::args().collect();
+
+    // --version: 打印版本号并退出（不启动客户端）
+    if args.iter().any(|a| a == "--version") {
+        println!("RustLuaMud {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
+
+    // 解析 --profiles 参数
     let profiles_dir = args
         .windows(2)
         .find(|w| w[0] == "--profiles")
