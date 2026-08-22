@@ -14,12 +14,12 @@ use super::types::{ConnectionState, LuaEngine, PanelUpdate};
 impl LuaEngine {
     /// 取出待发送的命令
     pub fn drain_commands(&self) -> Vec<String> {
-        self.state.borrow_mut().pending_commands.drain(..).collect()
+        std::mem::take(&mut self.state.borrow_mut().pending_commands)
     }
 
     /// 取出待发送的原始数据包（SendPkt 压入的）
     pub fn drain_raw(&self) -> Vec<Vec<u8>> {
-        self.state.borrow_mut().pending_raw.drain(..).collect()
+        std::mem::take(&mut self.state.borrow_mut().pending_raw)
     }
 
     /// 设置 Lua 变量（内部 HashMap，通过 GetVariable 访问）
@@ -200,7 +200,7 @@ impl LuaEngine {
 
     /// 将当前 pending_commands 移入延迟队列（延迟期内 trigger 命令暂存）
     pub fn drain_commands_to_delayed(&self) {
-        let cmds: Vec<String> = self.state.borrow_mut().pending_commands.drain(..).collect();
+        let cmds: Vec<String> = std::mem::take(&mut self.state.borrow_mut().pending_commands);
         if !cmds.is_empty() {
             self.delayed_commands.borrow_mut().extend(cmds);
         }
@@ -208,7 +208,7 @@ impl LuaEngine {
 
     /// 取出延迟队列中的所有命令
     pub fn drain_delayed_commands(&self) -> Vec<String> {
-        self.delayed_commands.borrow_mut().drain(..).collect()
+        std::mem::take(&mut self.delayed_commands.borrow_mut())
     }
 
     #[allow(dead_code)]
@@ -243,13 +243,13 @@ impl LuaEngine {
                 state.pending_logs.push(buffered);
             }
         }
-        state.pending_logs.drain(..).collect()
+        std::mem::take(&mut state.pending_logs)
     }
 
     /// 取出待处理的面板更新
     pub fn drain_panels(&self) -> Vec<PanelUpdate> {
         let mut state = self.state.borrow_mut();
-        state.pending_panels.drain(..).collect()
+        std::mem::take(&mut state.pending_panels)
     }
 
     /// 处理面板按钮点击事件，调用通过 RegisterPanelHandler 注册的回调
