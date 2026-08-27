@@ -41,7 +41,8 @@
 - 极低资源占用：J1800 + 2GB 内存即可流畅运行 10 连接
 
 **部署运维**
-- 守护进程模式：`--daemon` fork + setsid，ssh 断开不中断，配合 `--daemon stop/status` 管理，适合 7x24 挂机
+- 守护进程模式：`--daemon` fork + setsid，ssh 断开不中断，配合 `--daemon stop/status` 管理，适合 7x24 挂机（Linux / macOS）
+- Windows 一键部署：`bootstrap.ps1` 免管理员权限，默认安装到 `%USERPROFILE%\RustLuaMud`
 
 ---
 
@@ -52,10 +53,10 @@
 | 场景 | 推荐 |
 |------|------|
 | x86_64 / i686 Linux，即下即用 | [预编译二进制](#方式一下载预编译二进制) |
+| Windows 10/11 64 位，即下即用 | [Windows 一键部署](#windows-一键部署) |
 | ARM64 / 需要改客户端代码 | [从源码编译](#方式二从源码编译) |
-| Windows | 从源码编译（产物目前**仅支持 64 位系统**） |
 
-> **Windows 说明**：Windows 平台适配尚在测试中，编译产物目前仅提供 `x86_64-pc-windows-msvc`（64 位）版本，暂不支持 32 位系统与 ARM64。本项目的 ANSI 样式、CJK 对齐与浮动面板依赖现代终端的 VT/ANSI 支持：**最低 Windows 10 version 1511**（保底可运行），**推荐 1809 及以上**（体验完整）；Win7/8/XP 不支持。
+> **Windows 说明**：Windows 平台已提供预编译 `RustLuaMud-windows-x86_64.zip`（stable 与 nightly 均附带），**仅支持 64 位系统**，暂不支持 32 位与 ARM64。本项目的 ANSI 样式、CJK 对齐与浮动面板依赖现代终端的 VT/ANSI 支持：**最低 Windows 10 version 1511**（保底可运行），**推荐 1809 及以上**（体验完整）；Win7/8/XP 不支持。终端推荐使用 Windows Terminal（传统 conhost 已做宽度自适应，但滚动条等固有缺陷无法完全消除）。
 
 > **国内镜像加速**：`--gitee` 参数从 Gitee 下载，支持 stable 和 nightly 两种版本：
 > ```bash
@@ -101,7 +102,40 @@ vim profiles/mychar.toml
 
 配置项说明见[配置](#配置)章节。
 
-> Nightly 版由 [nightly.yml](.github/workflows/nightly.yml) 自动构建，每次 push main 分支后自动更新。构建完成后自动同步到 [Gitee Release](https://gitee.com/bai-yifei180/RustLuaMud/releases)。支持 x86_64 和 i686 两种架构。
+#### Windows 一键部署
+
+在 PowerShell 中执行（默认安装到 `%USERPROFILE%\RustLuaMud`，免管理员权限）：
+
+```powershell
+iwr https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.ps1 -UseBasicParsing | iex
+```
+
+需要 Gitee 加速、nightly 版本或自定义安装目录时，先下载脚本再带参数执行：
+
+```powershell
+iwr https://gitee.com/bai-yifei180/RustLuaMud/raw/main/scripts/bootstrap.ps1 -UseBasicParsing -OutFile bootstrap.ps1
+Unblock-File bootstrap.ps1
+.\bootstrap.ps1 -Gitee               # Gitee 稳定版
+.\bootstrap.ps1 -Nightly -Gitee      # Gitee Nightly
+.\bootstrap.ps1 D:\Games\RustLuaMud  # 自定义安装目录
+```
+
+初始化后目录结构：
+
+```
+%USERPROFILE%\RustLuaMud\
+├── RustLuaMud.exe         # 主程序
+├── start_mud.bat          # 双击启动器（自动钉死工作目录）
+├── profiles\              # 角色 TOML 配置文件
+│   └── example.toml       # 示例配置
+├── scripts\               # Lua 脚本（放入你自己的游戏脚本）
+│   └── example.lua        # 示例脚本
+└── logs\                  # 日志文件自动生成
+```
+
+编辑 `profiles\` 下的角色配置后，双击 `start_mud.bat` 或在安装目录运行 `.\RustLuaMud.exe` 启动。游戏脚本不随安装包分发，放入 `scripts\` 目录并在配置中用 `script = "scripts/xxx.lua"` 引用即可。
+
+> Nightly 版由 [nightly.yml](.github/workflows/nightly.yml) 自动构建，每次 push main 分支后自动更新。构建完成后自动同步到 [Gitee Release](https://gitee.com/bai-yifei180/RustLuaMud/releases)。支持 Linux x86_64 / i686 与 Windows x86_64 三种产物。
 
 ### 方式二：从源码编译
 
@@ -170,6 +204,7 @@ cargo build --release
 
 > daemon 模式同样支持 `--profiles`，每个配置目录独立一个守护进程（各自的 `daemon.pid`）。
 > 停止通过 SIGTERM 优雅退出；前台模式收到 SIGTERM 也会优雅退出。
+> `--daemon` 仅 Linux / macOS 提供；Windows 为前台运行，可借助任务计划程序或 `start_mud.bat` 实现开机自启。
 
 ---
 
@@ -462,10 +497,10 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 
 | 项目 | 要求 |
 |------|------|
-| 操作系统 | Linux（已测试）/ macOS / Windows |
-| CPU | x86_64、i686 或 aarch64 |
+| 操作系统 | Linux（已测试）/ macOS / Windows 10 1511+（仅 64 位，推荐 1809+） |
+| CPU | x86_64、i686（仅 Linux）或 aarch64 |
 | 内存 | 最低 512MB，推荐 2GB（10 连接） |
-| 终端 | 支持 UTF-8 + ANSI 转义序列 |
+| 终端 | 支持 UTF-8 + ANSI 转义序列；Windows 推荐 Windows Terminal |
 | Rust 编译 | 1.70+（edition 2021） |
 
 ### 32 位平台 (i686)
@@ -506,6 +541,12 @@ panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀
 ---
 
 ## 版本历史
+
+### v0.9.0 (2026-08-27)
+- Windows 平台正式支持：x86_64 编译/运行适配，conhost 可用宽度自适应（避让滚动条遮挡右对齐 UI）
+- release/nightly CI 并行构建 `RustLuaMud-windows-x86_64.zip`，GitHub 与 Gitee Release 同步附带
+- 新增 `scripts/bootstrap.ps1` Windows 一键部署（默认 `%USERPROFILE%\RustLuaMud`，免管理员权限）
+- 启动自检：校验日志与 profiles 目录可写，失败即时退出并报告真实原因
 
 ### v0.6.3 (2026-08-13)
 - 修复浮动面板闪烁问题：`draw_output_area` 跳过面板覆盖区域，消除"擦除→重画"中间态
