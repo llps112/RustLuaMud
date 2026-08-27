@@ -73,17 +73,30 @@ mod tests {
     /// 序列化涉及 panic hook 的测试，避免并行运行时 set_hook/take_hook 竞争
     static PANIC_HOOK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    /// 跨平台的 panic 测试日志目录：基于系统临时目录，
+    /// 避免硬编码 /tmp（Windows 无此路径，导致日志写入静默失败）。
+    fn panic_test_log_dir() -> &'static str {
+        static DIR: OnceLock<String> = OnceLock::new();
+        DIR.get_or_init(|| {
+            std::env::temp_dir()
+                .join("rustluamud_panic_hook_test")
+                .to_string_lossy()
+                .into_owned()
+        })
+    }
+
     /// 初始化全局 PANIC_CONTEXT（使用 TempDir，所有测试共用一个实例）
     /// OnceLock 只能设置一次，所以使用 OnceLock 内的共享 Logger
     fn ensure_context_initialized() -> &'static PanicContext {
         PANIC_CONTEXT.get_or_init(|| PanicContext {
-            logger: Logger::new("/tmp/rustluamud_panic_hook_test", 10, 5),
+            logger: Logger::new(panic_test_log_dir(), 10, 5),
             session_name: Mutex::new(String::new()),
         })
     }
 
     #[test]
     fn test_set_current_session_updates_context() {
+        let _guard = PANIC_HOOK_TEST_LOCK.lock().unwrap();
         ensure_context_initialized();
 
         set_current_session("test_session");
@@ -95,6 +108,7 @@ mod tests {
 
     #[test]
     fn test_set_current_session_empty_name() {
+        let _guard = PANIC_HOOK_TEST_LOCK.lock().unwrap();
         ensure_context_initialized();
 
         set_current_session("");
@@ -176,7 +190,7 @@ mod tests {
         // init_panic_hook 应该能安全调用
         // 使用与 test_panic_hook_writes_log_on_panic 相同的路径
         // 避免 OnceLock 被不同路径的 logger 锁定后，后续测试无法使用正确路径
-        init_panic_hook("/tmp/rustluamud_panic_hook_test", 10, 5);
+        init_panic_hook(panic_test_log_dir(), 10, 5);
 
         // 恢复原来的 panic hook，避免影响其他测试
         std::panic::set_hook(old_hook);
@@ -200,7 +214,7 @@ mod tests {
         let old_hook = std::panic::take_hook();
 
         // 设置自定义 panic hook：标记被调用 + 委托给 init_panic_hook 的逻辑
-        init_panic_hook("/tmp/rustluamud_panic_hook_test", 10, 5);
+        init_panic_hook(panic_test_log_dir(), 10, 5);
         let composed_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             hook_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -220,9 +234,12 @@ mod tests {
         // 恢复原来的 panic hook
         std::panic::set_hook(old_hook);
 
-        // 验证日志文件（PANIC_CONTEXT 的 Logger 使用 /tmp/rustluamud_panic_hook_test）
+        // 验证日志文件（取 PANIC_CONTEXT 中 Logger 的实际目录，
+        // 避免 OnceLock 被先运行的测试以其他路径初始化后产生不一致）
+        let log_dir = get_context().map(|c| c.logger.log_dir().to_path_buf());
         let ts = Local::now().format("%y%m%d_%H").to_string();
-        let log_file = std::path::Path::new("/tmp/rustluamud_panic_hook_test")
+        let log_file = log_dir
+            .expect("PANIC_CONTEXT 应已初始化")
             .join(format!("hook_test_{}.log", ts));
         // 文件写入可能有短暂延迟，重试等待
         let mut found = false;

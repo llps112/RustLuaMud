@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use chrono::Local;
@@ -61,6 +61,11 @@ impl Logger {
             max_files,
             per_session_max_files: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 获取当前日志目录（测试断言用）
+    pub fn log_dir(&self) -> &Path {
+        &self.log_dir
     }
 
     /// 设置指定 session 的日志保留数量，覆盖全局 max_files

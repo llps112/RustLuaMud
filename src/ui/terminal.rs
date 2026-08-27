@@ -267,12 +267,13 @@ fn visible_width(s: &str) -> usize {
 /// Windows 传统控制台（conhost + 中文点阵/宋体字体）将 Box Drawing、
 /// Block Elements 等制表符号按全角渲染（占 2 格），而 unicode-width
 /// 按 Unicode 标准判定为 1 格。为保证换行/截断/光标定位与实际渲染一致，
-/// Windows 下对这些字符按 2 格计。Linux 终端字体遵循标准宽度，无需修正。
+/// conhost 下对这些字符按 2 格计。Windows Terminal（`WT_SESSION` 检测）
+/// 与 Linux 终端字体遵循标准宽度，无需修正。
 fn char_width(ch: char) -> usize {
     #[cfg(windows)]
     {
         let base = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if base > 0 && is_wide_on_windows(ch) {
+        if base > 0 && wide_on_conhost(is_conhost(), ch) {
             return 2;
         }
         base
@@ -283,12 +284,26 @@ fn char_width(ch: char) -> usize {
     }
 }
 
-/// Windows conhost 中文字体下按全角（2 格）渲染的字符范围
+/// Windows conhost 中文字体下按全角（2 格）渲染的字符范围：
 /// - Box Drawing (U+2500-U+257F): 制表符 ─│┌┐└┘├┤┬┴┼ 等
 /// - Block Elements (U+2580-U+259F): █▓▒░▄▀▌▐ 等
-#[cfg(windows)]
-fn is_wide_on_windows(ch: char) -> bool {
-    matches!(ch, '\u{2500}'..='\u{259F}')
+///
+/// 纯逻辑：conhost 判定显式传入，便于跨平台单测（不依赖进程环境变量）。
+/// 非 Windows 构建下仅测试引用，故与 test 一并保留。
+#[cfg(any(windows, test))]
+fn wide_on_conhost(is_conhost: bool, ch: char) -> bool {
+    is_conhost && matches!(ch, '\u{2500}'..='\u{259F}')
+}
+
+/// 是否运行于 Windows 传统控制台（conhost）。
+///
+/// Windows Terminal 会为所有子进程设置 `WT_SESSION` 环境变量，
+/// 其缺失即视为 conhost（或其他同样按全角渲染制表符的旧式控制台）。
+/// 环境变量在进程生命周期内不会变化，而 char_width 位于逐字符热路径，
+/// 用 OnceLock 缓存，避免每字符读一次环境变量。
+fn is_conhost() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| cfg!(windows) && std::env::var_os("WT_SESSION").is_none())
 }
 
 /// Windows 传统控制台 (conhost) 右侧竖向滚动条占用并截断的列数。
@@ -310,8 +325,7 @@ fn reserve_conhost_cols(raw: u16, is_conhost: bool) -> u16 {
 /// 扣减右侧竖向滚动条占用的列；Windows Terminal（环境变量 `WT_SESSION`）
 /// 与非 Windows 平台返回原始宽度。
 fn usable_width(raw: u16) -> u16 {
-    let is_conhost = cfg!(windows) && std::env::var_os("WT_SESSION").is_none();
-    reserve_conhost_cols(raw, is_conhost)
+    reserve_conhost_cols(raw, is_conhost())
 }
 
 /// 构建 session 状态栏字符串（纯逻辑，无 IO 依赖）
@@ -2281,6 +2295,22 @@ mod tests {
         // 极小宽度下 saturating_sub 不下溢
         assert_eq!(reserve_conhost_cols(1, true), 0);
         assert_eq!(reserve_conhost_cols(0, true), 0);
+    }
+
+    #[test]
+    fn test_wide_on_conhost() {
+        // conhost 下 Box Drawing / Block Elements 按 2 格计（char_width 返回 2 的前提）
+        assert!(wide_on_conhost(true, '─'));
+        assert!(wide_on_conhost(true, '│'));
+        assert!(wide_on_conhost(true, '┌'));
+        assert!(wide_on_conhost(true, '█')); // U+2588 Block Elements
+                                             // Windows Terminal / Linux：遵循标准 1 格宽度，不做修正
+        assert!(!wide_on_conhost(false, '─'));
+        assert!(!wide_on_conhost(false, '█'));
+        // 范围外字符（ASCII / CJK / U+25A0）任何终端都不做全角修正
+        assert!(!wide_on_conhost(true, 'A'));
+        assert!(!wide_on_conhost(true, '中'));
+        assert!(!wide_on_conhost(true, '■')); // U+25A0 在范围之外
     }
 
     #[test]
