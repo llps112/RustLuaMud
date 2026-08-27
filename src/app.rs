@@ -216,9 +216,20 @@ impl App {
             Some(EventStream::new())
         };
 
-        // 注册 SIGTERM 处理器（--daemon stop 优雅退出；前台模式同样受益）
+        // 信号处理器：Unix 用 SIGTERM，Windows 用 Ctrl+C
+        #[cfg(unix)]
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        // Windows: Ctrl+C 是一次性 Future，通过 channel 转为可重复等待的接收端
+        #[cfg(not(unix))]
+        let mut signal_waker = {
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                let _ = tx.send(());
+            });
+            rx
+        };
 
         // 主事件循环
         while self.running {
@@ -270,8 +281,13 @@ impl App {
                     self.handle_render_tick(req.session_id)?;
                 }
 
-                // SIGTERM 优雅退出（--daemon stop）
-                _ = sigterm.recv() => {
+                // 信号优雅退出（Unix: SIGTERM / Windows: Ctrl+C）
+                _ = async {
+                    #[cfg(unix)]
+                    { sigterm.recv().await }
+                    #[cfg(not(unix))]
+                    { let _ = (&mut signal_waker).await; }
+                } => {
                     self.running = false;
                 }
             }

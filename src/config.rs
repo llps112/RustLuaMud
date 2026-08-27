@@ -248,6 +248,33 @@ impl Default for AppConfig {
     }
 }
 
+/// 启动期自检：确保目录存在且可写（写探针文件再删除）。
+///
+/// 失败时返回携带真实原因（权限/路径/磁盘）的错误，供上层在启动瞬间暴露问题，
+/// 避免挂机到运行期才发现无法写日志或保存终端设置（例如误装到 Program Files
+/// 无写权限、或磁盘只读等）。跨平台可用。
+pub fn verify_writable_dir(dir: &Path) -> std::io::Result<()> {
+    if let Err(e) = fs::create_dir_all(dir) {
+        return Err(std::io::Error::new(
+            e.kind(),
+            format!("无法创建目录 '{}': {}", dir.display(), e),
+        ));
+    }
+    // 探针文件名含 pid，避免多实例并发时互相覆盖；
+    // 失败时保留原始 ErrorKind（可能是只读盘/路径超长，不一定是权限问题）
+    let probe = dir.join(format!(".rlm_write_probe_{}", std::process::id()));
+    match fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(e) => Err(std::io::Error::new(
+            e.kind(),
+            format!("目录 '{}' 不可写: {}", dir.display(), e),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,6 +466,38 @@ port = 5000"#
         let (profiles, skipped) = AppConfig::load_profiles(dir.path().to_str().unwrap());
         assert_eq!(profiles.len(), 1);
         assert_eq!(skipped, 1);
+    }
+
+    #[test]
+    fn test_verify_writable_dir_ok() {
+        let dir = TempDir::new().unwrap();
+        // 已存在且可写的目录：返回 Ok
+        assert!(verify_writable_dir(dir.path()).is_ok());
+        // 缺失的子目录会被自动创建，且返回 Ok
+        let sub = dir.path().join("logs");
+        assert!(verify_writable_dir(&sub).is_ok());
+        assert!(sub.exists());
+        // 探针文件写入后应已清理，不残留
+        let leftovers: Vec<_> = fs::read_dir(&sub)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".rlm_write_probe_")
+            })
+            .collect();
+        assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn test_verify_writable_dir_error() {
+        let dir = TempDir::new().unwrap();
+        // 用一个普通文件当“目录”：其父路径不是目录，create_dir_all 失败 → Err
+        let file = dir.path().join("not_a_dir");
+        fs::write(&file, b"x").unwrap();
+        let bad = file.join("sub");
+        assert!(verify_writable_dir(&bad).is_err());
     }
 
     #[test]

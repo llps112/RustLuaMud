@@ -16,13 +16,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4"
 encoding_rs = "0.8"
-libc = "0.2"
 unicode-width = "0.2"
 mlua = { version = "0.12", features = ["luajit", "vendored", "serialize"] }
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile = "3"
 tokio-socks = "0.5"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.test]
 # opt-level=1 保留调试符号，测试二进制更小、链接更快

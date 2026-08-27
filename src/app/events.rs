@@ -3,7 +3,7 @@
 
 use std::io::{self, Write};
 
-use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 
 use crate::connection::{ManagerEvent, SessionId, SessionState};
 use crate::ui::AnsiParser;
@@ -58,6 +58,12 @@ impl App {
 
     /// 处理键盘事件
     pub(crate) fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> io::Result<()> {
+        // Windows 上 crossterm 对同一按键会产生 Press 和 Release 两个事件，
+        // 不过滤会导致每个按键被处理两次（表现为输入重复）。
+        // Linux 的 raw 模式下只产生 Press/Repeat 事件，此判断跨平台安全。
+        if key.kind == KeyEventKind::Release {
+            return Ok(());
+        }
         // Ctrl+C / Ctrl+D: 退出
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('d'))

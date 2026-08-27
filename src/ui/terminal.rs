@@ -1,6 +1,6 @@
 use crossterm::{
     cursor,
-    event::{KeyCode, KeyEvent, KeyModifiers},
+    event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers},
     execute, queue,
     style::{self, Color, Print, SetForegroundColor},
     terminal::{self, ClearType},
@@ -158,7 +158,7 @@ fn wrap_line_to_width(line: &str, max_width: usize) -> Vec<String> {
             }
             current.push_str(&seq);
         } else {
-            let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            let cw = char_width(c);
             if cw > 0 && current_width + cw > max_width {
                 // 当前行已满：保存当前段，开启新段
                 if !sgr_state.is_empty() {
@@ -201,7 +201,7 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
     let mut result = String::new();
     let mut width = 0;
     for ch in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        let cw = char_width(ch);
         if width + cw > max_width {
             break;
         }
@@ -245,7 +245,7 @@ fn truncate_ansi_to_width(s: &str, max_width: usize) -> String {
                 chars.next();
             }
         } else {
-            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            let cw = char_width(ch);
             if visible + cw > max_width {
                 break;
             }
@@ -259,10 +259,59 @@ fn truncate_ansi_to_width(s: &str, max_width: usize) -> String {
 /// 计算字符串的可见宽度（忽略 ANSI 转义序列）
 fn visible_width(s: &str) -> usize {
     let stripped = AnsiParser::strip_ansi(s);
-    stripped
-        .chars()
-        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
-        .sum()
+    stripped.chars().map(char_width).sum()
+}
+
+/// 计算单个字符的终端显示宽度（平台感知）
+///
+/// Windows 传统控制台（conhost + 中文点阵/宋体字体）将 Box Drawing、
+/// Block Elements 等制表符号按全角渲染（占 2 格），而 unicode-width
+/// 按 Unicode 标准判定为 1 格。为保证换行/截断/光标定位与实际渲染一致，
+/// Windows 下对这些字符按 2 格计。Linux 终端字体遵循标准宽度，无需修正。
+fn char_width(ch: char) -> usize {
+    #[cfg(windows)]
+    {
+        let base = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if base > 0 && is_wide_on_windows(ch) {
+            return 2;
+        }
+        base
+    }
+    #[cfg(not(windows))]
+    {
+        unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+    }
+}
+
+/// Windows conhost 中文字体下按全角（2 格）渲染的字符范围
+/// - Box Drawing (U+2500-U+257F): 制表符 ─│┌┐└┘├┤┬┴┼ 等
+/// - Block Elements (U+2580-U+259F): █▓▒░▄▀▌▐ 等
+#[cfg(windows)]
+fn is_wide_on_windows(ch: char) -> bool {
+    matches!(ch, '\u{2500}'..='\u{259F}')
+}
+
+/// Windows 传统控制台 (conhost) 右侧竖向滚动条占用并截断的列数。
+/// conhost 会常驻一根竖向滚动条占用最右列，而 crossterm 的 `terminal::size()`
+/// 仍将其计入宽度，导致右对齐元素（状态栏 logo、右锚定面板）被截断。
+/// 保留 2 列（1 列滚动条 + 1 列余量）避免贴边被切。
+const CONHOST_RESERVED_COLS: u16 = 2;
+
+/// 纯逻辑：当处于 conhost 时从原始宽度扣减保留列（跨平台可单测）。
+fn reserve_conhost_cols(raw: u16, is_conhost: bool) -> u16 {
+    if is_conhost {
+        raw.saturating_sub(CONHOST_RESERVED_COLS)
+    } else {
+        raw
+    }
+}
+
+/// 计算实际可用宽度。仅 Windows 传统控制台（非 Windows Terminal）需要
+/// 扣减右侧竖向滚动条占用的列；Windows Terminal（环境变量 `WT_SESSION`）
+/// 与非 Windows 平台返回原始宽度。
+fn usable_width(raw: u16) -> u16 {
+    let is_conhost = cfg!(windows) && std::env::var_os("WT_SESSION").is_none();
+    reserve_conhost_cols(raw, is_conhost)
 }
 
 /// 构建 session 状态栏字符串（纯逻辑，无 IO 依赖）
@@ -988,15 +1037,13 @@ impl TerminalState {
 
     /// 获取输入行显示内容（考虑滚动）
     pub fn input_display(&self) -> (String, usize) {
-        use unicode_width::UnicodeWidthChar;
-
         let prompt_len: usize = 2; // "> "
-        let avail_width = self.width as usize - prompt_len;
+        let avail_width = (self.width as usize).saturating_sub(prompt_len);
         let chars: Vec<char> = self.input_buffer.chars().collect();
         let total_chars = chars.len();
 
         // 计算每个字符的显示宽度
-        let char_widths: Vec<usize> = chars.iter().map(|c| c.width().unwrap_or(0)).collect();
+        let char_widths: Vec<usize> = chars.iter().map(|c| char_width(*c)).collect();
 
         // 确定显示起始字符索引：根据光标的列位置滚动
         let cursor_col_before = char_widths[..self.input_cursor].iter().sum::<usize>();
@@ -1054,14 +1101,19 @@ impl Terminal {
     pub fn new() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
         let (width, height) = terminal::size()?;
+        // Windows conhost：右侧竖向滚动条会占用最右列而 terminal::size() 仍计入，
+        // 先扣减保留列，避免右对齐的 logo/面板被截断（Windows Terminal 与非 Windows 不扣减）。
+        let width = usable_width(width);
         // 尺寸保底：异常环境（如 headless pty 未设置 winsize）可能返回 0，
         // 会导致渲染代码的减法运算溢出 panic
         let width = width.max(20);
         let height = height.max(5);
-        // 启用鼠标点击追踪（仅 ?1000h，不含 ?1002h 拖拽追踪）
+        // 启用鼠标捕获（跨平台标准方式）
+        // Windows: EnableMouseCapture 通过 SetConsoleMode 设置 ENABLE_MOUSE_INPUT，
+        //          手写 ?1000h 转义序列在 Console API 输入模式下不会被解释，导致鼠标事件不产生；
+        // Unix: 发送 ?1000h 等鼠标追踪序列。
         // 终端处于鼠标应用模式时，按住 Shift 拖拽可绕过应用模式进行原生文本选中
-        write!(io::stdout(), "\x1b[?1000h\x1b[?1006h")?;
-        io::stdout().flush()?;
+        execute!(io::stdout(), EnableMouseCapture)?;
         Ok(Self {
             state: TerminalState::new(width, height),
         })
@@ -1272,7 +1324,7 @@ impl Terminal {
                     let mut result = String::new();
                     let mut width = 0;
                     for ch in content.chars() {
-                        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                        let cw = char_width(ch);
                         if width + cw > panel_w {
                             break;
                         }
@@ -1399,8 +1451,10 @@ impl Terminal {
 
     /// 处理终端大小变化
     pub fn resize(&mut self, width: u16, height: u16) {
-        self.state.width = width;
-        self.state.height = height;
+        // 尺寸保底：与 Terminal::new 保持一致，防止拖拽/最大化过程中
+        // conhost 报告极小的中间尺寸导致渲染代码减法下溢而崩溃
+        self.state.width = usable_width(width).max(20);
+        self.state.height = height.max(5);
         let _ = self.refresh_all(&mut io::stdout());
     }
 
@@ -1461,8 +1515,7 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        let _ = write!(io::stdout(), "\x1b[?1000l\x1b[?1006l");
-        let _ = io::stdout().flush();
+        let _ = execute!(io::stdout(), DisableMouseCapture);
         let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
     }
@@ -2218,6 +2271,53 @@ mod tests {
         assert_eq!(state.status_bar_regions.len(), 1);
         assert_eq!(state.status_bar_regions[0].session_id, SessionId(0));
         assert!(state.status_bar_regions[0].end_x > state.status_bar_regions[0].start_x);
+    }
+
+    #[test]
+    fn test_reserve_conhost_cols() {
+        // 跨平台纯逻辑：conhost 下扣减保留列，其他情况原样返回
+        assert_eq!(reserve_conhost_cols(80, false), 80);
+        assert_eq!(reserve_conhost_cols(80, true), 80 - CONHOST_RESERVED_COLS);
+        // 极小宽度下 saturating_sub 不下溢
+        assert_eq!(reserve_conhost_cols(1, true), 0);
+        assert_eq!(reserve_conhost_cols(0, true), 0);
+    }
+
+    #[test]
+    fn test_usable_width_bounds_and_wiring() {
+        // usable_width 结果应始终在 [raw - reserve, raw] 区间
+        let raw = 80u16;
+        let w = usable_width(raw);
+        assert!(w <= raw);
+        assert!(w >= raw - CONHOST_RESERVED_COLS);
+        // 与非 Windows / Windows Terminal 行为一致：不扣减
+        if !cfg!(windows) || std::env::var_os("WT_SESSION").is_some() {
+            assert_eq!(w, raw);
+        }
+    }
+
+    #[test]
+    fn test_build_status_bar_fits_within_conhost_width() {
+        // conhost 扣减后的宽度下，右对齐 logo 仍完整且不超出 total_width
+        let w = reserve_conhost_cols(80, true) as usize;
+        let (bar, _) = build_status_bar(&[], SessionId(0), w);
+        assert!(bar.contains("RustLuaMud"));
+        assert!(visible_width(&bar) <= w);
+    }
+
+    #[test]
+    fn test_build_status_bar_logo_not_overflow_width() {
+        // 含 CJK 会话名（双宽）时，状态栏可见宽度不应超出 total_width
+        for &tw in &[24usize, 40, 80, 120] {
+            let sessions = vec![SessionInfo {
+                session_id: SessionId(0),
+                name: "侠客行".to_string(),
+                state: SessionState::Connected,
+                status_text: String::new(),
+            }];
+            let (bar, _) = build_status_bar(&sessions, SessionId(0), tw);
+            assert!(visible_width(&bar) <= tw, "bar overflow at width {}", tw);
+        }
     }
 
     // ---- 新增覆盖测试 ----

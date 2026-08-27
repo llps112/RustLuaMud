@@ -19,10 +19,11 @@ profiles2/
 # profiles3: 忽略所有内容
 profiles3/
 
-# scripts: 只保留 example.lua、bootstrap.sh、lua/ 和 private/
+# scripts: 只保留 example.lua、bootstrap.sh、bootstrap.ps1、lua/ 和 private/
 scripts/*
 !scripts/example.lua
 !scripts/bootstrap.sh
+!scripts/bootstrap.ps1
 !scripts/lua/
 !scripts/private
 

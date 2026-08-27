@@ -51,9 +51,35 @@ jobs:
           name: rust-lua-mud-${{ matrix.arch }}
           path: release/RustLuaMud-linux-${{ matrix.arch }}.tar.gz
 
+  build-windows:
+    name: Build (x86_64-windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Package binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/RustLuaMud.exe release/RustLuaMud.exe -Force
+          Compress-Archive -Path release/RustLuaMud.exe -DestinationPath release/RustLuaMud-windows-x86_64.zip -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-lua-mud-windows-x86_64
+          path: release/RustLuaMud-windows-x86_64.zip
+
   release:
     name: Create Release
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -90,6 +116,7 @@ jobs:
           files: |
             release/RustLuaMud-linux-x86_64.tar.gz
             release/RustLuaMud-linux-i686.tar.gz
+            release/RustLuaMud-windows-x86_64.zip
 
       - name: Sync to Gitee Release
         env:
@@ -148,7 +175,7 @@ jobs:
 
           if [ -n "$RELEASE_ID" ]; then
             echo "==> Uploading artifacts to Gitee Release..."
-            for FILE in release/*.tar.gz; do
+            for FILE in release/*.tar.gz release/*.zip; do
               echo "   Uploading: $FILE"
               UPLOAD_RESP=$(curl -sS -X POST \
                 -F "file=@${FILE}" \

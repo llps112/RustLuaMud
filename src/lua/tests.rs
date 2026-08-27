@@ -1795,14 +1795,17 @@ fn test_get_info_35_no_script_path() {
 #[test]
 fn test_get_info_58() {
     with_engine(|engine| {
+        let sep = if cfg!(windows) { "\\" } else { "/" };
+        let expected = format!("logs{}", sep);
+
         // 未设置 log_dir 时返回默认值
         let dir: String = eval(engine, "return GetInfo(58)").unwrap();
-        assert_eq!(dir, "logs/");
+        assert_eq!(dir, expected);
 
         // 设置 log_dir 后返回配置的路径
         engine.set_log_dir("logs");
         let dir: String = eval(engine, "return GetInfo(58)").unwrap();
-        assert_eq!(dir, "logs/");
+        assert_eq!(dir, expected);
     });
 }
 
