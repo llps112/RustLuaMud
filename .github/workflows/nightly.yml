@@ -119,8 +119,10 @@ jobs:
           BASE="https://gitee.com/api/v5/repos/${OWNER}/${REPO}"
 
           # Gitee 海外链路偶发 TLS 被重置 (curl exit 35)，不在 curl 默认瞬态错误列表，
-          # 必须 --retry-all-errors 才会重试；查询失败不中止（由后续 RELEASE_ID 判断兜底）
-          gitee_curl() { curl -sS --connect-timeout 30 --retry 5 --retry-delay 10 --retry-all-errors "$@"; }
+          # 必须 --retry-all-errors 才会重试；Gitee 同步很慢，超时必须给宽裕：
+          # 只限 connect-timeout（建连阶段），不设 --max-time（不限制传输总时长）；
+          # 上传调用可在 "$@" 处追加 --retry-delay 60 覆盖重试间隔
+          gitee_curl() { curl -sS --connect-timeout 60 --retry 6 --retry-delay 30 --retry-all-errors "$@"; }
 
           # 获取或创建 Release
           echo "==> Checking existing release..."
@@ -174,7 +176,7 @@ jobs:
             echo "==> Uploading artifacts to Gitee Release..."
             for FILE in release/*.tar.gz release/*.zip; do
               echo "   Uploading: $FILE ($(du -h "$FILE" | cut -f1))"
-              UPLOAD_RESP=$(gitee_curl -X POST \
+              UPLOAD_RESP=$(gitee_curl --retry-delay 60 -X POST \
                 -F "file=@${FILE}" \
                 "${BASE}/releases/${RELEASE_ID}/attach_files?${AUTH}" 2>&1 || echo "UPLOAD_FAILED")
               echo "   Upload response: $(echo "$UPLOAD_RESP" | head -c 300)"
