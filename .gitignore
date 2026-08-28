@@ -29,6 +29,9 @@ scripts/*
 
 xkxMAP.db
 
+# 本地稳定性测试脚本（临时排障用，不入库）
+/stability_test.ps1
+
 # docs: 忽略代码分析和重构文件
 /docs/code-quality-assessment.md
 /docs/war_refactor_analysis.md
