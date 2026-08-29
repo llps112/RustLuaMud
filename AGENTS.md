@@ -9,7 +9,7 @@
 - 令牌桶限速保护（burst_size + cmds_per_sec + min_interval 三参数），防反 flood
 - 完整 ANSI SGR 解析、CJK 宽字符对齐、浮动面板 API
 - 极低资源占用：J1800 + 2GB 内存即可流畅运行 10 连接
-- 版本：v0.6.5，Rust edition 2021
+- 版本：v0.9.3，Rust edition 2021
 
 ### 技术栈
 
@@ -80,7 +80,8 @@ LPC/                          — 服务端 LPC 参考代码
 class-utf8-old/               — 旧版 Lua 脚本存档（UTF-8）
 class-gbk-old/                — 旧版 Lua 脚本存档（GBK）
 .trae/documents/              — 历史技术方案文档（76 个文件）
-.trae/rules/                  — 项目开发规则文件（编码规范、API 兼容、Git 工作流等）
+.qoder/rules/                 — 项目开发规则文件（权威源：编码规范、API 兼容、Git 工作流等）
+.trae/rules/                  — 已迁移，仅保留指向 .qoder/rules/ 的重定向说明
 ```
 
 ## 构建与测试命令
@@ -110,7 +111,7 @@ iconv -f UTF-8 -t GBK scripts/class-utf8/<file> > scripts/class/<file>
 5. **Git 子模块工作流**：子模块独立提交，主仓库仅更新指针。子模块指针更新不触发 CI。
 6. **测试覆盖**：新增功能必须附带测试，`src/lua/tests.rs` 包含大量 Lua 引擎集成测试。
 
-详细规则见 `.trae/rules/` 目录下的规则文件：
+详细规则见 `.qoder/rules/` 目录下的规则文件：
 - `script-encoding.md` — 脚本编码规范
 - `mushclient-api.md` — MushClient API 兼容规范
 - `regex-pattern.md` — 正则双引擎使用规范

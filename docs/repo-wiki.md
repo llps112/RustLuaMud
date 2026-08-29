@@ -424,7 +424,8 @@ RustLuaMud/
 ├── LPC/                       # 服务端 LPC 参考代码
 ├── .github/workflows/         # GitHub Actions CI/CD
 ├── .gitee/workflows/          # Gitee Go CI/CD
-├── .trae/rules/               # 开发规范
+├── .qoder/rules/              # 开发规范（权威源）
+├── .trae/rules/               # 已迁移，指向 .qoder/rules/
 ├── Cargo.toml                 # Rust 项目配置
 └── README.md                  # 项目说明
 ```
