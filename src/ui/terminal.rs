@@ -1,6 +1,8 @@
+#[cfg(windows)]
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::{
     cursor,
-    event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers},
+    event::{KeyCode, KeyEvent, KeyModifiers},
     execute, queue,
     style::{self, Print},
     terminal::{self, ClearType},
@@ -1531,12 +1533,21 @@ impl Terminal {
         // 高度加工统一走 usable_height（当前为恒等：缓冲区末行由底行 Lua 状态栏承载）
         let width = usable_width(raw_w).max(20);
         let height = usable_height(raw_h).max(5);
-        // 启用鼠标捕获（跨平台标准方式）
-        // Windows: EnableMouseCapture 通过 SetConsoleMode 设置 ENABLE_MOUSE_INPUT，
-        //          手写 ?1000h 转义序列在 Console API 输入模式下不会被解释，导致鼠标事件不产生；
-        // Unix: 发送 ?1000h 等鼠标追踪序列。
-        // 终端处于鼠标应用模式时，按住 Shift 拖拽可绕过应用模式进行原生文本选中
+        // 启用鼠标点击追踪：平台分治，两平台实现手段完全不同。
+        // - Windows conhost：必须经 crossterm 的 WinAPI 路径（SetConsoleMode 置 ENABLE_MOUSE_INPUT），
+        //   手写 ?1000h 在 Console 输入模式下不会被解释，鼠标事件根本不产生。
+        // - Unix/Linux：只需 `?1000h`(按下/释放报告) + `?1006h`(SGR 扩展坐标，支持 >223 列)。
+        //   crossterm 的 EnableMouseCapture 在 Unix 上会额外塞进 ?1002h/?1003h/?1015h：
+        //   ?1015h(urxvt) 与 ?1006h 坐标编码冲突、?1003h(any-event) 产生无关运动事件洪水，
+        //   部分终端据此整体拒绝，退化成「文本可选择、无捕获」。本应用仅用 Left-Down 单击，
+        //   最小两序列即可，与历史可用版本一致。
+        #[cfg(windows)]
         execute!(io::stdout(), EnableMouseCapture)?;
+        #[cfg(not(windows))]
+        {
+            io::stdout().write_all(b"\x1b[?1000h\x1b[?1006h")?;
+            io::stdout().flush()?;
+        }
         // [Windows conhost] 关闭 ENABLE_WRAP_AT_EOL_OUTPUT：输出模式保留该标志时，
         // 光标在行末继续写入会自动换行，在缓冲区末行会升级为物理滚动，把备用屏
         // 内容（含顶部状态栏）顶出。本应用全部用绝对坐标定位渲染，不需要自动换行。
@@ -2042,7 +2053,13 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
+        #[cfg(windows)]
         let _ = execute!(io::stdout(), DisableMouseCapture);
+        #[cfg(not(windows))]
+        {
+            let _ = io::stdout().write_all(b"\x1b[?1006l\x1b[?1000l");
+            let _ = io::stdout().flush();
+        }
         let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
     }
