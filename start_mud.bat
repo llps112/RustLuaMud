@@ -1,5 +1,8 @@
 @echo off
-chcp 65001 >nul
+rem NOTE: do NOT chcp 65001 here. Legacy conhost stores every char as 1 cell
+rem under UTF-8 codepage, which breaks CJK fullwidth rendering (glyph overlap).
+rem The app writes via WriteConsoleW (Unicode API); width is decided by the
+rem console codepage, so keep the system default GBK (936) on Chinese Windows.
 setlocal
 set NO_COLOR=1
 set RUST_LOG=error

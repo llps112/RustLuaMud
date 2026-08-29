@@ -258,19 +258,22 @@ impl App {
                     if omitted {
                         continue;
                     }
+                    // 服务端可能下发 ESC[2J（conhost 执行为整屏上滚）等危险转义序列，
+                    // 原样渲染会物理顶出状态栏造成布局永久错位；入回看缓冲/渲染前过滤（保留 SGR 颜色）
+                    let safe = crate::ui::terminal::strip_unsafe_escapes(trimmed);
                     // 滚动回看缓冲（所有 session）
                     if let Some(session) = self.manager.get_mut_by_id(id) {
-                        session.output_lines.push(trimmed.to_string());
+                        session.output_lines.push(safe.clone());
                     }
                     // 仅渲染前台连接的数据
                     if id == self.manager.foreground_id {
                         if is_realtime {
                             // 实时渲染模式：逐行追加（支持逐行 omit）
-                            self.terminal.append_output(part)?;
+                            self.terminal.append_output(&safe)?;
                         } else {
                             // 节流渲染模式：缓冲数据，等待定时器刷新
                             if let Some(session) = self.manager.get_mut_by_id(id) {
-                                session.pending_data.push(trimmed.to_string());
+                                session.pending_data.push(safe);
                                 session.render_dirty = true;
                             }
                         }

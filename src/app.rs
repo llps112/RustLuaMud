@@ -216,6 +216,18 @@ impl App {
             Some(EventStream::new())
         };
 
+        // 尺寸兜底轮询：conhost 窗口初始化竞态（如 Start-Process 派生）或
+        // Resize 事件缺失时，缓存尺寸与实际视口不符会导致底部行写入
+        // 触发视口滚动（状态栏/面板逐行上移），每秒一次同步即可自愈。
+        // daemon 模式无真实终端，置 None 永不就绪。
+        let mut size_poll: Option<tokio::time::Interval> = if self.daemon_mode {
+            None
+        } else {
+            let mut it = tokio::time::interval(std::time::Duration::from_secs(1));
+            it.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            Some(it)
+        };
+
         // 信号处理器：Unix 用 SIGTERM，Windows 用 Ctrl+C
         #[cfg(unix)]
         let mut sigterm =
@@ -249,7 +261,17 @@ impl App {
                             self.handle_mouse_event(mouse)?;
                         }
                         CrosstermEvent::Resize(w, h) => {
-                            self.terminal.resize(w, h);
+                            // Windows 的 WINDOW_BUFFER_SIZE_EVENT 经 crossterm +1 后
+                            // 携带的是「缓冲区尺寸+1」（如 120x30 报成 121x31），
+                            // 直接采信会把布局顶出视口：每拍多画一行→视口被迫
+                            // 滚动一行→状态栏被推出第 0 行且永不重绘（append_output
+                            // 路径不重绘状态栏），表现为逐行上移。
+                            // 因此只要主动查询成功就完全忽略事件参数（包括
+                            // 查询结果与缓存一致的情况），仅查询失败时回退。
+                            match self.terminal.sync_size_if_changed() {
+                                Ok(_) => {}
+                                Err(_) => self.terminal.resize(w, h),
+                            }
                             self.update_status_bar()?;
                         }
                         _ => {}
@@ -279,6 +301,20 @@ impl App {
                 // 处理渲染刷新请求
                 Some(req) = self.render_tick_rx.recv() => {
                     self.handle_render_tick(req.session_id)?;
+                }
+
+                // 尺寸兜底轮询（daemon 模式下永不就绪）
+                Some(_) = async {
+                    match size_poll.as_mut() {
+                        Some(it) => {
+                            it.tick().await;
+                            Some(())
+                        }
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    // 查询失败（如无 tty）时静默跳过，下个周期再试
+                    let _ = self.terminal.sync_size_if_changed();
                 }
 
                 // 信号优雅退出（Unix: SIGTERM / Windows: Ctrl+C）

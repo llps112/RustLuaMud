@@ -101,9 +101,50 @@ fn line_contains_reset(s: &str) -> bool {
     }
     false
 }
-/// 终端驱动会按当前光标列位置执行 TAB 跳格，与 MushClient 行为一致
+/// 将 TAB 展开为空格（制表位每 8 列，按可见宽度计列，ANSI 序列不计列）。
+///
+/// 不能把 \t 原样交给 conhost 跳格：本应用的换行/截断/面板定位均按
+/// `visible_width`（\t 计 0）计算，而 conhost 实际会把光标跳到下一个 8 列
+/// 制表位，导致含 TAB 的行（服务端大量用 \t 对齐彩色面板）实际渲染宽度
+/// 大于计算宽度，向右侵占按坐标定位的元素，产生字符重叠。
+/// 展开为空格后计数与渲染严格一致；行从第 0 列开始绘制，行内列号即绝对列。
 fn expand_tabs(s: &str) -> String {
-    s.to_string()
+    if !s.contains('\t') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut col = 0usize;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // 转义序列原样搬运不计列：CSI 直到终结字节，其余形式取 ESC+1 字符
+            out.push(c);
+            if let Some(&next) = chars.peek() {
+                if next == '[' {
+                    out.push(next);
+                    chars.next();
+                    while let Some(&p) = chars.peek() {
+                        out.push(p);
+                        chars.next();
+                        if ('\u{40}'..='\u{7e}').contains(&p) {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(next);
+                    chars.next();
+                }
+            }
+        } else if c == '\t' {
+            let pad = 8 - (col % 8);
+            out.push_str(&" ".repeat(pad));
+            col += pad;
+        } else {
+            out.push(c);
+            col += char_width(c);
+        }
+    }
+    out
 }
 
 /// 将一行文本按可见宽度拆分为多个段
@@ -292,7 +333,36 @@ fn char_width(ch: char) -> usize {
 /// 非 Windows 构建下仅测试引用，故与 test 一并保留。
 #[cfg(any(windows, test))]
 fn wide_on_conhost(is_conhost: bool, ch: char) -> bool {
-    is_conhost && matches!(ch, '\u{2500}'..='\u{259F}')
+    is_conhost && gbk_full_width(ch)
+}
+
+/// 字符在 GBK 编码中是否为双字节（即 conhost 下是否按全角渲染）。
+///
+/// conhost 的宽度规则不是 Unicode Standard，而是“GBK 双字节即全角”：
+/// ●○◎★·— 等 Unicode 判为 1 格（ambiguous）的字符，在 GBK 中均为双字节，
+/// conhost 实际占 2 格（实测：状态栏 ● 在缓冲网格占两格，导致计数每遇
+/// 一个符号就少 1 列，误差沿行向右累积，靠右元素被叠压）。逐个枚举
+/// 符号范围总会遗漏，故以 GBK 编码字节数为准（与 conhost 行为同源），
+/// 建 BMP 布尔查找表一次缓存。ASCII 永远单字节直接短路。
+#[cfg(any(windows, test))]
+fn gbk_full_width(ch: char) -> bool {
+    static TABLE: std::sync::OnceLock<Box<[bool]>> = std::sync::OnceLock::new();
+    let code = ch as u32;
+    if !(0x80..0x10000).contains(&code) {
+        return false; // ASCII 单字节；非 BMP 字符 conhost 不支持，保持原宽
+    }
+    let table = TABLE.get_or_init(|| {
+        let mut t: Box<[bool]> = vec![false; 0x10000].into_boxed_slice();
+        for cp in 0x80..0x10000u32 {
+            if let Some(c) = char::from_u32(cp) {
+                let mut utf8_buf = [0u8; 4];
+                let (bytes, _, had_errors) = encoding_rs::GBK.encode(c.encode_utf8(&mut utf8_buf));
+                t[cp as usize] = !had_errors && bytes.len() == 2;
+            }
+        }
+        t
+    });
+    table[code as usize]
 }
 
 /// 是否运行于 Windows 传统控制台（conhost）。
@@ -326,6 +396,157 @@ fn reserve_conhost_cols(raw: u16, is_conhost: bool) -> u16 {
 /// 与非 Windows 平台返回原始宽度。
 fn usable_width(raw: u16) -> u16 {
     reserve_conhost_cols(raw, is_conhost())
+}
+
+/// 计算实际可用高度。conhost 上向缓冲区末行写入会使视口上滚一行（光标无法
+/// 停在末行之外），把顶部状态栏顶出可见区。布局整体减 1 行、永不触碰末行即可根治；
+/// 代价仅是底部多一行空白。Windows Terminal 与非 Windows 无此问题。
+fn usable_height(raw: u16) -> u16 {
+    if is_conhost() {
+        raw.saturating_sub(1)
+    } else {
+        raw
+    }
+}
+
+/// 剔除数据中的危险终端转义序列，仅保留 SGR（颜色/样式）。
+///
+/// 部分游戏服务端会下发 `ESC[2J`（清屏）、`ESC[H`（光标归位）等控制序列；
+/// 裸转义如 `ESC D`（IND，物理下滚一行）同样危险。这些序列若随输出写入
+/// conhost 会被直接执行：清屏/滚动会把备用屏内容（含顶部状态栏）物理顶出，
+/// 造成布局永久错位。SGR 序列无副作用且用于着色，予以保留；
+/// 其余 CSI、OSC、裸转义全部剔除。
+pub fn strip_unsafe_escapes(s: &str) -> String {
+    // 快速路径：绝大多数行不含任何转义序列，省去状态机扫描（仍有一次拷贝）
+    if !s.contains('\x1b') {
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                // CSI 序列：参数区后紧跟终结字节才算完整；仅保留 SGR（'m'）
+                let mut j = i + 2;
+                let mut fin = None;
+                while j < bytes.len() && j - i < 32 {
+                    if (0x40..=0x7e).contains(&bytes[j]) {
+                        fin = Some(bytes[j]);
+                        break;
+                    }
+                    j += 1;
+                }
+                match fin {
+                    Some(b'm') => {
+                        out.push_str(&s[i..=j]); // SGR 保留
+                        i = j + 1;
+                    }
+                    Some(_) => i = j + 1, // 其余 CSI（2J/H/2K…）剔除
+                    None => {
+                        // 残缺序列（无终结字节）：原样保留，不吞后续内容；
+                        // 回退到字符边界，避免在中文等多字节字符中间切片 panic
+                        let mut e = j;
+                        while e > i && !s.is_char_boundary(e) {
+                            e -= 1;
+                        }
+                        out.push_str(&s[i..e]);
+                        i = e;
+                    }
+                }
+            } else if i + 1 < bytes.len() && bytes[i + 1] == b']' {
+                // OSC 序列：剔除到 BEL/ST 或行尾（最多扫 64 字节）
+                let mut j = i + 2;
+                while j < bytes.len() && j - i < 64 && bytes[j] != 0x07 {
+                    if bytes[j] == 0x1b && j + 1 < bytes.len() && bytes[j + 1] == b'\\' {
+                        j += 1;
+                        break;
+                    }
+                    j += 1;
+                }
+                i = (j + 1).min(bytes.len());
+            } else if i + 1 < bytes.len() && (0x40..=0x5f).contains(&bytes[i + 1]) {
+                // 裸转义 Fe 序列（ESC D=IND 下滚、ESC M=上滚、ESC 7/8、ESC c 等）：
+                // 全部剔除（两字节）
+                i += 2;
+            } else {
+                out.push('\x1b');
+                i += 1;
+            }
+        } else {
+            let c = s[i..].chars().next().unwrap();
+            out.push(c);
+            i += c.len_utf8();
+        }
+    }
+    out
+}
+
+/// 纯逻辑：判断缓存尺寸是否需要按新的原始视口尺寸更新。
+/// 加工规则必须与 resize()/Terminal::new() 保持一致：usable_width + 下限保底，
+/// 否则极小/异常尺寸下会每分钟反复触发重绘。
+fn needs_resize(cached_w: u16, cached_h: u16, raw_w: u16, raw_h: u16) -> bool {
+    usable_width(raw_w).max(20) != cached_w || usable_height(raw_h).max(5) != cached_h
+}
+
+/// [Windows conhost] 将控制台视口钉在缓冲区顶部（窗口 Top 移到 0）。
+///
+/// 根因：conhost 视口可能在写入/清屏时自行下移一行，使第 0 行（状态栏）
+/// 移出可见区域。应用用绝对坐标绘制的一切仍然正确，只是用户看不到第 0 行；
+/// 频繁刷新时闪烁间可见状态栏、缩放窗口后短暂恢复都是此机制的典型表现。
+///
+/// 关键约束：必须**保持窗口现有宽高不变**，只把 Top 移到 0。
+/// 若用绝对坐标设置固定高度（如缓存高度=窗口高度-1），会形成反馈循环：
+/// 每次钉顶窗口矮一行，下一轮读到的尺寸又减 1，窗口持续缩小直到保底值。
+#[cfg(windows)]
+fn pin_viewport_top() {
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Coord {
+        x: i16,
+        y: i16,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Sr {
+        l: i16,
+        t: i16,
+        r: i16,
+        b: i16,
+    }
+    #[repr(C)]
+    struct Csbi {
+        size: Coord,
+        cursor: Coord,
+        attrs: u16,
+        window: Sr,
+        max_window: Coord,
+    }
+    extern "system" {
+        fn GetStdHandle(n: i32) -> isize;
+        fn GetConsoleScreenBufferInfo(h: isize, info: *mut Csbi) -> i32;
+        fn SetConsoleWindowInfo(h: isize, absolute: i32, rect: *const Sr) -> i32;
+    }
+    unsafe {
+        let h = GetStdHandle(-11);
+        let mut info: Csbi = std::mem::zeroed();
+        if GetConsoleScreenBufferInfo(h, &mut info) == 0 {
+            return;
+        }
+        // 已在顶部：无需调用，避免无谓的系统调用与潜在闪烁
+        if info.window.t == 0 {
+            return;
+        }
+        // 保持宽高不变，仅整体上移到缓冲区顶部
+        let height = info.window.b - info.window.t;
+        let r = Sr {
+            l: info.window.l,
+            t: 0,
+            r: info.window.r,
+            b: height,
+        };
+        SetConsoleWindowInfo(h, 1, &r);
+    }
 }
 
 /// 构建 session 状态栏字符串（纯逻辑，无 IO 依赖）
@@ -541,6 +762,10 @@ impl TerminalState {
     /// 自动补上颜色前缀，实现行间颜色继承（如服务器在 ">" 行设置红色，
     /// 下一行"面色凝重"无 ANSI，自动继承红色）
     pub fn push_output(&mut self, line: &str) {
+        // 总入口防护：无论来源（服务端数据、Lua Note、系统消息），
+        // 凡进入渲染缓冲的内容都必须剔除危险转义序列（保留 SGR 颜色），
+        // 否则清屏/滚动类序列会被 conhost 直接执行，物理顶出布局。
+        let line = strip_unsafe_escapes(line);
         let old_len = self.output_lines.len();
 
         for part in line.split_inclusive('\n') {
@@ -1109,27 +1334,51 @@ impl TerminalState {
 /// 终端 UI 渲染器（持有 TerminalState + IO 渲染）
 pub struct Terminal {
     state: TerminalState,
+    /// 缩放后待执行的延迟二次全屏重绘。
+    /// conhost 对窗口缩放的 reflow/滚动可能晚于首次重绘发生，
+    /// 由主循环周期性 `sync_size_if_changed()` 消费该标志补画一次。
+    pending_post_resize_refresh: bool,
 }
 
 impl Terminal {
     pub fn new() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
-        let (width, height) = terminal::size()?;
+        let (raw_w, raw_h) = terminal::size()?;
         // Windows conhost：右侧竖向滚动条会占用最右列而 terminal::size() 仍计入，
         // 先扣减保留列，避免右对齐的 logo/面板被截断（Windows Terminal 与非 Windows 不扣减）。
-        let width = usable_width(width);
         // 尺寸保底：异常环境（如 headless pty 未设置 winsize）可能返回 0，
-        // 会导致渲染代码的减法运算溢出 panic
-        let width = width.max(20);
-        let height = height.max(5);
+        // 会导致渲染代码的减法运算溢出 panic；
+        // conhost 高度减 1：永不向缓冲区末行写入，避免触发视口上滚顶出状态栏
+        let width = usable_width(raw_w).max(20);
+        let height = usable_height(raw_h).max(5);
         // 启用鼠标捕获（跨平台标准方式）
         // Windows: EnableMouseCapture 通过 SetConsoleMode 设置 ENABLE_MOUSE_INPUT，
         //          手写 ?1000h 转义序列在 Console API 输入模式下不会被解释，导致鼠标事件不产生；
         // Unix: 发送 ?1000h 等鼠标追踪序列。
         // 终端处于鼠标应用模式时，按住 Shift 拖拽可绕过应用模式进行原生文本选中
         execute!(io::stdout(), EnableMouseCapture)?;
+        // [Windows conhost] 关闭 ENABLE_WRAP_AT_EOL_OUTPUT：输出模式保留该标志时，
+        // 光标在行末继续写入会自动换行，在缓冲区末行会升级为物理滚动，把备用屏
+        // 内容（含顶部状态栏）顶出。本应用全部用绝对坐标定位渲染，不需要自动换行。
+        #[cfg(windows)]
+        {
+            extern "system" {
+                fn GetStdHandle(n: i32) -> isize;
+                fn GetConsoleMode(h: isize, mode: *mut u32) -> i32;
+                fn SetConsoleMode(h: isize, mode: u32) -> i32;
+            }
+            unsafe {
+                let h = GetStdHandle(-11);
+                let mut mode: u32 = 0;
+                if GetConsoleMode(h, &mut mode) != 0 {
+                    // ENABLE_WRAP_AT_EOL_OUTPUT = 0x0002
+                    SetConsoleMode(h, mode & !0x0002);
+                }
+            }
+        }
         Ok(Self {
             state: TerminalState::new(width, height),
+            pending_post_resize_refresh: false,
         })
     }
 
@@ -1153,7 +1402,31 @@ impl Terminal {
             terminal::EnterAlternateScreen,
             terminal::Clear(ClearType::All)
         )?;
+        // [Windows conhost] 备用屏缓冲可能拥有独立的输出模式，切屏后再次关闭
+        // ENABLE_WRAP_AT_EOL_OUTPUT：行末继续写入自动换行，在末行会升级为物理滚动，
+        // 把备用屏内容（含顶部状态栏）顶出。本应用全用绝对坐标渲染，无需自动换行。
+        #[cfg(windows)]
+        {
+            extern "system" {
+                fn GetStdHandle(n: i32) -> isize;
+                fn GetConsoleMode(h: isize, mode: *mut u32) -> i32;
+                fn SetConsoleMode(h: isize, mode: u32) -> i32;
+            }
+            unsafe {
+                let h = GetStdHandle(-11);
+                let mut mode: u32 = 0;
+                if GetConsoleMode(h, &mut mode) != 0 {
+                    SetConsoleMode(h, mode & !0x0002);
+                }
+            }
+        }
+        // 视口钉顶：确保第 0 行（状态栏）始终在可见区域内（根因修复）
+        #[cfg(windows)]
+        pin_viewport_top();
         self.refresh_all(&mut stdout)?;
+        // 启动首帧的写入自身可能触发 conhost 滚动（如末行写入升级换行），
+        // 标记延迟二次全屏重绘，由主循环周期性同步时补画（约 1 秒内）
+        self.pending_post_resize_refresh = true;
         Ok(())
     }
 
@@ -1185,6 +1458,17 @@ impl Terminal {
 
         self.draw_input_line(stdout)?;
         stdout.flush()?;
+        // 第 0 行守卫（全屏重绘路径）：本次重绘自身的写入也可能触发滚动，
+        // 把刚画好的第 0 行顶出；同样无条件覆写一次。
+        if let Some(ref bar) = self.state.status_bar_cache {
+            let pad = (self.state.width as usize).saturating_sub(visible_width(bar));
+            queue!(stdout, cursor::MoveTo(0, 0))?;
+            queue!(stdout, Print(bar))?;
+            if pad > 0 {
+                queue!(stdout, Print(" ".repeat(pad)))?;
+            }
+        }
+        stdout.flush()?;
         Ok(())
     }
 
@@ -1193,6 +1477,18 @@ impl Terminal {
         self.draw_output_area(stdout)?;
         self.draw_panels(stdout)?;
         self.draw_input_line(stdout)?;
+        // 第 0 行守卫（无条件覆写）：服务端 ESC[2J] 在 conhost 中执行为整屏上滚、
+        // 窗口缩放触发 reflow，都会把顶部状态栏物理顶出；而本路径为防闪烁原本不重绘
+        // 状态栏，导致第 0 行永久损坏。进程内读屏校验不可靠，改为每帧用缓存状态栏
+        // 直接覆写第 0 行（不清行、无闪烁），任何滚动下一帧即自愈。
+        if let Some(ref bar) = self.state.status_bar_cache {
+            let pad = (self.state.width as usize).saturating_sub(visible_width(bar));
+            queue!(stdout, cursor::MoveTo(0, 0))?;
+            queue!(stdout, Print(bar))?;
+            if pad > 0 {
+                queue!(stdout, Print(" ".repeat(pad)))?;
+            }
+        }
         stdout.flush()?;
         Ok(())
     }
@@ -1466,10 +1762,46 @@ impl Terminal {
     /// 处理终端大小变化
     pub fn resize(&mut self, width: u16, height: u16) {
         // 尺寸保底：与 Terminal::new 保持一致，防止拖拽/最大化过程中
-        // conhost 报告极小的中间尺寸导致渲染代码减法下溢而崩溃
+        // conhost 报告极小的中间尺寸导致渲染代码减法下溢而崩溃；
+        // 高度同样走 usable_height（conhost 末行避让）
         self.state.width = usable_width(width).max(20);
-        self.state.height = height.max(5);
+        self.state.height = usable_height(height).max(5);
+        // 视口钉顶：缩放会重置视口位置，同时防止 conhost 再次下移视口使第 0 行不可见
+        #[cfg(windows)]
+        pin_viewport_top();
         let _ = self.refresh_all(&mut io::stdout());
+        // conhost 的 reflow/滚动可能晚于本次重绘发生，标记延迟二次全屏重绘，
+        // 由主循环周期性调用 sync_size_if_changed() 时消费（约 1 秒内补画）
+        self.pending_post_resize_refresh = true;
+    }
+
+    /// 兜底尺寸同步：主动查询真实视口尺寸，与缓存不一致时重排布局。
+    ///
+    /// 背景：Start-Process 等方式派生时 conhost 窗口初始化存在竞态，
+    /// `Terminal::new()` 查到的尺寸可能是过时的默认值；且 Windows 侧
+    /// crossterm 仅在收到 WINDOW_BUFFER_SIZE_EVENT 时才转发 Resize 事件，
+    /// 事件携带的还是缓冲区尺寸而非视口尺寸。缓存高度大于真实视口时，
+    /// 底部行写入会不断触发视口滚动，表现为状态栏/面板随行刷新上移。
+    /// 主循环周期性调用本方法即可自愈。返回 Ok(true) 表示尺寸变更并已重排；
+    /// Ok(false) 表示查询成功且尺寸一致（无需任何动作）；
+    /// Err 表示查询失败（如无 tty），调用方可自行决定是否回退到其他尺寸来源。
+    pub fn sync_size_if_changed(&mut self) -> io::Result<bool> {
+        // 视口防漂移：运行中写入/清屏也可能使 conhost 视口下移一行，
+        // 每秒同步时钉一次顶，漂移最多存在 1 秒即自愈（已在顶部时零开销）
+        #[cfg(windows)]
+        pin_viewport_top();
+        // 消费缩放后的延迟二次重绘标志（与尺寸是否变化无关）
+        if self.pending_post_resize_refresh {
+            self.pending_post_resize_refresh = false;
+            self.refresh_all(&mut io::stdout())?;
+        }
+        let (raw_w, raw_h) = terminal::size()?;
+        let changed = needs_resize(self.state.width, self.state.height, raw_w, raw_h);
+        if !changed {
+            return Ok(false);
+        }
+        self.resize(raw_w, raw_h);
+        Ok(true)
     }
 
     /// 替换整个输出缓冲区（切换前台连接时使用）
@@ -1589,10 +1921,99 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_expand_tabs_passthrough() {
-        assert_eq!(expand_tabs("hello\tworld"), "hello\tworld");
+    fn test_strip_unsafe_escapes_keeps_plain_text() {
+        assert_eq!(strip_unsafe_escapes("hello 世界"), "hello 世界");
+        assert_eq!(strip_unsafe_escapes(""), "");
+    }
+
+    #[test]
+    fn test_strip_unsafe_escapes_keeps_sgr() {
+        assert_eq!(
+            strip_unsafe_escapes("\x1b[32m●\x1b[0m ok"),
+            "\x1b[32m●\x1b[0m ok"
+        );
+        assert_eq!(
+            strip_unsafe_escapes("\x1b[1;37;44m[1]name\x1b[0m"),
+            "\x1b[1;37;44m[1]name\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn test_strip_unsafe_escapes_removes_control_csi() {
+        // 清屏/光标归位/行清除等副作用序列必须剔除
+        assert_eq!(strip_unsafe_escapes("\x1b[2J"), "");
+        assert_eq!(strip_unsafe_escapes("\x1b[H"), "");
+        assert_eq!(strip_unsafe_escapes("a\x1b[2Kb"), "ab");
+        assert_eq!(strip_unsafe_escapes("\x1b[5;10Htext"), "text");
+        // SGR 与危险序列混排：只保留 SGR 部分
+        assert_eq!(
+            strip_unsafe_escapes("\x1b[31mred\x1b[2J\x1b[0m"),
+            "\x1b[31mred\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn test_strip_unsafe_escapes_removes_bare_fe() {
+        // 裸转义：ESC D(IND 下滚)/ESC M(RI 上滚)/ESC E 等必须剔除，
+        // 它们是 conhost 物理滚动备用屏的另一类触发源
+        assert_eq!(strip_unsafe_escapes("\x1bD"), "");
+        assert_eq!(strip_unsafe_escapes("a\x1bDb"), "ab");
+        assert_eq!(strip_unsafe_escapes("\x1bM"), "");
+        // 光标移动类 CSI 同样剔除，颜色保留
+        assert_eq!(
+            strip_unsafe_escapes("\x1b[1;1H\x1b[32mok\x1b[D"),
+            "\x1b[32mok"
+        );
+    }
+
+    #[test]
+    fn test_strip_unsafe_escapes_incomplete_sequence_preserved() {
+        // 末尾残缺序列（无终结字节）不吞后续内容，按普通字节保留，
+        // 避免因丢字节而破坏中文等多字节字符（下一字符仍按 char 边界推进）
+        assert_eq!(strip_unsafe_escapes("a\x1b["), "a\x1b[");
+        assert_eq!(strip_unsafe_escapes("\x1b[12"), "\x1b[12");
+    }
+
+    #[test]
+    fn test_needs_resize_matches_processed_size() {
+        // 加工规则与 resize()/Terminal::new() 一致：usable_width + usable_height + 下限保底
+        let processed_w = usable_width(100).max(20);
+        let processed_h = usable_height(30).max(5);
+        // 尺寸一致 → 无需更新（不触发重绘）
+        assert!(!needs_resize(processed_w, processed_h, 100, 30));
+        // 任一维度不一致 → 需要更新
+        assert!(needs_resize(processed_w, 24, 100, 30));
+        assert!(needs_resize(processed_w, processed_h, 120, 30));
+        // 异常极小尺寸被保底钳制：缓存已在保底值时不反复触发更新
+        assert!(!needs_resize(20, 5, 1, 1));
+        assert!(needs_resize(80, 30, 1, 1));
+    }
+
+    #[test]
+    fn test_expand_tabs_basic() {
+        // 制表位每 8 列：\t 跳到下一个 8 的倍数列
+        assert_eq!(expand_tabs("a\tb"), "a       b"); // col1 → 补 7 空格到 col8
+        assert_eq!(expand_tabs("hello\tworld"), "hello   world"); // col5 → 补 3 空格到 col8
+        assert_eq!(expand_tabs("\tX"), "        X"); // col0 → 补 8 空格到 col8
+        assert_eq!(expand_tabs("12345678\tX"), "12345678        X"); // col8 → 补 8 到 col16
+    }
+
+    #[test]
+    fn test_expand_tabs_no_tab_passthrough() {
         assert_eq!(expand_tabs("no_tabs"), "no_tabs");
         assert_eq!(expand_tabs(""), "");
+    }
+
+    #[test]
+    fn test_expand_tabs_ansi_not_counted() {
+        // ANSI 序列不计列：\x1b[31m 后 ab 占 col0-1，\t 补 6 空格到 col8
+        assert_eq!(expand_tabs("\x1b[31mab\tc"), "\x1b[31mab      c");
+    }
+
+    #[test]
+    fn test_expand_tabs_cjk_counts_double() {
+        // 汉字占 2 列："你" 后在 col2，\t 补 6 空格到 col8
+        assert_eq!(expand_tabs("你\t好"), "你      好");
     }
 
     #[test]
@@ -2299,18 +2720,28 @@ mod tests {
 
     #[test]
     fn test_wide_on_conhost() {
-        // conhost 下 Box Drawing / Block Elements 按 2 格计（char_width 返回 2 的前提）
-        assert!(wide_on_conhost(true, '─'));
-        assert!(wide_on_conhost(true, '│'));
-        assert!(wide_on_conhost(true, '┌'));
+        // conhost 下 GBK 双字节字符按 2 格计（char_width 返回 2 的前提）：
+        // 旧实现只枚举 U+2500-259F，●○◎★·— 等符号被漏判导致行内计数错位叠压
+        assert!(wide_on_conhost(true, '─')); // U+2500 Box Drawing
         assert!(wide_on_conhost(true, '█')); // U+2588 Block Elements
-                                             // Windows Terminal / Linux：遵循标准 1 格宽度，不做修正
+        assert!(wide_on_conhost(true, '●')); // U+25CF 状态栏分隔符（旧范围未覆盖→叠字根因）
+        assert!(wide_on_conhost(true, '○')); // U+25CB
+        assert!(wide_on_conhost(true, '◎')); // U+25CE
+        assert!(wide_on_conhost(true, '★')); // U+2605 Lua 状态行
+        assert!(wide_on_conhost(true, '■')); // U+25A0 新规则下也是双字节
+        assert!(wide_on_conhost(true, '—')); // U+2014 破折号
+        assert!(wide_on_conhost(true, '·')); // U+00B7 间隔号
+                                             // Windows Terminal / Linux：不做修正
         assert!(!wide_on_conhost(false, '─'));
-        assert!(!wide_on_conhost(false, '█'));
-        // 范围外字符（ASCII / CJK / U+25A0）任何终端都不做全角修正
+        assert!(!wide_on_conhost(false, '●'));
+        // ASCII（GBK 单字节）任何终端都不做全角修正
         assert!(!wide_on_conhost(true, 'A'));
-        assert!(!wide_on_conhost(true, '中'));
-        assert!(!wide_on_conhost(true, '■')); // U+25A0 在范围之外
+        assert!(!wide_on_conhost(true, ' '));
+        // GBK 无法编码的字符（替换为 '?' 单字节）保持原宽
+        assert!(!wide_on_conhost(true, '\u{1F600}')); // emoji，非 BMP，短路返回 false
+        assert!(!wide_on_conhost(true, '\u{0374}')); // Greek 形似号，GBK 不可编码
+                                                     // 私用区 U+E000-U+E864 是 GBK 扩展映射的双字节字符，conhost 按全角渲染
+        assert!(wide_on_conhost(true, '\u{E000}'));
     }
 
     #[test]

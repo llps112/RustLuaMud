@@ -172,7 +172,10 @@ $bat = Join-Path $Target "start_mud.bat"
 Write-Host "==> Creating launcher: $bat"
 @'
 @echo off
-chcp 65001 >nul
+rem Do NOT chcp 65001: legacy conhost stores every char as 1 cell under the
+rem UTF-8 codepage, breaking CJK fullwidth rendering (glyph overlap).
+rem Keep system default (GBK 936 on Chinese Windows); the app writes via the
+rem Unicode console API, only the width rule depends on the codepage.
 setlocal
 set NO_COLOR=1
 set RUST_LOG=error

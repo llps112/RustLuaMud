@@ -71,8 +71,11 @@ GitHub Actions 增加 windows job（`runs-on: windows-latest`），复用现有 
    如需 Windows 等效功能，追加 `#[cfg(windows)]` 分支（`WSAIoctl` + `SIO_KEEPALIVE_VALS`），
    或接受降级（Windows 侧仅默认 keepalive，不设置精细参数）。
 3. **控制台编码**：Windows 中文系统控制台默认代码页为 GBK (936)，程序输出为 UTF-8。
-   - 运行时方案：用户执行 `chcp 65001` 后再运行；
-   - 代码方案（可选）：启动时调用 `SetConsoleOutputCP(65001)`（crossterm 未自动处理此项）。
+   - 应用侧通过 Unicode API（`WriteConsoleW`）写入，编码转换与代码页无关；
+   - **禁止** `chcp 65001`：旧 conhost 在 UTF-8 代码页下把所有字符按 1 格存储，
+     汉字/制表符/●★ 等全角字形挤进单格导致字符叠压（实测 936 下这些字符
+     均为带 LVB 前导/尾随标记的 2 格，与 `gbk_full_width` 宽度表一致）；
+   - 保持系统默认代码页（中文 Windows 即 936）即可，启动脚本不再设置 chcp。
 4. **路径与部署**：程序依赖相对路径（`profiles/`、`scripts/`、`logs/`），
    Windows 上需将 exe 与这些目录放在同一工作目录，注意 `cmd` 中工作目录与双击运行目录的差异。
 5. **测试**：按项目规范，`#[cfg]` 改动需确认现有 809 个测试在 Windows 目标下仍可编译通过
