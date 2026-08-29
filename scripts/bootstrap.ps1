@@ -112,6 +112,10 @@ if (-not (Test-Path $exampleToml)) {
     @'
 # Role connection config
 # The file name is the role identity; recommend naming it after your character.
+#
+# After adding this file at runtime you can load it inside the client (no restart):
+#   /profile list          - list available roles
+#   /profile load <name>   - load and connect
 
 # Connection info
 name = "your_character_name"
@@ -120,29 +124,106 @@ port = 5555
 encoding = "gbk"
 
 # Lua script path (relative to the program run directory)
-script = "scripts/your_script.lua"
+script = "scripts/example.lua"
 
 # Connection behavior
 auto_connect = true
 auto_reconnect = true
 reconnect_delay_secs = 5
 
-# Login credentials
+# Login credentials (auto-injected into Lua vars char_name / char_password at startup)
+# Leave empty to skip injection (type manually or set via Lua setname/setpwd).
+#
+# To keep the password OUT of this file (so copying/sharing the TOML never leaks it),
+# use an environment-variable placeholder -- a value that is exactly ${NAME} is read
+# from the environment at startup:
+#   password = "${MUD_MYCHAR_PWD}"
+#   Set it once on Windows: setx MUD_MYCHAR_PWD "real_password"   (takes effect in a NEW terminal)
+#   If the variable is missing, the field is treated as empty and a startup warning is
+#   printed; the placeholder text is NEVER sent to the server as the password.
+#   If the password itself literally looks like ${XXX}, escape the $: "$${LITERAL}".
+#
+# To manage several roles' passwords in one place instead of setx, put the variables in
+# profiles\.env (see profiles\.env.example) and reference them the same way.
 username = "your_character_name"
 password = "your_password"
 
-# SOCKS5 proxy (optional)
+# SOCKS5 proxy (optional; direct connection when disabled)
 socks5_enable = false
 socks5_host = "127.0.0.1"
 socks5_port = 1080
 socks5_username = ""
 socks5_password = ""
 
-# Realtime rendering (optional)
+# Realtime rendering (optional; when true, render_interval is ignored)
 realtime = true
+# Render interval in ms (0 = realtime, default 1000 = refresh once per second)
 render_interval = 1000
-# log_rotation_count = 24
+
+# Log files kept (optional; default 24 = last 24 hourly log files)
+log_rotation_count = 24
+
+# Command rate limiting (token bucket, anti-flood) -- matched to the server:
+#   server counts each command +1, drains 40 every 2s; >60 -> struck/kicked, >20 -> minor penalty.
+#   safe rule: burst_size + (commands in 2s at cmd_interval_ms) must stay <= 60 (leave headroom).
+# Min gap after the burst is spent (ms): 50ms = 20/s = 40 per 2s drain cycle
+cmd_interval_ms = 50
+# Burst allowance at 0ms gap right after connect/idle (recommended <= 20)
+burst_size = 15
+# Steady refill rate (tokens/sec), should track the server drain rate (40/2s = 20/s)
+cmds_per_sec = 20
 '@ | Set-Content -Path $exampleToml -Encoding ASCII
+}
+
+# --- 3b. Example credential file (.env.example; skip if exists) ---
+$envExample = Join-Path $Target "profiles\.env.example"
+if (-not (Test-Path $envExample)) {
+    Write-Host "==> Creating example env file: $envExample"
+    @'
+# ============================================================
+# RustLuaMud credential file example (.env)
+# ============================================================
+# Keep all passwords in this ONE file and reference them from role configs
+# (*.toml) with a placeholder like "${VAR_NAME}". Copying or sharing the TOML
+# files then never carries your real passwords.
+#
+# Steps:
+#   1. Copy this file to ".env" in the same folder (from cmd):
+#        copy .env.example .env
+#   2. Edit .env, one "VAR_NAME=value" per line:
+#        MUD_GBDOOR_PWD=my_real_password
+#   3. Reference it in the role config (e.g. gbdoor.toml):
+#        password = "${MUD_GBDOOR_PWD}"
+#   4. Start the client; the password is read from .env at login.
+#
+# Format rules:
+#   - One entry per line: NAME=value  (spaces around = are trimmed)
+#   - NAME must start with a letter or underscore; letters/digits/underscore only
+#   - Lines starting with # are comments; blank lines are ignored
+#   - Quote values that contain spaces: MUD_PWD="my pass word"  (quotes are stripped)
+#
+# Notes:
+#   - Save as UTF-8 (Notepad: Save As -> Encoding UTF-8). ANSI/GBK causes the whole
+#     file to fail loading and prints a startup warning.
+#   - .env is git-ignored; never commit or share it.
+#   - Real environment variables (e.g. set via setx) take precedence over .env.
+#   - Restart the client after editing .env for changes to take effect.
+#   - A missing/misspelled variable yields an empty value plus a startup warning; the
+#     placeholder text is never sent to the server.
+# ============================================================
+# Example entries -- copy to .env and edit:
+# ============================================================
+
+# gbdoor role login password
+MUD_GBDOOR_PWD=replace_with_real_password
+
+# a second role (name is arbitrary; must match ${...} used in the toml)
+MUD_FKAKMA_PWD=replace_with_real_password
+
+# usernames and SOCKS5 passwords support placeholders too:
+# MUD_GBDOOR_USER=gbdoor
+# MUD_SOCKS5_PWD=proxy_password
+'@ | Set-Content -Path $envExample -Encoding ASCII
 }
 
 # --- 4. Example Lua script (skip if exists) ---
@@ -196,6 +277,7 @@ Write-Host "      RustLuaMud.exe        <- main program"
 Write-Host "      start_mud.bat         <- double-click to launch"
 Write-Host "      profiles\             <- role TOML configs (terminal.json lives here)"
 Write-Host "        example.toml        <- example config"
+Write-Host "        .env.example        <- copy to .env to keep passwords out of the TOMLs"
 Write-Host "      scripts\              <- put your game scripts here"
 Write-Host "        example.lua"
 Write-Host "      logs\                 <- generated at runtime"
