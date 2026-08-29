@@ -398,15 +398,17 @@ fn usable_width(raw: u16) -> u16 {
     reserve_conhost_cols(raw, is_conhost())
 }
 
-/// 计算实际可用高度。conhost 上向缓冲区末行写入会使视口上滚一行（光标无法
-/// 停在末行之外），把顶部状态栏顶出可见区。布局整体减 1 行、永不触碰末行即可根治；
-/// 代价仅是底部多一行空白。Windows Terminal 与非 Windows 无此问题。
+/// 计算实际可用高度。
+///
+/// 历史上 conhost 需要在此 `-1` 避让缓冲区末行（末行写入会升级为整屏上滚，
+/// 把顶部状态栏顶出）。现在末行由 Lua 状态栏占用（见 `TerminalState::lua_row`），
+/// 末行可安全承载内容，省下的那一行回归输出区，屏幕底部不再留空行。成立前提（三者缺一即会复发上滚）：
+/// ① `init_screen` 已关闭 `ENABLE_WRAP_AT_EOL_OUTPUT`，行末写入不自动换行；
+/// ② 全部渲染走绝对坐标，向末行的写入永不伴随 LF；
+/// ③ 服务端危险转义（`ESC[2J`、`ESC D` 等）已在入口与渲染前双重剔除。
+/// 保留本函数作为高度加工的唯一切点：若日后某类终端又需要避让末行，只改这里。
 fn usable_height(raw: u16) -> u16 {
-    if is_conhost() {
-        raw.saturating_sub(1)
-    } else {
-        raw
-    }
+    raw
 }
 
 /// 剔除数据中的危险终端转义序列，仅保留 SGR（颜色/样式）。
@@ -491,9 +493,10 @@ fn needs_resize(cached_w: u16, cached_h: u16, raw_w: u16, raw_h: u16) -> bool {
 
 /// [Windows conhost] 将控制台视口钉在缓冲区顶部（窗口 Top 移到 0）。
 ///
-/// 根因：conhost 视口可能在写入/清屏时自行下移一行，使第 0 行（状态栏）
-/// 移出可见区域。应用用绝对坐标绘制的一切仍然正确，只是用户看不到第 0 行；
-/// 频繁刷新时闪烁间可见状态栏、缩放窗口后短暂恢复都是此机制的典型表现。
+/// 根因：conhost 视口可能在写入/清屏时自行下移一行，使屏幕顶部行移出可见区域。
+/// 应用用绝对坐标绘制的一切仍然正确，只是顶部若干行用户看不到；
+/// 缩放窗口后短暂恢复是此机制的典型表现。底行 Lua 状态栏靠每帧守卫覆写自愈，
+/// 但顶行 session 状态栏与输出区首行仍需钉顶才能保持绝对坐标与屏幕行号对齐。
 ///
 /// 关键约束：必须**保持窗口现有宽高不变**，只把 Top 移到 0。
 /// 若用绝对坐标设置固定高度（如缓存高度=窗口高度-1），会形成反馈循环：
@@ -609,6 +612,43 @@ fn build_lua_status_text(
         }
     }
     String::new()
+}
+
+/// 把底行状态栏文本重涂为蓝底：行首强制“亮白前景 + 蓝背景”，并保留文本原有的
+/// SGR 意图（脚本常用颜色标记低血/告警），但每个 SGR 后紧跟一道 `ESC[44m`。
+/// 必要性：`SetStatus` 文本普遍自带 `ESC[0m`，而 reset 会把**前景与背景一起**擦回
+/// 默认属性，只在行首设一次背景会从第一个 reset 起失效（表现为蓝底不显示）。
+/// 尾部不复位（由调用方补齐空格后统一 `ESC[0m`），使整行背景连空白部分都是蓝的。
+/// 纯逻辑、无 IO，可单测；追加的转义序列可见宽度为 0，不影响列对齐。
+fn force_blue_bg(text: &str) -> String {
+    const ROW_START: &str = "\x1b[1;37;44m";
+    const REASSERT_BG: &str = "\x1b[44m";
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len() + ROW_START.len() + 16);
+    out.push_str(ROW_START);
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            let mut j = i + 2;
+            while j < bytes.len() && !(0x40..=0x7e).contains(&bytes[j]) {
+                j += 1;
+            }
+            // 完整 SGR（终结字节 'm'）：原样输出后补回蓝底
+            if j < bytes.len() && bytes[j] == b'm' {
+                out.push_str(&text[i..=j]);
+                out.push_str(REASSERT_BG);
+                i = j + 1;
+                continue;
+            }
+            // 残缺转义（如被列宽截断）：丢掉 `ESC` 本身，避免把后续字串当文本打印
+            i = j.min(bytes.len());
+            continue;
+        }
+        let c = text[i..].chars().next().unwrap();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
 }
 
 /// 每个 session 独立的输入状态（切换 session 时保存/恢复）
@@ -729,6 +769,40 @@ impl TerminalState {
     pub fn output_height(&self) -> u16 {
         self.height
             .saturating_sub(self.status_height + self.lua_status_height + self.input_height)
+    }
+
+    // ---- 行号模型（全平台唯一的坐标真值源）----
+    //
+    //   0 .. output_top-1        session 状态栏（可点击切 tab，贴屏幕顶行）
+    //   output_top .. bottom-1   输出区
+    //   input_row                输入行（光标常驻于此）
+    //   lua_row                  Lua 状态栏（SetStatus 文本，贴屏幕底行）
+    // 底部两行自底向上堆叠，因此高度不足时靠 saturating_sub 收敛到 0，不会下溢 panic；
+    // 顶部状态栏用 saturating_sub 后剩余行自动让给输出区。
+
+    /// session 状态栏首行（贴屏幕顶行，向下占 `status_height` 行）
+    pub fn status_row(&self) -> u16 {
+        0
+    }
+
+    /// 输出区首行（session 状态栏之下）
+    pub fn output_top(&self) -> u16 {
+        self.status_height
+    }
+
+    /// Lua 状态栏首行（贴屏幕底行，即缓冲区末行）
+    pub fn lua_row(&self) -> u16 {
+        self.height.saturating_sub(self.lua_status_height)
+    }
+
+    /// 输入行首行（Lua 状态栏之上，光标常驻于此）
+    pub fn input_row(&self) -> u16 {
+        self.lua_row().saturating_sub(self.input_height)
+    }
+
+    /// 输出区末行（exclusive），即输入行所在行
+    pub fn output_bottom(&self) -> u16 {
+        self.input_row()
     }
 
     /// 将当前输入相关状态保存到 InputState（切换 session 前调用）
@@ -1221,11 +1295,9 @@ impl TerminalState {
         } else {
             panel.x as u16
         };
-        // y=0 是状态栏，面板从 status_height 开始
-        let output_top = self.status_height;
-        let output_bottom = self
-            .height
-            .saturating_sub(self.lua_status_height + self.input_height);
+        // panel.y 相对输出区顶部计（输出区始于 session 状态栏之下），负值相对输出区底部
+        let output_top = self.output_top();
+        let output_bottom = self.output_bottom();
         let abs_y = if panel.y < 0 {
             (output_bottom as i16 + panel.y).max(output_top as i16) as u16
         } else {
@@ -1240,10 +1312,8 @@ impl TerminalState {
     /// `None` 表示该行无面板覆盖
     /// 注意：同一行上多个不重叠面板之间的间隙不会被标记为覆盖（这是已知限制，极为罕见）
     fn panel_coverage_mask(&self) -> Vec<Option<(u16, u16)>> {
-        let output_top = self.status_height;
-        let output_bottom = self
-            .height
-            .saturating_sub(self.lua_status_height + self.input_height);
+        let output_top = self.output_top();
+        let output_bottom = self.output_bottom();
         let output_h = (output_bottom.saturating_sub(output_top)) as usize;
         let mut mask = vec![None; output_h];
 
@@ -1348,7 +1418,7 @@ impl Terminal {
         // 先扣减保留列，避免右对齐的 logo/面板被截断（Windows Terminal 与非 Windows 不扣减）。
         // 尺寸保底：异常环境（如 headless pty 未设置 winsize）可能返回 0，
         // 会导致渲染代码的减法运算溢出 panic；
-        // conhost 高度减 1：永不向缓冲区末行写入，避免触发视口上滚顶出状态栏
+        // 高度加工统一走 usable_height（当前为恒等：缓冲区末行由底行 Lua 状态栏承载）
         let width = usable_width(raw_w).max(20);
         let height = usable_height(raw_h).max(5);
         // 启用鼠标捕获（跨平台标准方式）
@@ -1404,7 +1474,7 @@ impl Terminal {
         )?;
         // [Windows conhost] 备用屏缓冲可能拥有独立的输出模式，切屏后再次关闭
         // ENABLE_WRAP_AT_EOL_OUTPUT：行末继续写入自动换行，在末行会升级为物理滚动，
-        // 把备用屏内容（含顶部状态栏）顶出。本应用全用绝对坐标渲染，无需自动换行。
+        // 把整屏内容（含底行状态栏）顶出。本应用全用绝对坐标渲染，无需自动换行。
         #[cfg(windows)]
         {
             extern "system" {
@@ -1420,7 +1490,7 @@ impl Terminal {
                 }
             }
         }
-        // 视口钉顶：确保第 0 行（状态栏）始终在可见区域内（根因修复）
+        // 视口钉顶：确保视口锁在缓冲区顶部，绝对坐标与屏幕行号一致（根因修复）
         #[cfg(windows)]
         pin_viewport_top();
         self.refresh_all(&mut stdout)?;
@@ -1430,65 +1500,77 @@ impl Terminal {
         Ok(())
     }
 
-    /// 完整刷新屏幕（包括状态栏 + 输出区 + 面板 + 输入行）
-    fn refresh_all(&self, stdout: &mut io::Stdout) -> io::Result<()> {
-        // session 状态栏（顶部）
-        if let Some(ref bar) = self.state.status_bar_cache {
-            queue!(stdout, cursor::MoveTo(0, 0))?;
-            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-            queue!(stdout, Print(bar))?;
-        }
-
-        self.draw_output_area(stdout)?;
-        self.draw_panels(stdout)?;
-
-        // Lua 状态栏（输出区下方、输入行上方）
-        let lua_bar_y = self
-            .state
-            .height
-            .saturating_sub(self.state.input_height + self.state.lua_status_height);
-        if let Some(ref text) = self.state.lua_status_cache {
-            queue!(stdout, cursor::MoveTo(0, lua_bar_y))?;
-            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-            queue!(stdout, Print(text))?;
-        } else {
-            queue!(stdout, cursor::MoveTo(0, lua_bar_y))?;
-            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-        }
-
-        self.draw_input_line(stdout)?;
-        stdout.flush()?;
-        // 第 0 行守卫（全屏重绘路径）：本次重绘自身的写入也可能触发滚动，
-        // 把刚画好的第 0 行顶出；同样无条件覆写一次。
+    /// 把缓存的 session 状态栏画到其所在行（屏幕顶行）。
+    ///
+    /// 不清行、直接覆写并用空格补齐行宽，因此可每帧无条件调用：意外的整屏上滚或
+    /// reflow 若损坏了顶行，下一帧即自愈（视口偏移另由 `pin_viewport_top` 处理）。
+    fn queue_status_bar(&self, stdout: &mut io::Stdout) -> io::Result<()> {
         if let Some(ref bar) = self.state.status_bar_cache {
             let pad = (self.state.width as usize).saturating_sub(visible_width(bar));
-            queue!(stdout, cursor::MoveTo(0, 0))?;
+            queue!(stdout, cursor::MoveTo(0, self.state.status_row()))?;
             queue!(stdout, Print(bar))?;
             if pad > 0 {
                 queue!(stdout, Print(" ".repeat(pad)))?;
             }
         }
+        Ok(())
+    }
+
+    /// 把缓存的 Lua 状态栏（SetStatus 文本）画到屏幕底行，整行蓝底白字高亮。
+    ///
+    /// 底行是全平台唯一被 ANSI 写入的缓冲区末行，因此：
+    /// ① 无条件覆写（即使无文本也要写空白）——意外的滚动/reflow 损坏底行时下一帧自愈；
+    /// ② 用空格补齐而不发 `ESC[2K`，写入本身永不伴随 LF，配合已关闭的
+    ///    `ENABLE_WRAP_AT_EOL_OUTPUT` 不会升级为整屏上滚；
+    /// ③ 写完必须紧跟一次光标重定位（由后续 `draw_input_line` 收尾）以消除行末
+    ///    wrap-pending 挂起，否则后续任何 LF 会触发上滚。
+    fn queue_lua_bar(&self, stdout: &mut io::Stdout) -> io::Result<()> {
+        let width = self.state.width as usize;
+        let text = self.state.lua_status_cache.as_deref().unwrap_or("");
+        let pad = width.saturating_sub(visible_width(text));
+        queue!(stdout, cursor::MoveTo(0, self.state.lua_row()))?;
+        if text.is_empty() {
+            // 无 SetStatus 文本：不把底行刷成蓝带，用默认底色空白清行
+            if pad > 0 {
+                queue!(stdout, Print(" ".repeat(pad)))?;
+            }
+        } else {
+            queue!(stdout, Print(force_blue_bg(text)))?;
+            if pad > 0 {
+                queue!(stdout, Print(" ".repeat(pad)))?;
+            }
+            queue!(stdout, Print("\x1b[0m"))?;
+        }
+        Ok(())
+    }
+
+    /// 完整刷新屏幕（包括状态栏 + 输出区 + 面板 + 输入行）
+    fn refresh_all(&self, stdout: &mut io::Stdout) -> io::Result<()> {
+        // session 状态栏（屏幕顶行）
+        self.queue_status_bar(stdout)?;
+
+        self.draw_output_area(stdout)?;
+        self.draw_panels(stdout)?;
+
+        // Lua 状态栏（屏幕底行）守卫：本次重绘自身的写入也可能触发滚动而顶偏底行。
+        // 放在 draw_input_line 之前，让输入行收尾把光标移回输入行，不滞留末行。
+        self.queue_lua_bar(stdout)?;
+        self.draw_input_line(stdout)?;
         stdout.flush()?;
         Ok(())
     }
 
-    /// 仅刷新输出区、面板和输入行（不重绘状态栏，避免闪烁）
+    /// 仅刷新输出区、面板、底行 Lua 状态栏和输入行（状态栏不清行、无闪烁）
     fn refresh_output_area(&self, stdout: &mut io::Stdout) -> io::Result<()> {
         self.draw_output_area(stdout)?;
         self.draw_panels(stdout)?;
+        // 底行守卫（无条件覆写）：服务端 ESC[2J] 在 conhost 中执行为整屏上滚、
+        // 窗口缩放触发 reflow，都会把底行物理顶偏；而本路径为防闪烁原本不重绘
+        // 状态栏，导致底行永久损坏。进程内读屏校验不可靠，改为每帧用缓存文本
+        // 直接覆写底行（补齐空格、无闪烁），任何滚动下一帧即自愈。
+        self.queue_lua_bar(stdout)?;
+        // 放在最后：把光标移出底行，消除底行行末写入留下的 wrap-pending 挂起
         self.draw_input_line(stdout)?;
-        // 第 0 行守卫（无条件覆写）：服务端 ESC[2J] 在 conhost 中执行为整屏上滚、
-        // 窗口缩放触发 reflow，都会把顶部状态栏物理顶出；而本路径为防闪烁原本不重绘
-        // 状态栏，导致第 0 行永久损坏。进程内读屏校验不可靠，改为每帧用缓存状态栏
-        // 直接覆写第 0 行（不清行、无闪烁），任何滚动下一帧即自愈。
-        if let Some(ref bar) = self.state.status_bar_cache {
-            let pad = (self.state.width as usize).saturating_sub(visible_width(bar));
-            queue!(stdout, cursor::MoveTo(0, 0))?;
-            queue!(stdout, Print(bar))?;
-            if pad > 0 {
-                queue!(stdout, Print(" ".repeat(pad)))?;
-            }
-        }
         stdout.flush()?;
         Ok(())
     }
@@ -1534,7 +1616,7 @@ impl Terminal {
 
         // 渲染
         for (i, seg) in to_render.iter().enumerate() {
-            let row = self.state.status_height + i as u16;
+            let row = self.state.output_top() + i as u16;
             match panel_mask.get(i).copied().flatten() {
                 None => {
                     // 无面板覆盖：整行清除并打印（与原逻辑一致）
@@ -1568,7 +1650,7 @@ impl Terminal {
 
         // 清除剩余行
         for i in to_render.len()..output_height {
-            let row = self.state.status_height + i as u16;
+            let row = self.state.output_top() + i as u16;
             match panel_mask.get(i).copied().flatten() {
                 None => {
                     queue!(stdout, cursor::MoveTo(0, row))?;
@@ -1598,10 +1680,7 @@ impl Terminal {
             return Ok(());
         }
 
-        let output_bottom = self
-            .state
-            .height
-            .saturating_sub(self.state.lua_status_height + self.state.input_height);
+        let output_bottom = self.state.output_bottom();
         let term_width = self.state.width;
 
         for panel in &self.state.panels {
@@ -1662,7 +1741,7 @@ impl Terminal {
         Ok(())
     }
 
-    /// 绘制 session 状态栏（顶部）
+    /// 绘制 session 状态栏（屏幕顶行）
     pub fn draw_status_bar(
         &mut self,
         stdout: &mut io::Stdout,
@@ -1670,15 +1749,10 @@ impl Terminal {
         foreground_id: SessionId,
     ) -> io::Result<()> {
         self.state.update_status_bar(sessions, foreground_id);
-        if let Some(ref bar) = self.state.status_bar_cache {
-            queue!(stdout, cursor::MoveTo(0, 0))?;
-            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-            queue!(stdout, Print(bar))?;
-        }
-        Ok(())
+        self.queue_status_bar(stdout)
     }
 
-    /// 绘制 Lua 状态栏（输出区下方、输入行上方）
+    /// 绘制 Lua 状态栏（屏幕底行）
     pub fn draw_lua_status_bar(
         &mut self,
         stdout: &mut io::Stdout,
@@ -1686,21 +1760,7 @@ impl Terminal {
         foreground_id: SessionId,
     ) -> io::Result<()> {
         self.state.update_lua_status_bar(sessions, foreground_id);
-        let lua_bar_y = self
-            .state
-            .height
-            .saturating_sub(self.state.input_height + self.state.lua_status_height);
-        if let Some(ref text) = self.state.lua_status_cache {
-            queue!(stdout, cursor::MoveTo(0, lua_bar_y))?;
-            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-            queue!(stdout, style::SetForegroundColor(style::Color::DarkGreen))?;
-            queue!(stdout, Print(text))?;
-            queue!(stdout, style::ResetColor)?;
-        } else {
-            queue!(stdout, cursor::MoveTo(0, lua_bar_y))?;
-            queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-        }
-        Ok(())
+        self.queue_lua_bar(stdout)
     }
 
     /// 追加一行输出（仅刷新输出区 + 输入行，不重绘状态栏避免闪烁）
@@ -1713,7 +1773,7 @@ impl Terminal {
 
     /// 绘制输入行
     pub fn draw_input_line(&self, stdout: &mut io::Stdout) -> io::Result<()> {
-        let input_y = self.state.height.saturating_sub(1);
+        let input_y = self.state.input_row();
         queue!(stdout, cursor::MoveTo(0, input_y))?;
         queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
         queue!(stdout, SetForegroundColor(Color::Green), Print("> "))?;
@@ -1763,7 +1823,7 @@ impl Terminal {
     pub fn resize(&mut self, width: u16, height: u16) {
         // 尺寸保底：与 Terminal::new 保持一致，防止拖拽/最大化过程中
         // conhost 报告极小的中间尺寸导致渲染代码减法下溢而崩溃；
-        // 高度同样走 usable_height（conhost 末行避让）
+        // 高度同样走 usable_height（当前为恒等加工，末行由底行 Lua 状态栏占用）
         self.state.width = usable_width(width).max(20);
         self.state.height = usable_height(height).max(5);
         // 视口钉顶：缩放会重置视口位置，同时防止 conhost 再次下移视口使第 0 行不可见
@@ -1872,9 +1932,7 @@ impl Drop for Terminal {
 impl TerminalState {
     pub fn panel_hit_test(&self, mouse_col: u16, mouse_row: u16) -> Option<(String, String)> {
         // 与 draw_panels 保持一致的裁剪：不检测输出区以外的点击
-        let output_bottom = self
-            .height
-            .saturating_sub(self.lua_status_height + self.input_height);
+        let output_bottom = self.output_bottom();
         for panel in &self.panels {
             let (abs_x, abs_y) = self.resolve_panel_position(panel);
             // 面板完全在输出区外则跳过
@@ -1906,6 +1964,11 @@ impl TerminalState {
 
 /// 获取状态栏可点击区域
 impl Terminal {
+    /// session 状态栏所在行（屏幕顶行），供鼠标命中测试使用
+    pub fn status_row(&self) -> u16 {
+        self.state.status_row()
+    }
+
     pub fn click_regions(&self) -> &[ClickRegion] {
         &self.state.status_bar_regions
     }
@@ -2181,6 +2244,100 @@ mod tests {
     fn test_state_output_height() {
         let state = TerminalState::new(80, 24);
         assert_eq!(state.output_height(), 21); // 24 - 1 (status) - 1 (lua_status) - 1 (input)
+    }
+
+    #[test]
+    fn test_row_layout_accessors() {
+        // 行号模型：顶行 session 状态栏，其下输出区，底部自下往上为 Lua 状态栏、输入行
+        let state = TerminalState::new(80, 24);
+        assert_eq!(state.status_row(), 0); // session 状态栏贴屏幕顶行
+        assert_eq!(state.output_top(), 1);
+        assert_eq!(state.input_row(), 22);
+        assert_eq!(state.lua_row(), 23); // 贴屏幕底行（不再有末行避让）
+        assert_eq!(state.output_bottom(), 22);
+        // 输出区行数必须与 output_height() 相等，否则有行被漏画或重叠
+        assert_eq!(
+            (state.output_bottom() - state.output_top()) as usize,
+            state.output_height() as usize
+        );
+        // 各区互不重叠且按序上升：status < output <= input < lua
+        assert!(state.status_row() <= state.output_top());
+        assert!(state.output_top() < state.output_bottom());
+        assert!(state.output_bottom() <= state.input_row());
+        assert!(state.input_row() < state.lua_row());
+    }
+
+    #[test]
+    fn test_row_layout_min_size_no_underflow() {
+        // resize 保底下限 20x5：各级仍可完整容纳
+        let tiny = TerminalState::new(20, 5);
+        assert_eq!(tiny.status_row(), 0);
+        assert_eq!(tiny.output_top(), 1);
+        assert_eq!(tiny.input_row(), 3);
+        assert_eq!(tiny.lua_row(), 4); // 底行正是缓冲区末行（height-1）
+        assert_eq!(tiny.output_bottom(), 3);
+        assert_eq!(tiny.output_height(), 2);
+        // 高度不足 3 行时 saturating_sub 收敛到 0，不得 panic 或回绕
+        let zero = TerminalState::new(80, 0);
+        assert_eq!(zero.status_row(), 0);
+        assert_eq!(zero.input_row(), 0);
+        assert_eq!(zero.lua_row(), 0);
+        assert_eq!(zero.output_height(), 0);
+        let one = TerminalState::new(80, 1);
+        assert_eq!(one.status_row(), 0);
+        assert_eq!(one.input_row(), 0);
+        assert_eq!(one.lua_row(), 0);
+        // 退化尺寸下输出区可能为空，行数计算必须走 saturating_sub 不下溢
+        assert_eq!(
+            one.output_bottom().saturating_sub(one.output_top()),
+            one.output_height()
+        );
+    }
+
+    // === force_blue_bg（底行蓝底重涂）测试 ===
+
+    #[test]
+    fn test_force_blue_bg_plain_text() {
+        // 无转义文本：行首加亮白+蓝底，正文原样，不在尾部复位（留给调用方补空白后统一 reset）
+        let out = force_blue_bg("hp 100/100");
+        assert!(out.starts_with("\x1b[1;37;44m"));
+        assert!(out.ends_with("hp 100/100"));
+        assert!(!out.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn test_force_blue_bg_survives_reset() {
+        // SetStatus 文本自带 ESC[0m：每个 SGR 后必须补回蓝底，否则背景被 reset 擦掉
+        let out = force_blue_bg("\x1b[0m血\x1b[1;31m低血\x1b[0m");
+        assert_eq!(AnsiParser::strip_ansi(&out), "血低血");
+        for (pos, _) in out.match_indices("\x1b[0m") {
+            let after = &out[pos + 4..];
+            assert!(
+                after.starts_with("\x1b[44m"),
+                "reset 后应紧跟蓝底补写: {out:?}"
+            );
+        }
+        // 前景色意图保留（低血仍为亮红）
+        assert!(out.contains("\x1b[1;31m"));
+    }
+
+    #[test]
+    fn test_force_blue_bg_keeps_visible_width() {
+        // 追加的转义序列可见宽度为 0，不影响行宽补齐
+        let text = "姓名 渡伏 ★统:4分 死亡:0";
+        assert_eq!(
+            visible_width(&force_blue_bg(text)),
+            visible_width(text),
+            "重涂不应改变可见列数"
+        );
+    }
+
+    #[test]
+    fn test_force_blue_bg_drops_truncated_escape() {
+        // 被列宽截断的残缺转义（无 'm' 终结）不得退化成字面文本
+        let out = force_blue_bg("abc\x1b[1;3");
+        assert_eq!(out, "\x1b[1;37;44mabc");
+        assert_eq!(AnsiParser::strip_ansi(&out), "abc");
     }
 
     #[test]
@@ -3552,14 +3709,14 @@ mod tests {
         };
         let (abs_x, abs_y) = state.resolve_panel_position(&panel);
         assert_eq!(abs_x, 5);
-        // y is relative to status_height (1)
+        // 输出区从第 1 行起（顶行为 session 状态栏），panel.y 相对输出区顶部：y=2 → abs_y=3
         assert_eq!(abs_y, 3);
     }
 
     #[test]
     fn test_resolve_panel_position_negative_y() {
         let state = TerminalState::new(80, 24);
-        // output_bottom = 24 - 1(lua_status) - 1(input) = 22
+        // output_bottom = input_row = 24 - 1(lua_status) - 1(input) = 22
         let panel = Panel {
             name: "test".to_string(),
             x: 0,
@@ -3805,8 +3962,8 @@ mod tests {
     #[test]
     fn test_panel_mask_negative_y() {
         let mut state = TerminalState::new(80, 24);
-        // output_bottom = 24 - 1(lua) - 1(input) = 22
-        // y=-5 → abs_y = 22 - 5 = 17, output idx = 17 - 1(status) = 16
+        // output_bottom = 24 - 1(lua) - 1(input) = 22；session 状态栏占顶行，output_top = 1
+        // y=-5 → abs_y = 22 - 5 = 17, output idx = 17 - 1(output_top) = 16
         state.set_panel("stat", -20, -5, 20, 3, vec![], vec![]);
         let mask = state.panel_coverage_mask();
         for (i, m) in mask.iter().enumerate().take(16) {

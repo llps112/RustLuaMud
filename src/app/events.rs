@@ -40,8 +40,8 @@ impl App {
                 return Ok(());
             }
 
-            // 2. 再检查状态栏 tab（仅 row=0）
-            if mouse.row == 0 {
+            // 2. 再检查状态栏 tab（session 状态栏固定在屏幕顶行，行号由布局给出）
+            if mouse.row == self.terminal.status_row() {
                 let x = mouse.column;
                 for region in self.terminal.click_regions() {
                     if x >= region.start_x && x < region.end_x {
