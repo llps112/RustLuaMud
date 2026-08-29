@@ -81,7 +81,7 @@ class-utf8-old/               — 旧版 Lua 脚本存档（UTF-8）
 class-gbk-old/                — 旧版 Lua 脚本存档（GBK）
 .trae/documents/              — 历史技术方案文档（76 个文件）
 .qoder/rules/                 — 项目开发规则文件（权威源：编码规范、API 兼容、Git 工作流等）
-.trae/rules/                  — 已迁移，仅保留指向 .qoder/rules/ 的重定向说明
+.trae/rules/                  — 符号链接，指向 .qoder/rules/（供 Trae 复用同一套规则）
 ```
 
 ## 构建与测试命令

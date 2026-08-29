@@ -425,7 +425,7 @@ RustLuaMud/
 ├── .github/workflows/         # GitHub Actions CI/CD
 ├── .gitee/workflows/          # Gitee Go CI/CD
 ├── .qoder/rules/              # 开发规范（权威源）
-├── .trae/rules/               # 已迁移，指向 .qoder/rules/
+├── .trae/rules/               # 符号链接，指向 .qoder/rules/
 ├── Cargo.toml                 # Rust 项目配置
 └── README.md                  # 项目说明
 ```
