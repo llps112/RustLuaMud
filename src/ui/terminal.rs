@@ -2,7 +2,7 @@ use crossterm::{
     cursor,
     event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers},
     execute, queue,
-    style::{self, Color, Print, SetForegroundColor},
+    style::{self, Print},
     terminal::{self, ClearType},
 };
 use std::io::{self, Write};
@@ -77,7 +77,17 @@ fn sgr_is_reset(seq: &str) -> bool {
         .strip_prefix("\x1b[")
         .and_then(|s| s.strip_suffix('m'))
         .unwrap_or("");
-    inner.split(';').all(|p| p.is_empty() || p == "0")
+    sgr_params_is_reset(inner)
+}
+
+/// 同上，但输入已是 `ESC[` 与 `m` 之间的参数表。抽出来供底行重涂复用 ——
+/// 只判 `params == "0"` 会漏掉 `00` / `0;0` / 空参，而它们同样是全量 reset。
+/// 逐个参数按数值判零（而非字面比 `"0"`），才能同时接住零填充形式；
+/// 空参按 ANSI 惯例默认为 0，非数字（如 `?`、`xx`）不算 reset。
+fn sgr_params_is_reset(params: &str) -> bool {
+    params
+        .split(';')
+        .all(|p| p.parse::<u8>().map_or(p.is_empty(), |v| v == 0))
 }
 
 /// 扫描行内所有 SGR 序列，任一为重置语义即视为含重置（兼容 \x1b[0;0m 等变体）
@@ -614,18 +624,116 @@ fn build_lua_status_text(
     String::new()
 }
 
-/// 把底行状态栏文本重涂为蓝底：行首强制“亮白前景 + 蓝背景”，并保留文本原有的
-/// SGR 意图（脚本常用颜色标记低血/告警），但每个 SGR 后紧跟一道 `ESC[44m`。
-/// 必要性：`SetStatus` 文本普遍自带 `ESC[0m`，而 reset 会把**前景与背景一起**擦回
-/// 默认属性，只在行首设一次背景会从第一个 reset 起失效（表现为蓝底不显示）。
-/// 尾部不复位（由调用方补齐空格后统一 `ESC[0m`），使整行背景连空白部分都是蓝的。
+/// 底行状态栏的行首样式：灰白底 + 黑前景（conhost `#AAAAAA` / `#000000`）。
+/// 刻意与顶行的蓝底错开 —— 「蓝 = 当前会话 tab」的语义只留给顶行；底行改走
+/// 「亮底黑字」，整行比屏幕其余部分亮一档，分量来自明度而非色相，长时间盯不刺。
+/// 行首带 `0`（全量复位）：本行可能在输出流任意属性残留的状态下被写入，
+/// 且下文用本常量整体替换文本里的裸 reset——不带 `0` 就清不掉 bold/underline/reverse。
+const LUA_BAR_STYLE: &str = "\x1b[0;30;47m";
+/// 每个 SGR 之后补回的底色。`SetStatus` 文本普遍自带 `ESC[0m`，而 reset 会把
+/// **前景与背景一起**擦回默认属性，只在行首设一次背景会从第一个 reset 起失效。
+const LUA_BAR_BG: &str = "\x1b[47m";
+/// 底行是亮底还是暗底：决定前景加固表的映射方向（两者完全相反，见 `fg_fix`）。
+const LUA_BAR_LIGHT_BG: bool = true;
+
+/// 亮底（`47` 灰白 `#AAAAAA`）上的前景加固表。被改写的都是与底色明度接近、
+/// 印出来直接糊成一片的码，映射尽量保持同色系：白/亮白 → 黑，青/亮青 → 深蓝。
+/// 暗黄 `33`（`#AAAAAA`）与灰白底**同值**，是唯一无法靠“变暗”救回的，只能反向提到亮黄；
+/// 暗灰 `90`（`#808080`）对 `#AAAAAA` 仅 ≈1.7:1，同样按黑处理。
+/// 扩展色（`38;5;N` / `38;2;r;g;b`）**有意不加固**：conhost 根本不解析它们（落到默认
+/// 前景，由行首样式接管），而任何猜测式的改写都会静默换成另一个颜色，故只跳不改。
+const FG_FIX_ON_LIGHT_BG: &[(&str, &str)] = &[
+    ("37", "30"),
+    ("97", "30"),
+    ("36", "34"),
+    ("96", "34"),
+    ("33", "93"),
+    ("90", "30"),
+];
+/// 暗底上的反向加固：黑/暗灰在深底上不可见，一律提到亮白/亮灰。
+/// 保留这张表是为了换底色时不必重写逻辑 —— 改 `LUA_BAR_LIGHT_BG` 即切换方向。
+const FG_FIX_ON_DARK_BG: &[(&str, &str)] = &[("30", "37"), ("90", "97")];
+
+/// 查一个前景码在当前底色下应该被换成什么（`None` = 本来就读得清，不动）。
+fn fg_fix(code: &str) -> Option<&'static str> {
+    let table = if LUA_BAR_LIGHT_BG {
+        FG_FIX_ON_LIGHT_BG
+    } else {
+        FG_FIX_ON_DARK_BG
+    };
+    table
+        .iter()
+        .copied()
+        .find(|(from, _)| *from == code)
+        .map(|(_, to)| to)
+}
+
+/// 按 `fg_fix` 改写 SGR 参数表里的前景码，其余参数（下划线、反选、背景等）原样保留。
+/// 扩展色序列 `38;5;N` / `48;2;r;g;b` 的分量按长度整体跳过，避免把调色板索引
+/// （例如 `38;5;37` 里的 `37`）误认成独立前景码而改写 —— 那会静默换成另一个颜色。
+fn remap_lua_bar_fg(params: &str) -> String {
+    if params.is_empty() {
+        return String::new();
+    }
+    let mut parts: Vec<&str> = params.split(';').collect();
+    let mut darkened = false;
+    let mut k = 0usize;
+    while k < parts.len() {
+        match parts[k] {
+            "38" | "48" => {
+                // 38/48 之后是模式字节：5=调色板(1 个分量) 2=RGB(3 个分量)
+                k += match parts.get(k + 1).copied() {
+                    Some("5") => 3,
+                    Some("2") => 5,
+                    _ => 2,
+                };
+                continue;
+            }
+            code => {
+                if let Some(to) = fg_fix(code) {
+                    parts[k] = to;
+                    // conhost 的 bold(`1`) 只作用于前景：`1;30` 实际是亮黑 #808080 而非黑，
+                    // 压暗必须连 `1` 一起去掉，否则等于没压（仅亮底模式需要，目标是亮码则不动）
+                    if LUA_BAR_LIGHT_BG && !to.starts_with('9') {
+                        darkened = true;
+                    }
+                }
+            }
+        }
+        k += 1;
+    }
+    if darkened {
+        parts.retain(|p| *p != "1");
+    }
+    parts.join(";")
+}
+
+/// 把一个完整 SGR 序列（不含 `ESC[`/`m` 之外的内容）重写成「保住前景意图、且底色不丢」的形式。
+fn restyle_sgr(params: &str) -> String {
+    // 全量 reset（含 `00` / `0;0` / `ESC[m` 等变体）：整段换回行首样式，
+    // 等价于「先复位再重新上色」，比原样输出再补更省字节
+    if sgr_params_is_reset(params) {
+        return LUA_BAR_STYLE.to_string();
+    }
+    // 形如 `0;31` 的复合序列不做整体替换（会丢掉脚本的显式前景），只补底色
+    let mut out = String::with_capacity(params.len() + LUA_BAR_BG.len() + 4);
+    out.push_str("\x1b[");
+    out.push_str(&remap_lua_bar_fg(params));
+    out.push('m');
+    out.push_str(LUA_BAR_BG);
+    out
+}
+
+/// 把底行状态栏文本重涂为「灰白底黑字」，同时保留文本原有的前景色意图
+/// （脚本常用颜色标记低血/告警）。
+///
+/// 尾部不复位（由调用方补齐空格后统一 `ESC[0m`），使整行连空白部分都是底色 ——
+/// 「整行铺满」正是这条状态栏分量感的来源。
 /// 纯逻辑、无 IO，可单测；追加的转义序列可见宽度为 0，不影响列对齐。
-fn force_blue_bg(text: &str) -> String {
-    const ROW_START: &str = "\x1b[1;37;44m";
-    const REASSERT_BG: &str = "\x1b[44m";
+fn force_bar_bg(text: &str) -> String {
     let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len() + ROW_START.len() + 16);
-    out.push_str(ROW_START);
+    let mut out = String::with_capacity(text.len() + LUA_BAR_STYLE.len() + 16);
+    out.push_str(LUA_BAR_STYLE);
     let mut i = 0usize;
     while i < bytes.len() {
         if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
@@ -633,16 +741,18 @@ fn force_blue_bg(text: &str) -> String {
             while j < bytes.len() && !(0x40..=0x7e).contains(&bytes[j]) {
                 j += 1;
             }
-            // 完整 SGR（终结字节 'm'）：原样输出后补回蓝底
-            if j < bytes.len() && bytes[j] == b'm' {
-                out.push_str(&text[i..=j]);
-                out.push_str(REASSERT_BG);
+            // 完整 CSI：只重写 SGR（终结字节 'm'），其余整条丢弃
+            if j < bytes.len() {
+                if bytes[j] == b'm' {
+                    out.push_str(&restyle_sgr(&text[i + 2..j]));
+                }
+                // 非 SGR 的 CSI（如 `\x1b[2J`、`\x1b[?25l`）连终结字节一起丢，
+                // 否则 'J' / 'l' 会被当成正文字符打印到状态栏里
                 i = j + 1;
                 continue;
             }
-            // 残缺转义（如被列宽截断）：丢掉 `ESC` 本身，避免把后续字串当文本打印
-            i = j.min(bytes.len());
-            continue;
+            // 残缺转义（如被列宽截断，无终结字节）：丢弃尾部，避免退化成字面文本
+            break;
         }
         let c = text[i..].chars().next().unwrap();
         out.push(c);
@@ -1516,7 +1626,7 @@ impl Terminal {
         Ok(())
     }
 
-    /// 把缓存的 Lua 状态栏（SetStatus 文本）画到屏幕底行，整行蓝底白字高亮。
+    /// 把缓存的 Lua 状态栏（SetStatus 文本）画到屏幕底行，整行灰白底黑字高亮。
     ///
     /// 底行是全平台唯一被 ANSI 写入的缓冲区末行，因此：
     /// ① 无条件覆写（即使无文本也要写空白）——意外的滚动/reflow 损坏底行时下一帧自愈；
@@ -1530,12 +1640,12 @@ impl Terminal {
         let pad = width.saturating_sub(visible_width(text));
         queue!(stdout, cursor::MoveTo(0, self.state.lua_row()))?;
         if text.is_empty() {
-            // 无 SetStatus 文本：不把底行刷成蓝带，用默认底色空白清行
+            // 无 SetStatus 文本：不把底行刷成色带，用默认底色空白清行
             if pad > 0 {
                 queue!(stdout, Print(" ".repeat(pad)))?;
             }
         } else {
-            queue!(stdout, Print(force_blue_bg(text)))?;
+            queue!(stdout, Print(force_bar_bg(text)))?;
             if pad > 0 {
                 queue!(stdout, Print(" ".repeat(pad)))?;
             }
@@ -1775,9 +1885,20 @@ impl Terminal {
     pub fn draw_input_line(&self, stdout: &mut io::Stdout) -> io::Result<()> {
         let input_y = self.state.input_row();
         queue!(stdout, cursor::MoveTo(0, input_y))?;
+        // 清行前先落回默认属性：conhost 的 ESC[2K 用「当前背景」填充，
+        // 若上一处写入残留了状态栏底色，整行会被擦成色带
+        queue!(stdout, Print("\x1b[0m"))?;
         queue!(stdout, terminal::Clear(ClearType::CurrentLine))?;
-        queue!(stdout, SetForegroundColor(Color::Green), Print("> "))?;
-        queue!(stdout, style::ResetColor)?;
+        // 手写 16 色原始转义，不用 crossterm 的 SetForegroundColor(Green)：
+        // ① start_mud.bat 设了 NO_COLOR=1，crossterm 的 `Colored::fmt` 会提前 return，
+        //    但外层 `write!(f, csi!("{}m"), ..)` 照样把头尾写出 —— 实际发的是 `\x1b[m`，
+        //    一条完整的全量 reset：绿色丢了不说，连整行属性一起被擦回默认（探针实测
+        //    attr0=0007 即此成因；修好后应为 0002）；
+        // ② 即使去掉 NO_COLOR，它把 Color::Green 编码为 `38;5;10`（256 色形式），
+        //    legacy conhost 不解析 38;5;N，同样丢色。
+        // 与 build_status_bar / force_bar_bg 一致，UI 侧上色统一走原始 16 色转义。
+        // 收尾用 `39m`（仅复位前景）而非 `0m`，不动可能存在的其他属性。
+        queue!(stdout, Print("\x1b[32m> \x1b[39m"))?;
 
         let (display_str, cursor_x) = self.state.input_display();
         if self.state.text_selected && !display_str.is_empty() {
@@ -2294,50 +2415,142 @@ mod tests {
         );
     }
 
-    // === force_blue_bg（底行蓝底重涂）测试 ===
+    // === force_bar_bg / remap_lua_bar_fg（底行灰白底重涂）测试 ===
 
     #[test]
-    fn test_force_blue_bg_plain_text() {
-        // 无转义文本：行首加亮白+蓝底，正文原样，不在尾部复位（留给调用方补空白后统一 reset）
-        let out = force_blue_bg("hp 100/100");
-        assert!(out.starts_with("\x1b[1;37;44m"));
+    fn test_force_bar_bg_plain_text() {
+        // 无转义文本：行首加黑字+灰白底（带全量复位），正文原样，
+        // 不在尾部复位（留给调用方补空白后统一 reset）
+        let out = force_bar_bg("hp 100/100");
+        assert!(out.starts_with("\x1b[0;30;47m"));
         assert!(out.ends_with("hp 100/100"));
         assert!(!out.ends_with("\x1b[0m"));
     }
 
     #[test]
-    fn test_force_blue_bg_survives_reset() {
-        // SetStatus 文本自带 ESC[0m：每个 SGR 后必须补回蓝底，否则背景被 reset 擦掉
-        let out = force_blue_bg("\x1b[0m血\x1b[1;31m低血\x1b[0m");
+    fn test_force_bar_bg_reset_restores_row_style() {
+        // SetStatus 文本自带 ESC[0m：直接换回行首样式，不留下会擦掉底色的裸 reset
+        let out = force_bar_bg("\x1b[0m血\x1b[1;31m低血\x1b[0m");
         assert_eq!(AnsiParser::strip_ansi(&out), "血低血");
-        for (pos, _) in out.match_indices("\x1b[0m") {
-            let after = &out[pos + 4..];
-            assert!(
-                after.starts_with("\x1b[44m"),
-                "reset 后应紧跟蓝底补写: {out:?}"
-            );
-        }
-        // 前景色意图保留（低血仍为亮红）
-        assert!(out.contains("\x1b[1;31m"));
+        assert!(
+            !out.contains("\x1b[0m"),
+            "裸 reset 已全部换为行首样式: {out:?}"
+        );
+        // 行首 + 两个文本内 reset → 三处重新上色
+        assert_eq!(out.matches(LUA_BAR_STYLE).count(), 3);
+        // 前景色意图保留（低血仍为亮红），且其后紧跟底色补写
+        assert!(out.contains("\x1b[1;31m\x1b[47m"));
     }
 
     #[test]
-    fn test_force_blue_bg_keeps_visible_width() {
+    fn test_force_bar_bg_handles_reset_variants() {
+        // `00` / `0;0` / `ESC[m` / 单独 `0` 都是全量 reset，必须同样换回行首样式；
+        // 漏一个就会只补底色、让前景退回 conhost 默认灰（#C0C0C0 压 #AAAAAA 直接看不见）
+        let out = force_bar_bg("\x1b[00m甲\x1b[0;0m乙\x1b[m丙\x1b[0m丁");
+        assert_eq!(AnsiParser::strip_ansi(&out), "甲乙丙丁");
+        assert_eq!(out.matches(LUA_BAR_STYLE).count(), 5, "{out:?}");
+        for raw in ["\x1b[00m", "\x1b[0;0m", "\x1b[m", "\x1b[0m"] {
+            assert!(!out.contains(raw), "变体 {raw:?} 未被替换: {out:?}");
+        }
+        // 但 `0;31` 这种复合序列不能整体替掉（会丢显式前景）
+        let keep = force_bar_bg("\x1b[0;31m红");
+        assert_eq!(keep, format!("{LUA_BAR_STYLE}\x1b[0;31m{LUA_BAR_BG}红"));
+    }
+
+    #[test]
+    fn test_force_bar_bg_strips_bold_when_darkening() {
+        // conhost 下 bold 只作用前景：`1;30` 是亮黑 #808080，与灰白底几乎无对比，
+        // 所以压暗时连 `1` 一起去掉
+        let out = force_bar_bg("\x1b[1;37mA\x1b[0mB");
+        assert_eq!(
+            out,
+            format!("{LUA_BAR_STYLE}\x1b[30m{LUA_BAR_BG}A{LUA_BAR_STYLE}B")
+        );
+        // 目标是亮码（33 → 93）时不动 `1`，也不影响未被改写的序列
+        assert_eq!(remap_lua_bar_fg("1;33"), "1;93");
+        assert_eq!(remap_lua_bar_fg("1;91"), "1;91");
+    }
+
+    #[test]
+    fn test_force_bar_bg_fixes_illegible_foregrounds() {
+        // 亮底下：白/亮白与底色无对比 → 黑；青 → 深蓝；暗黄与灰白同值 → 亮黄；暗灰 → 黑
+        let out = force_bar_bg("\x1b[37m白\x1b[97m亮白\x1b[36m青\x1b[33m黄\x1b[90m灰");
+        assert_eq!(AnsiParser::strip_ansi(&out), "白亮白青黄灰");
+        assert_eq!(
+            out.matches("\x1b[30m").count(),
+            3,
+            "37/97/90 应换为黑: {out:?}"
+        );
+        assert!(out.contains("\x1b[34m"), "36 应换为深蓝: {out:?}");
+        assert!(out.contains("\x1b[93m"), "33 应换为亮黄: {out:?}");
+        for raw in ["\x1b[37m", "\x1b[97m", "\x1b[36m", "\x1b[33m", "\x1b[90m"] {
+            assert!(!out.contains(raw), "不可读前景 {raw:?} 应已改写: {out:?}");
+        }
+        // 本来就读得清的码不得被动：亮红/深蓝/黑 均原样，只多了补底的转义
+        let keep = force_bar_bg("\x1b[91m红\x1b[34m蓝\x1b[30m黑");
+        assert_eq!(
+            keep,
+            format!(
+                "{LUA_BAR_STYLE}\x1b[91m{LUA_BAR_BG}红\
+                 \x1b[34m{LUA_BAR_BG}蓝\x1b[30m{LUA_BAR_BG}黑"
+            )
+        );
+    }
+
+    #[test]
+    fn test_remap_lua_bar_fg_skips_extended_color_args() {
+        // 38;5;37 里的 37 是调色板索引，不是前景码，误改会静默换色
+        assert_eq!(remap_lua_bar_fg("38;5;37"), "38;5;37");
+        assert_eq!(remap_lua_bar_fg("48;5;37"), "48;5;37");
+        assert_eq!(remap_lua_bar_fg("48;2;37;97;37"), "48;2;37;97;37");
+        assert_eq!(remap_lua_bar_fg("1;37;97"), "30;30");
+        assert_eq!(remap_lua_bar_fg("37;38;5;37"), "30;38;5;37");
+        assert_eq!(remap_lua_bar_fg(""), "");
+        // 非数字/截断的扩展色分量：按长度跳过即可，不得连带改掉后面的正常前景
+        assert_eq!(remap_lua_bar_fg("38;5;xx"), "38;5;xx");
+        assert_eq!(remap_lua_bar_fg("38"), "38");
+        assert_eq!(remap_lua_bar_fg("38;37"), "38;37");
+    }
+
+    #[test]
+    fn test_sgr_params_is_reset() {
+        // 全量 reset 的各种写法
+        for p in ["", "0", "00", "0;0", ";", "0;00;"] {
+            assert!(sgr_params_is_reset(p), "{p:?} 应判为 reset");
+        }
+        // 带显式前景/非零/非数字 → 不是全量 reset
+        for p in ["0;31", "1", "31", "x", "?", "256"] {
+            assert!(!sgr_params_is_reset(p), "{p:?} 不应判为 reset");
+        }
+    }
+
+    #[test]
+    fn test_force_bar_bg_drops_non_sgr_csi() {
+        // 非 SGR 的 CSI 整条丢弃（连终结字节），不得把 'J' / 'l' 打印到状态栏里
+        let out = force_bar_bg("a\x1b[2Jb\x1b[?25lc");
+        assert_eq!(out, format!("{LUA_BAR_STYLE}abc"));
+        assert_eq!(AnsiParser::strip_ansi(&out), "abc");
+    }
+
+    #[test]
+    fn test_force_bar_bg_keeps_visible_width() {
         // 追加的转义序列可见宽度为 0，不影响行宽补齐
         let text = "姓名 渡伏 ★统:4分 死亡:0";
         assert_eq!(
-            visible_width(&force_blue_bg(text)),
+            visible_width(&force_bar_bg(text)),
             visible_width(text),
             "重涂不应改变可见列数"
         );
     }
 
     #[test]
-    fn test_force_blue_bg_drops_truncated_escape() {
-        // 被列宽截断的残缺转义（无 'm' 终结）不得退化成字面文本
-        let out = force_blue_bg("abc\x1b[1;3");
-        assert_eq!(out, "\x1b[1;37;44mabc");
+    fn test_force_bar_bg_drops_truncated_escape() {
+        // 被列宽截断的残缺转义（无终结字节）不得退化成字面文本
+        let out = force_bar_bg("abc\x1b[1;3");
+        assert_eq!(out, format!("{LUA_BAR_STYLE}abc"));
         assert_eq!(AnsiParser::strip_ansi(&out), "abc");
+        // 尾行就是一个孤立 ESC：也不能崩或泄出字面量
+        assert_eq!(force_bar_bg("abc\x1b"), format!("{LUA_BAR_STYLE}abc\x1b"));
     }
 
     #[test]
