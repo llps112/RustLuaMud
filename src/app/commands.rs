@@ -616,8 +616,13 @@ impl App {
                             return Ok(());
                         }
                     };
+                    // TUI 运行中 stderr 不可见，展开告警须通过终端 UI 展示给玩家，
+                    // 否则环境变量缺失时密码静默置空，只见登录失败无从排查。
+                    let mut warns = Vec::new();
                     let conn_config =
-                        match toml::from_str::<crate::config::ConnectionConfig>(&content) {
+                        match crate::config::ConnectionConfig::from_toml_str_with_warnings(
+                            &content, &mut warns,
+                        ) {
                             Ok(c) => c,
                             Err(e) => {
                                 self.terminal
@@ -625,6 +630,10 @@ impl App {
                                 return Ok(());
                             }
                         };
+                    for w in warns {
+                        self.terminal
+                            .append_output(&format!("[警告] 凭据展开: {}", w))?;
+                    }
 
                     let session_id = match self.manager.add_connection_dynamic(&conn_config) {
                         Ok(id) => id,

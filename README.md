@@ -234,6 +234,7 @@ reconnect_delay_secs = 5
 # connect_delay_ms = 1000
 
 # 登录凭证（自动注入 Lua 变量 char_name / char_password）
+# 支持环境变量占位符避免明文，见下方“凭据安全保存”
 username = "your_character_name"
 password = "your_password"
 
@@ -260,6 +261,48 @@ socks5_port = 1080
 ```
 
 > 如需临时禁用某个角色配置，将文件后缀改为非 `.toml`（如 `.bak`）即可。
+
+### 凭据安全保存（密码不写进配置）
+
+`username` / `password` / `socks5_username` / `socks5_password` 支持环境变量占位符：字段整值写成 `${变量名}` 时，启动时自动替换为同名环境变量的值。分享/备份 profiles 目录时不再携带密码。
+
+两种提供变量的方式：
+
+**方式一：`.env` 文件（推荐，集中管理多个号）**
+
+```bash
+cd profiles
+# Windows: copy .env.example .env    Linux/macOS: cp .env.example .env
+```
+
+编辑 `.env`，一行一个 `变量名=密码`：
+
+```ini
+MUD_MYCHAR_PWD=我的真实密码
+```
+
+角色配置中引用：
+
+```toml
+password = "${MUD_MYCHAR_PWD}"
+```
+
+**方式二：系统环境变量（设一次永久生效，不落在项目目录里）**
+
+```powershell
+setx MUD_MYCHAR_PWD "我的真实密码"   # Windows，新开终端窗口后生效
+```
+
+```bash
+export MUD_MYCHAR_PWD="我的真实密码"  # Linux/macOS，或写入 ~/.bashrc 持久化
+```
+
+规则说明：
+
+- 同名变量已存在时系统环境变量优先，`.env` 不覆盖
+- 变量未提供时启动打印警告并将该字段按空处理（可手动输密码登录），不会把占位符文本发给服务器
+- 密码本体恰好是 `${XXX}` 形状时用 `$` 转义：`password = "$${LITERAL}"` 代表 `${LITERAL}`
+- 修改 `.env` 后需重启客户端生效；`.env` 已被 gitignore 排除，勿外传
 
 ---
 

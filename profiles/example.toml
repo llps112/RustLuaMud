@@ -21,6 +21,15 @@ reconnect_delay_secs = 5
 
 # 登录凭证（启动时自动注入 Lua 变量 char_name / char_password）
 # 留空则不注入，需手动输入或通过 Lua 脚本 setname/setpwd 设置
+#
+# 支持环境变量占位符，避免密码明文写在本文件里（防配置文件外流泄露）：
+#   password = "${MUD_MYCHAR_PWD}"      # 整值形如 ${变量名} 时启动时从环境变量读取
+#   Windows 设置一次永久生效：setx MUD_MYCHAR_PWD "真实密码"（新开终端窗口后生效）
+#   环境变量未设置时该项按空处理并在启动时告警，不会把占位符当密码发送
+#   密码本体恰好长 ${XXX} 样子时，用 $ 转义：password = "$${LITERAL}" 代表 ${LITERAL}
+#
+# 集中管理多个号的密码：推荐把变量写进 profiles\.env 文件（免去 setx），
+# 用法详见同目录的 .env.example，复制为 .env 后填写即可
 username = "your_character_name"
 password = "your_password"
 

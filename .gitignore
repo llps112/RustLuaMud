@@ -9,9 +9,10 @@ logs/
 # Qoder: 忽略本地项目设置，保留 rules/ 供团队共享
 .qoder/settings.local.json
 
-# profiles: 只保留 example.toml
+# profiles: 只保留 example.toml 与凭据文件示例
 profiles/*
 !profiles/example.toml
+!profiles/.env.example
 
 # profiles2: 忽略所有内容
 profiles2/

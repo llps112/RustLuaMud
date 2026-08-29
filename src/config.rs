@@ -120,6 +120,69 @@ pub struct ConnectionConfig {
     pub heartbeat_timeout_secs: u64,
 }
 
+impl ConnectionConfig {
+    /// 从 TOML 文本解析角色配置的统一入口（启动批量加载与运行时 /profile load 均须走此），
+    /// 解析成功后对凭据类字段做 `${ENV_VAR}` 占位符展开。
+    /// 启动路径专用：展开告警直接 eprintln（启动阶段终端可见）。
+    pub fn from_toml_str(content: &str) -> Result<Self, String> {
+        let mut warns = Vec::new();
+        let cfg = Self::from_toml_str_with_warnings(content, &mut warns)?;
+        for w in &warns {
+            eprintln!("警告: {}", w);
+        }
+        Ok(cfg)
+    }
+
+    /// 带告警收集的解析入口：环境变量缺失等告警追加到 warns，由调用方决定输出渠道。
+    /// 运行时 /profile load 时终端处于 raw mode，stderr 不可见，必须由终端 UI 展示。
+    pub fn from_toml_str_with_warnings(
+        content: &str,
+        warns: &mut Vec<String>,
+    ) -> Result<Self, String> {
+        let mut cfg: Self = toml::from_str(content).map_err(|e| e.to_string())?;
+        cfg.resolve_credential_env(warns);
+        Ok(cfg)
+    }
+
+    /// 逐个展开凭据字段占位符。环境变量缺失时告警并置 None，
+    /// 等同于未设置该凭据（留待手动输入），不会把占位符文本当密码发给服务器。
+    fn resolve_credential_env(&mut self, warns: &mut Vec<String>) {
+        Self::expand_opt("username", &mut self.username, &self.name, warns);
+        Self::expand_opt("password", &mut self.password, &self.name, warns);
+        Self::expand_opt(
+            "socks5_username",
+            &mut self.socks5_username,
+            &self.name,
+            warns,
+        );
+        Self::expand_opt(
+            "socks5_password",
+            &mut self.socks5_password,
+            &self.name,
+            warns,
+        );
+    }
+
+    fn expand_opt(
+        field: &str,
+        holder: &mut Option<String>,
+        profile: &str,
+        warns: &mut Vec<String>,
+    ) {
+        let Some(raw) = holder.as_deref() else { return };
+        match expand_credential_placeholder(raw) {
+            Ok(v) => *holder = Some(v),
+            Err(var) => {
+                warns.push(format!(
+                    "{} 的 {} 引用的环境变量 {} 未设置，该字段按空处理",
+                    profile, field, var
+                ));
+                *holder = None;
+            }
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -154,6 +217,98 @@ fn default_heartbeat_timeout_secs() -> u64 {
     60
 }
 
+/// 判断是否为合法的环境变量名：字母/下划线开头，后接字母数字下划线
+fn is_env_var_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// 凭据字段的环境变量占位符展开：
+/// - 整值恰为 `${VAR_NAME}` 时替换为同名环境变量的值，变量缺失返回 Err(变量名)
+/// - `$${NAME}` 为字面量转义，得到 `${NAME}`（密码本体长占位符形状时使用）
+/// - 其余情况（普通密码、含部分 `${}` 的值、非法变量名）一律原样返回，
+///   不做子串替换，避免误伤正常配置
+fn expand_credential_placeholder(value: &str) -> Result<String, String> {
+    if let Some(rest) = value.strip_prefix("$${") {
+        if let Some(inner) = rest.strip_suffix('}') {
+            if is_env_var_name(inner) {
+                return Ok(format!("${{{}}}", inner));
+            }
+        }
+        return Ok(value.to_string());
+    }
+    if let Some(inner) = value.strip_prefix("${").and_then(|v| v.strip_suffix('}')) {
+        if is_env_var_name(inner) {
+            return std::env::var(inner).map_err(|_| inner.to_string());
+        }
+    }
+    Ok(value.to_string())
+}
+
+/// 加载 dotenv 格式的凭据文件（约定路径 `<profiles目录>/.env`）到进程环境变量。
+///
+/// 规则：
+/// - 每行 `KEY=VALUE`，按第一个 `=` 分割（值内可含 `=`）；空行与 `#` 注释行忽略
+/// - 键值两端空白自动去除；值被成对单/双引号包裹时去引号（保留密码中的空格）
+/// - 真实环境变量优先：同名变量已存在时不覆盖（setx/系统变量 > .env）
+/// - 非法变量名/缺少 `=` 的行带行号告警并跳过
+///
+/// 返回实际写入的变量数量。调用方须保证在解析 profile（`${VAR}` 展开）之前执行。
+/// 仅启动时加载一次，修改 .env 后需重启客户端生效。
+pub fn load_env_file(path: &Path) -> usize {
+    // 读取失败（非 UTF-8 编码/权限等）时明确告警而非静默返回 0：
+    // 目标用户是中文 Windows 玩家，记事本默认存 ANSI(GBK)，若静默失败会导致全部占位符置空且无从排查。
+    // .env 必须以 UTF-8 保存（见 .env.example 提示）。
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "警告: 无法读取 {} ({}),若为编码问题请以 UTF-8 保存",
+                path.display(),
+                e
+            );
+            return 0;
+        }
+    };
+    let mut loaded = 0;
+    for (idx, raw_line) in content.lines().enumerate() {
+        // trim_start_matches 处理记事本等工具写入的 UTF-8 BOM（仅首行可能带）
+        let line = raw_line.trim_start_matches('\u{feff}').trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            eprintln!("警告: .env 第 {} 行缺少 '='，已跳过", idx + 1);
+            continue;
+        };
+        let key = key.trim();
+        if !is_env_var_name(key) {
+            eprintln!("警告: .env 第 {} 行变量名 '{}' 非法，已跳过", idx + 1, key);
+            continue;
+        }
+        let mut value = value.trim().to_string();
+        // 去除成对的首尾引号（"..." 或 '...'），保护含空格/特殊字符的密码
+        let chars: Vec<char> = value.chars().collect();
+        if chars.len() >= 2
+            && (chars[0] == '"' || chars[0] == '\'')
+            && chars[0] == chars[chars.len() - 1]
+        {
+            value = chars[1..chars.len() - 1].iter().collect();
+        }
+        // 真实环境优先：已被 setx/系统设置的同名变量不被 .env 覆盖
+        if std::env::var_os(key).is_some() {
+            continue;
+        }
+        std::env::set_var(key, value);
+        loaded += 1;
+    }
+    loaded
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     #[serde(default)]
@@ -164,6 +319,12 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn load_default(profiles_dir: &str) -> Self {
+        // 先加载 .env 凭据文件，再解析角色配置（保证 ${VAR} 展开时变量已就位）
+        let env_path = Path::new(profiles_dir).join(".env");
+        if env_path.exists() {
+            let n = load_env_file(&env_path);
+            eprintln!("已从 {} 加载 {} 个环境变量", env_path.display(), n);
+        }
         // 从 profiles 目录加载所有角色配置作为默认连接
         let (profiles, skipped) = Self::load_profiles(profiles_dir);
         let general = GeneralConfig {
@@ -217,7 +378,7 @@ impl AppConfig {
             }
 
             match fs::read_to_string(&path) {
-                Ok(content) => match toml::from_str::<ConnectionConfig>(&content) {
+                Ok(content) => match ConnectionConfig::from_toml_str(&content) {
                     Ok(config) => {
                         eprintln!("已加载角色配置: {} ({})", config.name, path.display());
                         profiles.push(config);
@@ -717,5 +878,234 @@ port = 6000"#
         "#;
         let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.reconnect_max_secs, 600);
+    }
+
+    // ===== 凭据环境变量占位符展开 =====
+
+    #[test]
+    fn test_placeholder_env_var_resolved() {
+        std::env::set_var("RLM_TEST_PWD_RESOLVED", "s3cr3t");
+        let got = expand_credential_placeholder("${RLM_TEST_PWD_RESOLVED}");
+        assert_eq!(got, Ok("s3cr3t".to_string()));
+    }
+
+    #[test]
+    fn test_placeholder_missing_var_returns_err() {
+        // 未设置的变量 → Err(变量名)，由调用方告警并置空
+        let got = expand_credential_placeholder("${RLM_TEST_DEFINITELY_MISSING_VAR}");
+        assert_eq!(got, Err("RLM_TEST_DEFINITELY_MISSING_VAR".to_string()));
+    }
+
+    #[test]
+    fn test_placeholder_literal_passthrough() {
+        // 普通密码、部分含 ${}、非法变量名均原样返回，不触发环境变量查找
+        assert_eq!(
+            expand_credential_placeholder("pass1"),
+            Ok("pass1".to_string())
+        );
+        assert_eq!(
+            expand_credential_placeholder("a${b}c"),
+            Ok("a${b}c".to_string())
+        );
+        assert_eq!(
+            expand_credential_placeholder("${1BADNAME}"),
+            Ok("${1BADNAME}".to_string())
+        );
+        assert_eq!(
+            expand_credential_placeholder("${NO-DASH}"),
+            Ok("${NO-DASH}".to_string())
+        );
+        assert_eq!(expand_credential_placeholder("${}"), Ok("${}".to_string()));
+    }
+
+    #[test]
+    fn test_placeholder_escape() {
+        // $${NAME} 转义为字面量 ${NAME}，不查找环境变量
+        assert_eq!(
+            expand_credential_placeholder("$${RLM_TEST_PWD_RESOLVED}"),
+            Ok("${RLM_TEST_PWD_RESOLVED}".to_string())
+        );
+        // $$ 前缀但内部非法变量名 → 整值原样
+        assert_eq!(
+            expand_credential_placeholder("$${no-dash}"),
+            Ok("$${no-dash}".to_string())
+        );
+    }
+
+    #[test]
+    fn test_from_toml_str_resolves_all_credential_fields() {
+        std::env::set_var("RLM_TEST_T_PWD", "real-pw");
+        std::env::set_var("RLM_TEST_T_SOCKS", "socks-pw");
+        let toml_str = r#"
+            name = "hero"
+            host = "example.com"
+            port = 4000
+            username = "${RLM_TEST_T_USER}"
+            password = "${RLM_TEST_T_PWD}"
+            socks5_password = "${RLM_TEST_T_SOCKS}"
+        "#;
+        std::env::set_var("RLM_TEST_T_USER", "hero-name");
+        let config = ConnectionConfig::from_toml_str(toml_str).unwrap();
+        assert_eq!(config.username.as_deref(), Some("hero-name"));
+        assert_eq!(config.password.as_deref(), Some("real-pw"));
+        assert_eq!(config.socks5_password.as_deref(), Some("socks-pw"));
+    }
+
+    #[test]
+    fn test_from_toml_str_missing_env_sets_field_none() {
+        // 缺失变量的凭据字段置 None（而非把占位符文本当密码），其余字段不受影响
+        let toml_str = r#"
+            name = "hero2"
+            host = "example.com"
+            port = 4000
+            username = "plain-user"
+            password = "${RLM_TEST_ANOTHER_MISSING_VAR}"
+        "#;
+        let config = ConnectionConfig::from_toml_str(toml_str).unwrap();
+        assert_eq!(config.username.as_deref(), Some("plain-user"));
+        assert_eq!(config.password, None);
+    }
+
+    #[test]
+    fn test_from_toml_str_plain_password_unchanged() {
+        // 向后兼容：不含占位符的存量配置行为完全不变
+        let toml_str = r#"
+            name = "old"
+            host = "example.com"
+            port = 4000
+            password = "${not_a_var_shape!}"
+        "#;
+        let config = ConnectionConfig::from_toml_str(toml_str).unwrap();
+        assert_eq!(config.password.as_deref(), Some("${not_a_var_shape!}"));
+    }
+
+    // ===== .env 凭据文件加载 =====
+
+    #[test]
+    fn test_load_env_file_parses_quotes_and_skips_bad_lines() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let env_path = dir.path().join(".env");
+        // 首行带 BOM 模拟 Windows 记事本保存；含注释/空行/等号值/非法键名/缺等号行
+        fs::write(
+            &env_path,
+            "\u{feff}# 注释行\n\
+             \n\
+             RLM_ENV_T_A=plain\n\
+             RLM_ENV_T_B = \"with space\"\n\
+             RLM_ENV_T_C=p@ss=with=equals\n\
+             bad name=x\n\
+             noequalsline\n\
+             RLM_ENV_T_D='single'\n",
+        )
+        .unwrap();
+
+        let loaded = load_env_file(&env_path);
+        assert_eq!(loaded, 4, "4 个合法条目应全部写入");
+        assert_eq!(std::env::var("RLM_ENV_T_A").unwrap(), "plain");
+        assert_eq!(std::env::var("RLM_ENV_T_B").unwrap(), "with space");
+        assert_eq!(std::env::var("RLM_ENV_T_C").unwrap(), "p@ss=with=equals");
+        assert_eq!(std::env::var("RLM_ENV_T_D").unwrap(), "single");
+        // 非法键名不应被写入环境
+        assert!(std::env::var_os("bad name").is_none());
+    }
+
+    #[test]
+    fn test_load_env_file_does_not_override_existing_env() {
+        // 真实环境优先：已被 set_var/setx 设置的同名变量不被 .env 覆盖
+        std::env::set_var("RLM_ENV_T_EXIST", "from_system");
+        let dir = tempfile::TempDir::new().unwrap();
+        let env_path = dir.path().join(".env");
+        fs::write(&env_path, "RLM_ENV_T_EXIST=from_envfile\n").unwrap();
+
+        let loaded = load_env_file(&env_path);
+        assert_eq!(loaded, 0, "同名变量已存在时不应计入写入数");
+        assert_eq!(std::env::var("RLM_ENV_T_EXIST").unwrap(), "from_system");
+    }
+
+    #[test]
+    fn test_load_env_file_missing_file_returns_zero() {
+        let loaded = load_env_file(Path::new("nonexistent_rlm_test_dir/.env"));
+        assert_eq!(loaded, 0);
+    }
+
+    #[test]
+    fn test_load_env_file_unreadable_path_returns_zero() {
+        // 路径指向目录而非文件：read_to_string 失败 → 告警 + 返回 0，不 panic。
+        // 覆盖非 UTF-8（GBK/UTF-16）文件被拒的同一失败路径。
+        let dir = tempfile::TempDir::new().unwrap();
+        let loaded = load_env_file(dir.path());
+        assert_eq!(loaded, 0);
+    }
+
+    #[test]
+    fn test_from_toml_str_with_warnings_collects_missing_var() {
+        // 告警收集：缺失变量的信息交给调用方决定输出渠道（启动 eprintln / TUI append_output）
+        let toml_str = r#"
+            name = "warned"
+            host = "example.com"
+            port = 4000
+            password = "${RLM_TEST_WARN_MISSING_VAR}"
+        "#;
+        let mut warns = Vec::new();
+        let cfg = ConnectionConfig::from_toml_str_with_warnings(toml_str, &mut warns).unwrap();
+        assert_eq!(warns.len(), 1);
+        assert!(warns[0].contains("RLM_TEST_WARN_MISSING_VAR"));
+        assert!(warns[0].contains("warned"), "告警应含角色名便于定位");
+        assert_eq!(cfg.password, None);
+    }
+
+    #[test]
+    fn test_load_default_reads_env_file_before_profiles() {
+        // 端到端：.env 提供变量 → 同目录 toml 的 ${VAR} 占位符在启动加载中展开
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::write(dir.path().join(".env"), "RLM_ENV_T_E2E=e2e-pw\n").unwrap();
+        fs::write(
+            dir.path().join("char1.toml"),
+            r#"
+                name = "e2e"
+                host = "example.com"
+                port = 4000
+                password = "${RLM_ENV_T_E2E}"
+            "#,
+        )
+        .unwrap();
+
+        let app = AppConfig::load_default(dir.path().to_str().unwrap());
+        assert_eq!(app.connections.len(), 1);
+        assert_eq!(app.connections[0].password.as_deref(), Some("e2e-pw"));
+    }
+
+    #[test]
+    fn test_env_file_follows_profiles_dir_for_multi_instance() {
+        // 多实例场景：.env 须跟随各自的 profiles 目录加载（--profiles profiles2 → profiles2/.env），
+        // 两个目录的变量互不可见。变量名必须全局唯一（进程级环境），故两目录用不同名。
+        let dir1 = tempfile::TempDir::new().unwrap();
+        let dir2 = tempfile::TempDir::new().unwrap();
+        for (dir, tag) in [(&dir1, "one"), (&dir2, "two")].iter() {
+            fs::write(
+                dir.path().join(".env"),
+                format!("RLM_ENV_T_MULTI_{}=pw-{}\n", tag.to_uppercase(), tag),
+            )
+            .unwrap();
+            fs::write(
+                dir.path().join("char.toml"),
+                format!(
+                    r#"
+                        name = "inst-{}"
+                        host = "example.com"
+                        port = 4000
+                        password = "${{RLM_ENV_T_MULTI_{}}}"
+                    "#,
+                    tag,
+                    tag.to_uppercase()
+                ),
+            )
+            .unwrap();
+        }
+
+        let app1 = AppConfig::load_default(dir1.path().to_str().unwrap());
+        let app2 = AppConfig::load_default(dir2.path().to_str().unwrap());
+        assert_eq!(app1.connections[0].password.as_deref(), Some("pw-one"));
+        assert_eq!(app2.connections[0].password.as_deref(), Some("pw-two"));
     }
 }

@@ -19,7 +19,7 @@
 
 ---
 
-## 1. 守护进程模式（Daemon mode）✅ 已实现
+## 1. 守护进程模式（Daemon mode）✅ 已实现（仅 Unix）
 
 | 收益 | 风险 | 难度 | 急迫性 |
 |:----:|:----:|:----:|:------:|
@@ -30,6 +30,8 @@
 - PID 文件位于 `<profiles目录>/daemon.pid`（随 `--profiles` 参数变化，无需 root 权限）
 - `--daemon stop` 发 SIGTERM 优雅退出并清理 PID 文件；`--daemon status` 查询状态（含过期 PID 检测）
 - 前台/daemon 模式均注册 SIGTERM 优雅退出
+
+**平台范围**：仅 Unix（fork/setsid/PTY 为 POSIX 机制）。Windows 侧明确**不做**服务化——xkx 玩家几乎都用带桌面的 Windows，开机自启 + `start_mud.bat` 已满足需求，守护化无收益。
 
 **评估**：当前的最大短板。客户端无法在 ssh 断开后继续运行，这是实现"7x24 挂机"最直接的障碍。不解决这个，其他所有改进都建立在"你得一直开着终端"的前提上。
 
@@ -148,13 +150,19 @@ GET  /api/log/<session_name>        → 获取最近日志行
 
 ---
 
-## 5. 凭据安全管理（Credentials Management）
+## 5. 凭据安全管理（Credentials Management）✅ 已实现
 
 | 收益 | 风险 | 难度 | 急迫性 |
 |:----:|:----:|:----:|:------:|
 | ★★★ | ★ | ★★ | ★★ |
 
-**评估**：当前 password 明文写在 TOML 里。单人使用问题不大，多人共用服务器或打算开源分享配置模板时有安全风险。
+**实现状态**：
+- `username` / `password` / `socks5_username` / `socks5_password` 四个凭据字段支持整值 `${ENV_VAR}` 占位符，启动/`/profile load` 时从环境变量展开（统一入口 `ConnectionConfig::from_toml_str`）
+- 环境变量缺失时告警并按空处理（等同留空待手动输入，不会把占位符文本当密码发送）
+- `$${NAME}` 转义支持字面量 `${NAME}` 密码；非整值/非法变量名形状一律按字面量，存量配置零影响
+- 启动时自动加载 `<profiles目录>/.env`（dotenv 格式，模板见 `profiles/.env.example`）；同名变量系统环境优先不被覆盖；玩家指引已写入 README“凭据安全保存”节
+
+**原评估**：当前 password 明文写在 TOML 里。单人使用问题不大，多人共用服务器或打算开源分享配置模板时有安全风险。
 
 **收益**：
 - 配置文件中不出现明文密码
