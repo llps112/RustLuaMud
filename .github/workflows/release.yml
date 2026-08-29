@@ -82,7 +82,12 @@ jobs:
     needs: [build, build-windows]
     runs-on: ubuntu-22.04
     steps:
+      # 必须全量拉取历史与 tag：默认浅克隆(depth=1)下 `git describe --tags HEAD^`
+      # 取不到上一个 tag、`${PREV_TAG}..HEAD` 也无历史，Release 正文只会剩 HEAD 一条
+      # subject（v0.9.x 及之前所有版本的 changelog 只有一行就是这个原因）。
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
