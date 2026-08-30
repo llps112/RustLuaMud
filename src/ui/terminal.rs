@@ -7,6 +7,7 @@ use crossterm::{
     style::{self, Print},
     terminal::{self, ClearType},
 };
+use std::borrow::Cow;
 use std::io::{self, Write};
 
 use crate::connection::{SessionId, SessionInfo, SessionState};
@@ -612,6 +613,9 @@ fn build_status_bar(
 }
 
 /// 构建 Lua SetStatus 状态栏字符串（前台连接的自定义状态文本）
+///
+/// 按**显示宽度**截断而非字符数：CJK 字符占 2 列，按字符数截取会使显示宽度达到 total_width 的两倍；
+/// `truncate_ansi_to_width` 同时保证 ANSI 转义不被截在半路。
 fn build_lua_status_text(
     sessions: &[SessionInfo],
     foreground_id: SessionId,
@@ -619,11 +623,22 @@ fn build_lua_status_text(
 ) -> String {
     if let Some(fg) = sessions.iter().find(|s| s.session_id == foreground_id) {
         if !fg.status_text.is_empty() {
-            let truncated: String = fg.status_text.chars().take(total_width).collect();
-            return truncated;
+            return truncate_ansi_to_width(&fg.status_text, total_width);
         }
     }
     String::new()
+}
+
+/// 底行文本宽度守卫（纯逻辑、无 IO，可单测）：按显示宽度截断，保证写入缓冲区末行
+/// 的内容永不超出终端宽度。超宽写入会在末行末尾触发换行 —— Linux 终端未关闭自动换行，
+/// 直接升级为整屏上滚，把上方所有行顶出；conhost 虽关闭了自动换行，行末挂起的
+/// wrap-pending 遇后续 LF 同样上滚。渲染侧是宽度守卫的唯一切点，不依赖缓存构建时机。
+fn lua_bar_clamped(raw: &str, width: usize) -> Cow<'_, str> {
+    if visible_width(raw) > width {
+        Cow::Owned(truncate_ansi_to_width(raw, width))
+    } else {
+        Cow::Borrowed(raw)
+    }
 }
 
 /// 底行状态栏的行首样式：灰白底 + 黑前景（conhost `#AAAAAA` / `#000000`）。
@@ -1647,8 +1662,8 @@ impl Terminal {
     ///    wrap-pending 挂起，否则后续任何 LF 会触发上滚。
     fn queue_lua_bar(&self, stdout: &mut io::Stdout) -> io::Result<()> {
         let width = self.state.width as usize;
-        let text = self.state.lua_status_cache.as_deref().unwrap_or("");
-        let pad = width.saturating_sub(visible_width(text));
+        let text = lua_bar_clamped(self.state.lua_status_cache.as_deref().unwrap_or(""), width);
+        let pad = width.saturating_sub(visible_width(&text));
         queue!(stdout, cursor::MoveTo(0, self.state.lua_row()))?;
         if text.is_empty() {
             // 无 SetStatus 文本：不把底行刷成色带，用默认底色空白清行
@@ -1656,7 +1671,7 @@ impl Terminal {
                 queue!(stdout, Print(" ".repeat(pad)))?;
             }
         } else {
-            queue!(stdout, Print(force_bar_bg(text)))?;
+            queue!(stdout, Print(force_bar_bg(&text)))?;
             if pad > 0 {
                 queue!(stdout, Print(" ".repeat(pad)))?;
             }
@@ -3165,6 +3180,75 @@ mod tests {
             }];
             let (bar, _) = build_status_bar(&sessions, SessionId(0), tw);
             assert!(visible_width(&bar) <= tw, "bar overflow at width {}", tw);
+        }
+    }
+
+    #[test]
+    fn test_build_lua_status_text_truncates_by_display_width() {
+        // 长 CJK 文本：截断后显示宽度不得超出 total_width（历史按字符数截取会翻倍溢出）
+        let sessions = vec![SessionInfo {
+            session_id: SessionId(0),
+            name: String::new(),
+            state: SessionState::Connected,
+            status_text: "任务：押镖 气血 100% 内力 100% ".repeat(5),
+        }];
+        for &tw in &[10usize, 24, 40, 80] {
+            let text = build_lua_status_text(&sessions, SessionId(0), tw);
+            assert!(
+                visible_width(&text) <= tw,
+                "lua bar overflow at width {}",
+                tw
+            );
+            assert!(!text.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_build_lua_status_text_short_text_and_no_session() {
+        // 短文本（含 ANSI）原样保留；无前台会话返回空串
+        let short = "\x1b[31mHP\x1b[0m low";
+        let sessions = vec![SessionInfo {
+            session_id: SessionId(0),
+            name: String::new(),
+            state: SessionState::Connected,
+            status_text: short.to_string(),
+        }];
+        assert_eq!(build_lua_status_text(&sessions, SessionId(0), 80), short);
+        let empty: Vec<SessionInfo> = Vec::new();
+        assert_eq!(build_lua_status_text(&empty, SessionId(0), 80), "");
+    }
+
+    #[test]
+    fn test_lua_bar_clamped_overflow_and_passthrough() {
+        // 超宽文本被截到宽度内；不超宽时原样透传（零拷贝）
+        let overflow = "任务状态".repeat(10); // 80 列
+        let clamped = lua_bar_clamped(&overflow, 20);
+        assert!(matches!(clamped, Cow::Owned(_)));
+        assert!(visible_width(&clamped) <= 20);
+        // CJK 双宽字符恰好卡在奇数宽度边界：不得破字，可见宽度 ≤ 宽度即可（差 1 列由空格补齐）
+        let clamped_odd = lua_bar_clamped(&overflow, 21);
+        assert!(visible_width(&clamped_odd) <= 21);
+        let fits = "\x1b[32mok\x1b[0m";
+        let borrowed = lua_bar_clamped(fits, 80);
+        assert!(matches!(borrowed, Cow::Borrowed(_)));
+        assert_eq!(borrowed, fits);
+        // 含 ANSI 的超宽文本：截断后可见宽度仍受控，且所有转义都是完整序列（不被截在半路）
+        let ansi_overflow = format!("\x1b[33m{}\x1b[0m", "宽".repeat(50));
+        let clamped_ansi = lua_bar_clamped(&ansi_overflow, 30);
+        assert!(visible_width(&clamped_ansi) <= 30);
+        let bytes = clamped_ansi.as_bytes();
+        let mut idx = 0;
+        while let Some(pos) = clamped_ansi[idx..].find('\x1b') {
+            let start = idx + pos;
+            let rest = &bytes[start..];
+            assert!(
+                rest.len() >= 2 && rest[1] == b'[',
+                "truncated escape at {}",
+                start
+            );
+            let terminator = rest[2..].iter().position(|&b| (0x40..=0x7e).contains(&b));
+            assert!(terminator.is_some(), "unterminated escape at {}", start);
+            idx = start + 2 + terminator.unwrap() + 1;
         }
     }
 

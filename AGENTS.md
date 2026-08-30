@@ -9,7 +9,7 @@
 - 令牌桶限速保护（burst_size + cmds_per_sec + min_interval 三参数），防反 flood
 - 完整 ANSI SGR 解析、CJK 宽字符对齐、浮动面板 API
 - 极低资源占用：J1800 + 2GB 内存即可流畅运行 10 连接
-- 版本：v0.9.3，Rust edition 2021
+- 版本：v0.9.4，Rust edition 2021
 
 ### 技术栈
 

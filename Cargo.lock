@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "rust-lua-mud"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "chrono",
  "crossterm",
