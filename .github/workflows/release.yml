@@ -107,6 +107,16 @@ jobs:
           else
             LOG=$(git log --pretty=format:"- %s" --reverse ${PREV_TAG}..HEAD)
           fi
+          # 纯元数据提交不该占 changelog 行：
+          #   - `chore: 更新子模块指针` 是 git-workflow.md 规定的固定文案，一个发布区间里
+          #     常出好几条完全相同的行（v0.9.4 有 4 条、v0.9.5 有 5 条），对外零信息量；
+          #   - `chore: bump version to ...` 是自我指涉（本次发布存在的原因本身就是它）。
+          # grep -v 无匹配时返回 1，bash -e 下会直接中断 run，必须接 || true。
+          # 若过滤后为空（该区间只有元数据提交），退回未过滤版本，避免空 changelog。
+          FILTERED=$(printf '%s\n' "$LOG" | grep -v -e '^- chore: 更新子模块指针$' -e '^- chore: bump version to ' || true)
+          if [ -n "$FILTERED" ]; then
+            LOG="$FILTERED"
+          fi
           echo "changelog<<EOF" >> $GITHUB_OUTPUT
           echo "$LOG" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
