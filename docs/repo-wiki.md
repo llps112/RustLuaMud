@@ -162,11 +162,16 @@ Lua 脚本采用命名空间化的全局表组织方式，核心命名空间包�
 
 子模块提供 `hooks/pre-commit`，提交时对暂存的 `class-utf8/*.lua` 做 LuaJIT 语法检查（`loadfile()` 只解析不执行）并同步生成 GBK 版本（写临时文件 + 往返校验通过后才覆盖，避免转码失败把 GBK 截断成 0 字节）。
 
-**钩子不随 clone 自动生效**，需先在子模块内设置一次：
+**钩子不随 clone 自动生效**，需先在子模块内设置一次（`core.hooksPath` 是 per-machine 的 local 配置，不随仓库传播，每台机器与每次重新 clone 各需一次）：
 
 ```bash
 git -C scripts/private config core.hooksPath hooks
 ```
+
+> **跨平台**：钩子内部避开三个只在单端成立的写法，以保证 Linux 与 Windows/MSYS 行为一致：
+> - 用 shell 重定向而非 `iconv -o`（Windows 的 GNU libiconv 独立版不支持 `-o`，Linux 的 glibc iconv 支持），并先写临时文件、往返校验通过才覆盖；
+> - 用 `loadfile()` 而非 `luajit -bl` 做语法检查（`-bl` 依赖 `jit.bcsave`，Linux 发行版 LuaJIT 通常带、本项目配套的 Windows 构建不带），两者检查强度等价；
+> - 用 `mktemp` 生成唯一临时文件名（Linux 的 `/tmp` 多用户共享且带 sticky bit，固定名可能被别人的同名文件占住，导致重定向因权限被拒而全部同步失败）。
 
 > 主仓库的 `githooks/post-checkout` / `post-merge` **不做编码同步**，只负责同步主仓库的脚本本地副本（← 子模块源），同样需要 `core.hooksPath` 才生效。
 

@@ -44,13 +44,15 @@ trigger: always_on
 
 子模块提供 `hooks/pre-commit`，提交时自动检测暂存的 `class-utf8/*.lua`，做 LuaJIT 语法检查并同步生成 GBK 版本（内部已用上面的重定向 + 往返校验写法）。
 
-**钩子不随 clone 自动生效**，`core.hooksPath` 必须在子模块内手动设置一次：
+**钩子不随 clone 自动生效**，`core.hooksPath` 是 per-machine 的 local 配置，不随仓库传播，每台机器（以及每次重新 clone）都要在子模块内各设置一次：
 
 ```bash
 git -C scripts/private config core.hooksPath hooks
 ```
 
 未设置时钩子完全不运行，GBK 同步只能靠手动 iconv。用 `git -C scripts/private config --get core.hooksPath` 可确认当前状态（无输出即为未设置）。
+
+> 这个状态**只能代表本机**。判断「钩子历史上到底有没有跑过」时，不要把本机的配置外推到别的开发机——不同机器各自独立。
 
 > 即使忘记手动 iconv，钩子也会自动补全。但如果 GBK 文件已被手动修改且 UTF-8 未改动，钩子不会触发。
 
@@ -59,4 +61,5 @@ git -C scripts/private config core.hooksPath hooks
 ## 往期事故
 
 - 2026-06-09：修复 always.lua 正则时用 SearchReplace 直接编辑 GBK 文件，导致所有中文字节被 corrupt，score 触发器无法匹配中文名，`me.charname` 始终为空。
-- 2026-09-02：排查 fj 双 GPS 时发现子模块 `core.hooksPath` 从未设置，且 `hooks/pre-commit` 里同时踩了两个坑——`iconv -o` 在 GNU libiconv 上必然失败，`luajit -bl` 因缺少 `jit.bcsave` 模块对**合法**文件也返回 1，会把每个文件误判成语法错误并中止提交。即使启用了钩子也无法工作，GBK 同步长期只能靠手动。
+- 2026-09-02：排查 fj 双 GPS 时发现本机（Windows）子模块 `core.hooksPath` 未设置，钩子从未运行；且原版 `hooks/pre-commit` 在 Windows 上即使启用也跑不通——`iconv -o` 在 GNU libiconv 独立版上必然失败，`luajit -bl` 因配套构建缺 `jit.bcsave` 对**合法**文件也返回 1，会把每个文件误判成语法错误并中止提交。已改为重定向 + `loadfile()`，两端通用。
+- 2026-09-02（同日更正上一条的过度推论）：上面两个坑**都是 Windows 特有的**。Linux 的 iconv 来自 glibc（支持 `-o`）、发行版 LuaJIT 通常带 `jit.*` 模块，原版写法在 Linux 上可正常工作。所以「近 200 个改 `class-utf8/*.lua` 的提交零漏同步」在 Linux 侧很可能一直是钩子在起作用，而非人工纪律；其中 `class/war_members_data.lua` 单独多出的不对称恰好是钩子行为的指纹（钩子只管 `class-utf8/*.lua` 对应的 GBK，而运行时数据由程序直接写 GBK 侧、需人工 add）。把「本机未配 hooksPath」当成「钩子从未运行」是错误归因，根源是 `core.hooksPath` 是 per-machine 配置，本机查不到别的机器状态。
