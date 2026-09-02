@@ -151,14 +151,24 @@ Lua 脚本采用命名空间化的全局表组织方式，核心命名空间包�
 
 修改流程：
 1. 编辑 `scripts/class-utf8/xxx.lua`（UTF-8 源文件）
-2. 执行 `iconv -f utf-8 -t gbk scripts/class-utf8/xxx.lua -o scripts/class/xxx.lua`
-3. 提交时 pre-commit 钩子自动检测并同步 GBK 版本
+2. 执行 `iconv -f utf-8 -t gbk scripts/class-utf8/xxx.lua > scripts/class/xxx.lua`
+3. 提交时 pre-commit 钩子自动检测并同步 GBK 版本（**钩子需先启用，见 4.2**；未启用时第 2 步的手工 iconv 是唯一保障）
+
+> 必须用 shell 重定向，**不要用 `iconv -o`**：Windows 上的 `/usr/bin/iconv` 通常是 GNU libiconv 独立版，不支持 `-o`（会把 `-o` 当成输入文件名报错，转码结果喷到 stdout 并返回非 0）；只有 glibc 自带的 iconv 才支持。
 
 > **严禁**用文本编辑工具直接编辑 `scripts/class/` 中的 GBK 文件——会导致中文字节被 corrupt。
 
 ### 4.2 Pre-commit 钩子
 
-子模块配置了 `hooks/pre-commit`（通过 `core.hooksPath hooks` 启用），提交时自动检测暂存的 `class-utf8/*.lua` 文件并同步生成 GBK 版本。
+子模块提供 `hooks/pre-commit`，提交时对暂存的 `class-utf8/*.lua` 做 LuaJIT 语法检查（`loadfile()` 只解析不执行）并同步生成 GBK 版本（写临时文件 + 往返校验通过后才覆盖，避免转码失败把 GBK 截断成 0 字节）。
+
+**钩子不随 clone 自动生效**，需先在子模块内设置一次：
+
+```bash
+git -C scripts/private config core.hooksPath hooks
+```
+
+> 主仓库的 `githooks/post-checkout` / `post-merge` **不做编码同步**，只负责同步主仓库的脚本本地副本（← 子模块源），同样需要 `core.hooksPath` 才生效。
 
 ### 4.3 bootstrap.sh 一键初始化
 

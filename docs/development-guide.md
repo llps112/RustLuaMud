@@ -18,11 +18,11 @@
 
 **正确的修改流程**：
 1. 修改 `scripts/class-utf8/` 中的 UTF-8 版本
-2. 用 `iconv` 转码覆盖 GBK 版本：
+2. 用 `iconv` 转码覆盖 GBK 版本（用重定向，**不要用 `-o`**：GNU libiconv 独立版不支持该选项）：
    ```bash
-   iconv -f utf-8 -t gbk scripts/class-utf8/xxx.lua -o scripts/class/xxx.lua
+   iconv -f utf-8 -t gbk scripts/class-utf8/xxx.lua > scripts/class/xxx.lua
    ```
-3. 提交时 pre-commit 钩子会自动检测并同步
+3. 提交时 pre-commit 钩子会自动检测并同步（需先在子模块内 `git config core.hooksPath hooks`）
 
 ### 1.2 调试输出规范
 
