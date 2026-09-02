@@ -682,6 +682,80 @@ fn test_enable_trigger() {
     });
 }
 
+/// 钉住脚本侧 `isopen(trigroup)` 的遍历语义与 EnableTriggerGroup 的一致性：
+/// GetTriggerList() → 取第一个 group 匹配的 trigger → 读 GetTriggerInfo(name, 8)。
+///
+/// 这是所有 openclass/closeclass 分组开关共同依赖的引擎不变量。脚本侧的 GPS 重入守卫
+/// （`_gpsbusy = ... and isopen("gps_start")`）只在 isopen 立即反映最新启用状态时才有意义：
+/// 若 EnableTriggerGroup(g, false) 后 isopen(g) 仍返回过期的 true，守卫会误判导航仍在运行；
+/// 反之若组内某个 trigger 漏改，isopen 只看第一个匹配项就会读到与整组不一致的状态。
+#[test]
+fn test_isopen_reflects_enable_trigger_group_immediately() {
+    with_engine(|engine| {
+        // 与脚本侧 maketri 一致：先 AddTrigger，再用 SetTriggerOption 挂 group
+        exec(
+            engine,
+            "AddTrigger('gps_a', 'aaa', '', 1, 0, 0, '', '', 0, 0)",
+        )
+        .unwrap();
+        exec(
+            engine,
+            "AddTrigger('gps_b', 'bbb', '', 1, 0, 0, '', '', 0, 0)",
+        )
+        .unwrap();
+        exec(engine, "SetTriggerOption('gps_a', 'group', 'gps_start')").unwrap();
+        exec(engine, "SetTriggerOption('gps_b', 'group', 'gps_start')").unwrap();
+        // michen_system.lua 中 isopen 的等价实现
+        exec(
+            engine,
+            r#"
+            isopen = function(trigroup)
+                if GetTriggerList() ~= nil then
+                    for _, v in pairs(GetTriggerList()) do
+                        if GetTriggerInfo(v, 26) == trigroup then
+                            return GetTriggerInfo(v, 8)
+                        end
+                    end
+                end
+                return false
+            end
+        "#,
+        )
+        .unwrap();
+
+        // isopen 只返回 pairs 遍历到的第一个匹配项的 enabled，单看它无法发现
+        // 「组内部分 trigger 漏改」，所以启用与禁用两个方向都必须逐个校验。
+        fn assert_group_enabled(engine: &LuaEngine, expected: bool, dir: &str) {
+            let a: bool = eval(engine, "return GetTriggerInfo('gps_a', 8)").unwrap();
+            let b: bool = eval(engine, "return GetTriggerInfo('gps_b', 8)").unwrap();
+            assert_eq!(a, expected, "{dir}: gps_a 的 enabled 应为 {expected}");
+            assert_eq!(b, expected, "{dir}: gps_b 的 enabled 应为 {expected}");
+        }
+
+        // openclass("gps_start")
+        exec(engine, "EnableTriggerGroup('gps_start', true)").unwrap();
+        let opened: bool = eval(engine, "return isopen('gps_start')").unwrap();
+        assert!(opened, "openclass 之后 isopen 必须为 true");
+        assert_group_enabled(engine, true, "openclass");
+
+        // closeclass("gps_start")：组内每个 trigger 都要失效，isopen 必须立即翻转为 false
+        exec(engine, "EnableTriggerGroup('gps_start', false)").unwrap();
+        let closed: bool = eval(engine, "return isopen('gps_start')").unwrap();
+        assert!(!closed, "closeclass 之后 isopen 必须立即为 false");
+        assert_group_enabled(engine, false, "closeclass");
+
+        // 再次 openclass 必须恢复
+        exec(engine, "EnableTriggerGroup('gps_start', true)").unwrap();
+        let reopened: bool = eval(engine, "return isopen('gps_start')").unwrap();
+        assert!(reopened, "重新 openclass 之后 isopen 必须为 true");
+        assert_group_enabled(engine, true, "重新 openclass");
+
+        // 从未注册过的组名：遍历无匹配项，返回 false 而不是报错
+        let unknown: bool = eval(engine, "return isopen('no_such_group')").unwrap();
+        assert!(!unknown, "未知组名应返回 false");
+    });
+}
+
 #[test]
 fn test_enable_trigger_not_found() {
     with_engine(|engine| {

@@ -2604,7 +2604,7 @@ mod tests {
         let visible = state.visible_output_lines();
         assert_eq!(visible.len(), output_height);
         // Should show the last output_height lines
-        assert_eq!(visible[0], format!("line 5"));
+        assert_eq!(visible[0], "line 5".to_string());
     }
 
     #[test]

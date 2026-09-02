@@ -36,7 +36,14 @@ impl App {
                 if !commands.is_empty() {
                     self.send_lua_commands(fg_id, commands)?;
                 }
-                self.drain_lua_panels(fg_id);
+                // 这是唯一一处 send_lua_commands 之后没有跟随 drain_lua_logs 的调用点
+                // （其余 6 处：events.rs 的用户输入与 MUD 输出、commands.rs 的 /lua 与
+                // /all /lua、session.rs 的两处定时器 tick 都紧跟 drain）。漏排空会让面板
+                // 点击回调里的 print/Note 一直挂在引擎 pending_logs，直到下一次 MUD 输出
+                // 或定时器 tick 才落盘，日志时间戳与点击动作错位，排障时对不上因果。
+                // drain_lua_logs 末尾已调用 drain_lua_panels，此处不再重复。
+                self.send_lua_raw(fg_id)?;
+                self.drain_lua_logs(fg_id)?;
                 return Ok(());
             }
 
