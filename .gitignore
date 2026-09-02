@@ -1,4 +1,6 @@
 /target
+# 根目录的本地运行用二进制（start_mud.bat 优先用它，找不到才回退 target/release/）
+/RustLuaMud.exe
 logs/
 *.log
 /*.txt
@@ -29,6 +31,9 @@ scripts/*
 !scripts/private
 
 xkxMAP.db
+
+# LPC: 服务端 LPC 参考源码（本地核对游戏文案用，非本项目产物，不入库）
+/LPC/
 
 # 本地稳定性测试脚本（临时排障用，不入库）
 /stability_test.ps1

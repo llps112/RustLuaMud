@@ -76,7 +76,7 @@ help/                         — 文档
 
 profiles/ ~ profiles4/        — 多实例运行配置（TOML 格式）
 docs/                         — 项目技术文档
-LPC/                          — 服务端 LPC 参考代码
+LPC/                          — 服务端 LPC 参考代码（本地专用，已 gitignore 不入库；核对游戏文案的权威依据）
 class-utf8-old/               — 旧版 Lua 脚本存档（UTF-8）
 class-gbk-old/                — 旧版 Lua 脚本存档（GBK）
 .trae/documents/              — 历史技术方案文档（76 个文件）
