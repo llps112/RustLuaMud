@@ -1,5 +1,6 @@
 /target
 # 根目录的本地运行用二进制（start_mud.bat 优先用它，找不到才回退 target/release/）
+/RustLuaMud
 /RustLuaMud.exe
 logs/
 *.log
@@ -47,3 +48,9 @@ xkxMAP.db
 /docs/code-quality-assessment.md
 /docs/war_refactor_analysis.md
 /docs/j1800-performance-optimization-plans.md
+/docs/workflow_p3_plan.md
+
+# 本地资产（不入库）
+/michen_system_old.lua
+/oldclass.zip
+profiles4/
