@@ -120,6 +120,10 @@ pub struct Session {
     pub burst_size: u64,
     /// 每秒令牌补充速率，默认 20
     pub cmds_per_sec: u64,
+    /// 滑动窗口内允许的最大命令数，默认 60（服务端雷劈阈值）
+    pub window_limit: u64,
+    /// 滑动窗口时长（毫秒），默认 2000（服务端 drain 周期）
+    pub window_duration_ms: u64,
     /// 空闲超时（秒），超过此时间无服务器数据则发送心跳
     pub idle_timeout_secs: u64,
     /// 心跳命令内容，空字符串表示不启用
@@ -242,6 +246,12 @@ impl Session {
             cmd_interval_ms: config.cmd_interval_ms.clamp(20, 200),
             burst_size: config.burst_size.max(1),
             cmds_per_sec: config.cmds_per_sec.max(1),
+            window_limit: config.window_limit.clamp(1, 1000),
+            // 下限 2000ms：短于服务端 drain 周期时「任意 2 秒 ≤ window_limit」不再成立，
+            //   兜底会静默失效（fail-open），因此不允许配得更短
+            // 上限 10s：窗口饱和时单次限速等待可达 window_duration_ms，过长会让
+            //   命令队列积压；断连本身仍由独立的读取任务感知，不受此影响
+            window_duration_ms: config.window_duration_ms.clamp(2000, 10_000),
             idle_timeout_secs: config.idle_timeout_secs,
             heartbeat_cmd: config.heartbeat_cmd.clone(),
             heartbeat_timeout_secs: config.heartbeat_timeout_secs,
@@ -503,37 +513,54 @@ impl Session {
         let burst_size = self.burst_size;
         let cmds_per_sec = self.cmds_per_sec;
         let cmd_interval_ms = self.cmd_interval_ms;
-        // 令牌桶限速：burst_size 允许突发，cmds_per_sec 控制长期平均速率
-        // cmd_interval_ms 作为最小间隔下限，防止速率过高
+        let window_limit = self.window_limit;
+        let window_duration_ms = self.window_duration_ms;
+        // 组合限速：令牌桶（burst_size 允许突发，cmds_per_sec 控制长期平均速率，
+        // cmd_interval_ms 作为最小间隔下限）+ 滑动窗口（window_limit/window_duration_ms
+        // 兜底累积上限，防止多次突发跨服务端 drain 周期叠加触发雷劈）
         tokio::spawn(async move {
             use tokio::select;
-            let mut bucket = crate::connection::rate_limiter::TokenBucket::new(
+            use tokio::time::{sleep_until, Instant as TokioInstant};
+            let mut limiter = crate::connection::rate_limiter::SafeLimiter::new(
                 burst_size,
                 cmds_per_sec,
                 cmd_interval_ms,
+                window_limit,
+                window_duration_ms,
             );
+            // 已取出但尚未到发送时刻的命令。限速等待做成与 send_raw 竞争的
+            // sleep_until 分支，而不是在分支体内 await sleep：滑动窗口饱和时
+            // 单次等待可达 window_duration_ms（默认 2 秒），若阻塞在分支内，
+            // 期间 Lua SendPkt 的保活等原始包无法写出，256 深度的队列会积压甚至溢出
+            let mut pending: Option<String> = None;
+            let mut send_at = TokioInstant::now();
             loop {
                 select! {
-                    maybe_cmd = send_rx.recv() => {
-                        match maybe_cmd {
-                            Some(cmd) => {
-                                // 令牌桶限速：获取令牌，不足则等待
-                                let wait = bucket.acquire();
-                                if !wait.is_zero() {
-                                    tokio::time::sleep(wait).await;
-                                }
-
-                                // 根据编码将命令转为字节
-                                let bytes = match write_encoding {
-                                    Encoding::Gbk => encode_gbk(&cmd),
-                                    Encoding::Utf8 => cmd.into_bytes(),
-                                };
-                                // MUD 协议要求命令以 \r\n 结尾
-                                let mut packet = bytes;
-                                packet.extend_from_slice(b"\r\n");
-                                if let Err(e) = write_half.write_all(&packet).await {
+                    // 限速到期，写出已排队的命令
+                    _ = sleep_until(send_at), if pending.is_some() => {
+                        let cmd = pending.take().expect("分支守卫已保证 pending 为 Some");
+                        // 根据编码将命令转为字节
+                        let bytes = match write_encoding {
+                            Encoding::Gbk => encode_gbk(&cmd),
+                            Encoding::Utf8 => cmd.into_bytes(),
+                        };
+                        // MUD 协议要求命令以 \r\n 结尾
+                        let mut packet = bytes;
+                        packet.extend_from_slice(b"\r\n");
+                        if let Err(e) = write_half.write_all(&packet).await {
+                            let _ = event_tx_write
+                                .send(SessionEvent::Error(format!("发送失败: {}", e)))
+                                .await;
+                            break;
+                        }
+                    }
+                    maybe_raw = send_raw_rx.recv() => {
+                        match maybe_raw {
+                            Some(bytes) => {
+                                // 原始数据包不受限速影响随时写出，不编码、不加 \r\n
+                                if let Err(e) = write_half.write_all(&bytes).await {
                                     let _ = event_tx_write
-                                        .send(SessionEvent::Error(format!("发送失败: {}", e)))
+                                        .send(SessionEvent::Error(format!("发送原始数据失败: {}", e)))
                                         .await;
                                     break;
                                 }
@@ -541,16 +568,15 @@ impl Session {
                             None => break,
                         }
                     }
-                    maybe_raw = send_raw_rx.recv() => {
-                        match maybe_raw {
-                            Some(bytes) => {
-                                // 原始数据包直接写入，不编码、不加 \r\n
-                                if let Err(e) = write_half.write_all(&bytes).await {
-                                    let _ = event_tx_write
-                                        .send(SessionEvent::Error(format!("发送原始数据失败: {}", e)))
-                                        .await;
-                                    break;
-                                }
+                    // 仅在无排队命令时取下一条，保证 FIFO 且一次只占一个限速配额
+                    maybe_cmd = send_rx.recv(), if pending.is_none() => {
+                        match maybe_cmd {
+                            Some(cmd) => {
+                                // 限速：获取发送配额，算出预计发送时刻后交由上面的
+                                // sleep_until 分支等待，等待期间不阻塞 send_raw
+                                let wait = limiter.acquire();
+                                send_at = TokioInstant::now() + wait;
+                                pending = Some(cmd);
                             }
                             None => break,
                         }
@@ -781,6 +807,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -792,6 +820,61 @@ mod tests {
         assert_eq!(session.port, 4000);
         assert!(matches!(session.state, SessionState::Disconnected));
         assert!(session.send_tx.is_none());
+    }
+
+    /// 构造只关心限速字段的测试配置
+    fn rate_limit_config(window_limit: u64, window_duration_ms: u64) -> ConnectionConfig {
+        ConnectionConfig {
+            name: "rate".to_string(),
+            host: "localhost".to_string(),
+            port: 4000,
+            encoding: None,
+            script: None,
+            auto_connect: false,
+            auto_reconnect: true,
+            reconnect_delay_secs: 5,
+            username: None,
+            password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: 1080,
+            socks5_username: None,
+            socks5_password: None,
+            log_rotation_count: None,
+            render_interval: 1000,
+            realtime: false,
+            connect_delay_ms: 1000,
+            cmd_interval_ms: 50,
+            burst_size: 10,
+            cmds_per_sec: 20,
+            window_limit,
+            window_duration_ms,
+            reconnect_max_secs: 1800,
+            idle_timeout_secs: 300,
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: 60,
+        }
+    }
+
+    #[test]
+    fn test_session_sliding_window_fields() {
+        // 区间内的配置值原样传递到 session，供写入任务构造 SafeLimiter
+        let session = Session::new(SessionId(1), &rate_limit_config(40, 3000));
+        assert_eq!(session.window_limit, 40);
+        assert_eq!(session.window_duration_ms, 3000);
+    }
+
+    #[test]
+    fn test_session_sliding_window_out_of_range_clamped() {
+        // 0 会让窗口死锁或 fail-open，过大值会 panic / 挂起过久，均钳制到安全区间
+        let session = Session::new(SessionId(1), &rate_limit_config(0, 0));
+        assert_eq!(session.window_limit, 1);
+        // 下限对齐服务端 drain 周期，否则「任意 2 秒 ≤ 60 条」的兜底会失效
+        assert_eq!(session.window_duration_ms, 2000);
+
+        let session = Session::new(SessionId(1), &rate_limit_config(u64::MAX, u64::MAX));
+        assert_eq!(session.window_limit, 1000);
+        assert_eq!(session.window_duration_ms, 10_000);
     }
 
     #[test]
@@ -819,6 +902,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -855,6 +940,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -889,6 +976,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -924,6 +1013,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -958,6 +1049,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -992,6 +1085,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1026,6 +1121,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1061,6 +1158,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1097,6 +1196,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1131,6 +1232,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1213,6 +1316,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1247,6 +1352,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1281,6 +1388,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1324,6 +1433,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1360,6 +1471,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1396,6 +1509,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1435,6 +1550,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1471,6 +1588,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1617,6 +1736,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1648,6 +1769,8 @@ mod tests {
             cmd_interval_ms: 50,
             burst_size: 10,
             cmds_per_sec: 20,
+            window_limit: 60,
+            window_duration_ms: 2000,
             reconnect_max_secs: 1800,
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
@@ -1861,5 +1984,57 @@ mod tests {
         .await
         .expect("timed out waiting for disconnect");
         assert!(got_disconnect);
+    }
+
+    #[tokio::test]
+    async fn test_send_raw_not_blocked_by_rate_limit_wait() {
+        // 回归护栏：滑动窗口饱和时，限速等待不得阻塞 send_raw 通道。
+        // window_limit=1 让第 2 条命令排队等待约 2 秒（窗口时长下限即 2000ms），
+        // 若等待写在 select! 分支体内，期间送进的原始包会被一起挂起，
+        // Lua SendPkt 的保活包（10 秒定时器）就可能被拖到超时、队列也会积压
+        const MARKER: &[u8] = b"\xff\xfc\x46"; // IAC WILL TELOPT_MSSP，与保活包同形
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let got_marker = std::sync::Arc::new(tokio::sync::Notify::new());
+        let notify = got_marker.clone();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 256];
+                let mut acc: Vec<u8> = Vec::new();
+                loop {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            acc.extend_from_slice(&buf[..n]);
+                            if acc.windows(MARKER.len()).any(|w| w == MARKER) {
+                                notify.notify_one();
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // 复用限速配置助手，只把目标指向本地 mock 服务器并关掉重连噪声
+        let mut config = rate_limit_config(1, 2000);
+        config.host = "127.0.0.1".to_string();
+        config.port = port;
+        config.auto_reconnect = false;
+        let mut session = Session::new(SessionId(0), &config);
+        let _event_rx = session.connect().await.unwrap();
+
+        // 先塞两条命令：第 1 条立即写出，第 2 条被滑动窗口挂起约 2 秒
+        session.send("look").unwrap();
+        session.send("look").unwrap();
+        // 必须等写入任务真正取走第 2 条并进入限速等待后再送原始包：
+        // 否则两个通道同时就绪，select! 会随机选分支，旧实现也能偶发通过
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // 再送原始包：必须在远小于窗口时长的时间内抵达服务器
+        session.send_raw(MARKER.to_vec()).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_millis(500), got_marker.notified())
+            .await
+            .expect("send_raw 被限速等待阻塞：500ms 内未写出原始包");
     }
 }

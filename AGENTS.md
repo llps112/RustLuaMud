@@ -6,7 +6,7 @@
 - 兼容 MUSHclient 脚本 API（触发器、别名、定时器、变量、日志、数据库、样式查询等）
 - UTF-8/GBK 双编码体系：UTF-8 为开发编码，GBK 运行时由 `iconv` 自动生成
 - 单实例最多 10 个并发连接，前台/后台无缝切换，每个角色独立 SOCKS5 代理
-- 令牌桶限速保护（burst_size + cmds_per_sec + min_interval 三参数），防反 flood
+- 令牌桶 + 滑动窗口双重限速保护（burst_size + cmds_per_sec + cmd_interval_ms，叠加 window_limit + window_duration_ms），防反 flood
 - 完整 ANSI SGR 解析、CJK 宽字符对齐、浮动面板 API
 - 极低资源占用：J1800 + 2GB 内存即可流畅运行 10 连接
 - 版本：v0.9.5，Rust edition 2021
@@ -37,7 +37,7 @@ src/                          — Rust 源码
 ├── connection/               — 网络连接模块
 │   ├── manager.rs            — 连接管理器（多 session 调度）
 │   ├── session.rs            — 单个连接会话（TCP + 编解码）
-│   └── rate_limiter.rs       — 令牌桶限速器
+│   └── rate_limiter.rs       — 限速器（令牌桶 + 滑动窗口）
 ├── ui/                       — 终端 UI 渲染模块
 │   ├── terminal.rs           — 终端渲染主逻辑
 │   ├── input.rs              — 输入框处理

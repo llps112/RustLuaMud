@@ -99,12 +99,25 @@ pub struct ConnectionConfig {
     pub cmd_interval_ms: u64,
     /// 令牌桶容量（突发上限），默认 10
     /// 允许短时间内发送的最大命令数，对应 Lua 侧原 max_burst
+    /// 安全约束：burst_size + 2×cmds_per_sec ≤ 60
     #[serde(default = "default_burst_size")]
     pub burst_size: u64,
     /// 每秒令牌补充速率，默认 20
-    /// 控制长期平均发送速率，对应 Lua 侧原 cmd.setnums
+    /// 控制长期平均发送速率的上界，对应 Lua 侧原 cmd.setnums。
+    /// 应配为服务端 drain 速率 20（= 40 条/2 秒），调高会让 cnt 逐周期净增
     #[serde(default = "default_cmds_per_sec")]
     pub cmds_per_sec: u64,
+    /// 滑动窗口内允许的最大命令数，默认 60，生效范围 1~1000
+    /// 对应服务端雷劈阈值 3*CMDS_PER_TICK（LPC cmd.c），令牌桶多次突发累积时的硬兜底
+    /// 调小可进一步降低触发反 flood 的风险；调大到超过 60 则窗口不再具备保护作用
+    #[serde(default = "default_window_limit")]
+    pub window_limit: u64,
+    /// 滑动窗口时长（毫秒），默认 2000，生效范围 2000~10000
+    /// 对应服务端 clear_cmd_count 的 2 秒 drain 周期，与 window_limit 共同构成
+    /// 「任意 window_duration_ms 内发送条数 ≤ window_limit」的约束。
+    /// 不得低于 2000：短于 drain 周期时上述约束无法覆盖服务端计数窗口，兜底失效
+    #[serde(default = "default_window_duration_ms")]
+    pub window_duration_ms: u64,
     /// 重连退避最大间隔（秒），默认 1800（30分钟）
     /// 指数退避上限，实际等待 = min(base * 2^attempt, max_secs)
     #[serde(default = "default_reconnect_max_secs")]
@@ -120,6 +133,16 @@ pub struct ConnectionConfig {
     pub heartbeat_timeout_secs: u64,
 }
 
+/// 服务端 LPC cmd.c 的反 flood 常量，用于校验限速参数组合是否安全。
+/// 改动前需先核对 LPC/cmd.c：`#define CMDS_PER_TICK 20` / `#define TICK 2`
+const SERVER_CMDS_PER_TICK: u64 = 20;
+/// 每个 drain 周期清除的计数：clear_cmd_count 中 `cnt -= 2 * CMDS_PER_TICK`
+const SERVER_DRAIN_PER_CYCLE: u64 = 2 * SERVER_CMDS_PER_TICK;
+/// 雷劈阈值：process_input 中 `cnt > 3 * CMDS_PER_TICK` → unconscious / 强制 quit
+const SERVER_STRIKE_THRESHOLD: u64 = 3 * SERVER_CMDS_PER_TICK;
+/// drain 周期（毫秒）
+const SERVER_TICK_MS: u64 = 2000;
+
 impl ConnectionConfig {
     /// 从 TOML 文本解析角色配置的统一入口（启动批量加载与运行时 /profile load 均须走此），
     /// 解析成功后对凭据类字段做 `${ENV_VAR}` 占位符展开。
@@ -133,7 +156,8 @@ impl ConnectionConfig {
         Ok(cfg)
     }
 
-    /// 带告警收集的解析入口：环境变量缺失等告警追加到 warns，由调用方决定输出渠道。
+    /// 带告警收集的解析入口：环境变量缺失、限速参数不安全等告警追加到 warns，
+    /// 由调用方决定输出渠道。
     /// 运行时 /profile load 时终端处于 raw mode，stderr 不可见，必须由终端 UI 展示。
     pub fn from_toml_str_with_warnings(
         content: &str,
@@ -141,7 +165,66 @@ impl ConnectionConfig {
     ) -> Result<Self, String> {
         let mut cfg: Self = toml::from_str(content).map_err(|e| e.to_string())?;
         cfg.resolve_credential_env(warns);
+        cfg.validate_rate_limit(warns);
         Ok(cfg)
+    }
+
+    /// 校验限速参数组合是否落在服务端反 flood 的安全范围内。
+    ///
+    /// 滑动窗口只封顶突发密度，长期速率由 cmds_per_sec 决定，两者必须同时满足
+    /// 服务端 LPC cmd.c 的约束（推导见 rate_limiter 模块文档）。burst_size 与
+    /// cmds_per_sec 在 Session::new 里只做 `.max(1)`、无上限钳制，因此不安全的组合
+    /// 能一路生效到写入任务，必须在解析阶段就把风险告知用户。
+    ///
+    /// 这里只告警不改值：参数原样保留便于与 TOML 原文比对，运行期钳制在 Session::new。
+    /// 全程使用 saturating 运算：配置值可能为 u64::MAX，普通乘法会溢出 panic。
+    fn validate_rate_limit(&self, warns: &mut Vec<String>) {
+        // 服务端每 2 秒 drain 40，等效长期速率上限 20 条/秒
+        let drain_per_sec = SERVER_DRAIN_PER_CYCLE.saturating_mul(1000) / SERVER_TICK_MS;
+        if self.cmds_per_sec > drain_per_sec {
+            warns.push(format!(
+                "{} 的 cmds_per_sec={} 超过服务端 drain 速率 {} 条/秒，cnt 会逐周期净增，\
+                 长时间挂机必然触发雷劈；window_limit 封顶的是突发密度而非长期速率，\
+                 挡不住这种超速，建议改回 {}",
+                self.name, self.cmds_per_sec, drain_per_sec, drain_per_sec
+            ));
+        }
+
+        // 单次突发峰值：burst_size 条 0ms 间隔 + 随后 2 秒内匀速 2×cmds_per_sec 条
+        let refill_per_cycle = self.cmds_per_sec.saturating_mul(2);
+        let burst_peak = self.burst_size.saturating_add(refill_per_cycle);
+        if burst_peak > SERVER_STRIKE_THRESHOLD {
+            warns.push(format!(
+                "{} 的 burst_size={} + 2×cmds_per_sec={} = {} 超过服务端雷劈阈值 {}，\
+                 单次突发即可能被打晕或强制退出，建议把 burst_size 降到 {} 以下",
+                self.name,
+                self.burst_size,
+                self.cmds_per_sec,
+                burst_peak,
+                SERVER_STRIKE_THRESHOLD,
+                SERVER_STRIKE_THRESHOLD.saturating_sub(refill_per_cycle)
+            ));
+        }
+
+        if self.window_limit > SERVER_STRIKE_THRESHOLD {
+            warns.push(format!(
+                "{} 的 window_limit={} 高于服务端雷劈阈值 {}，滑动窗口将失去保护作用，\
+                 建议设为 {} 或更低（{} = 服务端每周期 drain 量，可无条件保证安全）",
+                self.name,
+                self.window_limit,
+                SERVER_STRIKE_THRESHOLD,
+                SERVER_STRIKE_THRESHOLD,
+                SERVER_DRAIN_PER_CYCLE
+            ));
+        }
+
+        if self.window_duration_ms < SERVER_TICK_MS {
+            warns.push(format!(
+                "{} 的 window_duration_ms={} 短于服务端 drain 周期 {}ms，\
+                 「任意 2 秒 ≤ window_limit」的兜底会失效，运行时已上调到 {}",
+                self.name, self.window_duration_ms, SERVER_TICK_MS, SERVER_TICK_MS
+            ));
+        }
     }
 
     /// 逐个展开凭据字段占位符。环境变量缺失时告警并置 None，
@@ -206,6 +289,12 @@ fn default_burst_size() -> u64 {
 }
 fn default_cmds_per_sec() -> u64 {
     20
+}
+fn default_window_limit() -> u64 {
+    60
+}
+fn default_window_duration_ms() -> u64 {
+    2000
 }
 fn default_reconnect_max_secs() -> u64 {
     1800
@@ -878,6 +967,145 @@ port = 6000"#
         "#;
         let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.reconnect_max_secs, 600);
+    }
+
+    // ===== 限速参数 =====
+
+    #[test]
+    fn test_rate_limit_defaults() {
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.cmd_interval_ms, 50);
+        assert_eq!(config.burst_size, 10);
+        assert_eq!(config.cmds_per_sec, 20);
+        // 滑动窗口默认对齐服务端雷劈阈值：60 条 / 2 秒
+        assert_eq!(config.window_limit, 60);
+        assert_eq!(config.window_duration_ms, 2000);
+    }
+
+    #[test]
+    fn test_sliding_window_custom() {
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+            window_limit = 40
+            window_duration_ms = 3000
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.window_limit, 40);
+        assert_eq!(config.window_duration_ms, 3000);
+    }
+
+    #[test]
+    fn test_sliding_window_out_of_range_not_clamped_at_config_layer() {
+        // 配置层是纯反序列化目标，原样保留用户写入的值；运行期安全区间统一在
+        // Session::new 钳制（与 cmd_interval_ms 一致）。若在此处提前钳制，
+        // 配置结构体就不再反映 TOML 原文，往返比对与问题排查都会失真
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+            window_limit = 0
+            window_duration_ms = 1500
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.window_limit, 0);
+        assert_eq!(config.window_duration_ms, 1500);
+    }
+
+    // ===== 限速参数安全校验 =====
+
+    /// 解析并收集告警，用于验证 validate_rate_limit
+    fn rate_limit_warnings(toml_str: &str) -> Vec<String> {
+        let mut warns = Vec::new();
+        ConnectionConfig::from_toml_str_with_warnings(toml_str, &mut warns).unwrap();
+        warns
+    }
+
+    /// 包装只关心限速字段的 TOML 片段
+    fn rate_limit_toml(body: &str) -> String {
+        format!(
+            "name = \"paojia\"\nhost = \"example.com\"\nport = 4000\n{}\n",
+            body
+        )
+    }
+
+    #[test]
+    fn test_rate_limit_safe_config_produces_no_warning() {
+        // profiles/example.toml 与生产 profile 的实际参数组合，必须零告警
+        let warns = rate_limit_warnings(&rate_limit_toml(
+            "burst_size = 15\ncmds_per_sec = 20\ncmd_interval_ms = 50\nwindow_limit = 60\nwindow_duration_ms = 2000",
+        ));
+        assert!(warns.is_empty(), "安全配置不应告警，实际 {:?}", warns);
+    }
+
+    #[test]
+    fn test_rate_limit_defaults_produce_no_warning() {
+        // 未显式配置时走默认值（10/20/60/2000），同样必须安全
+        let warns = rate_limit_warnings(&rate_limit_toml(""));
+        assert!(warns.is_empty(), "默认配置不应告警，实际 {:?}", warns);
+    }
+
+    #[test]
+    fn test_rate_limit_warns_when_cmds_per_sec_exceeds_drain() {
+        // cmds_per_sec=21 仅比推荐值大 1，但长期速率已超过服务端 drain，cnt 逐周期净增
+        let warns = rate_limit_warnings(&rate_limit_toml("cmds_per_sec = 21"));
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("cmds_per_sec") && w.contains("drain")),
+            "应告警长期速率超过 drain，实际 {:?}",
+            warns
+        );
+    }
+
+    #[test]
+    fn test_rate_limit_warns_when_burst_peak_exceeds_threshold() {
+        // burst_size=65：65 + 2×20 = 105 > 60，实测服务端 cnt 峰值 64 会雷劈
+        let warns = rate_limit_warnings(&rate_limit_toml("burst_size = 65"));
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("burst_size") && w.contains("105")),
+            "应告警单次突发峰值越界，实际 {:?}",
+            warns
+        );
+    }
+
+    #[test]
+    fn test_rate_limit_warns_when_window_limit_above_threshold() {
+        let warns = rate_limit_warnings(&rate_limit_toml("window_limit = 100"));
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("window_limit") && w.contains("失去保护")),
+            "应告警窗口失去保护作用，实际 {:?}",
+            warns
+        );
+    }
+
+    #[test]
+    fn test_rate_limit_warns_when_window_duration_below_drain_cycle() {
+        let warns = rate_limit_warnings(&rate_limit_toml("window_duration_ms = 1500"));
+        assert!(
+            warns.iter().any(|w| w.contains("window_duration_ms")),
+            "应告警窗口短于 drain 周期，实际 {:?}",
+            warns
+        );
+    }
+
+    #[test]
+    fn test_rate_limit_extreme_values_do_not_overflow() {
+        // 校验全程 saturating：u64::MAX 不得让 2×cmds_per_sec 溢出 panic
+        let warns = rate_limit_warnings(&rate_limit_toml(
+            "burst_size = 18446744073709551615\ncmds_per_sec = 18446744073709551615\nwindow_limit = 18446744073709551615",
+        ));
+        assert!(warns.len() >= 3, "极端值应逐项告警，实际 {:?}", warns);
     }
 
     // ===== 凭据环境变量占位符展开 =====

@@ -42,14 +42,16 @@ RustLuaMud 采用 **Rust 引擎 + Lua 脚本** 的双层架构：
 | 文件 | 大小 | 职责 |
 |------|------|------|
 | `mod.rs` | 0.2KB | 模块声明 |
-| `manager.rs` | 17.8KB | 连接管理器，处理多 session 的创建、切换、关闭 |
-| `session.rs` | 56.1KB | 单个 TCP 会话，负责收发数据、自动重连、SOCKS5 代理 |
-| `rate_limiter.rs` | 7.1KB | 令牌桶限速器（burst_size + cmds_per_sec + min_interval 三参数） |
+| `manager.rs` | 18.1KB | 连接管理器，处理多 session 的创建、切换、关闭 |
+| `session.rs` | 74.0KB | 单个 TCP 会话，负责收发数据、自动重连、SOCKS5 代理 |
+| `rate_limiter.rs` | 29.3KB | 限速器：令牌桶（burst_size + cmds_per_sec + cmd_interval_ms）+ 滑动窗口（window_limit + window_duration_ms） |
 
 关键特性：
 - 单实例最多 10 个并发连接，前台/后台无缝切换
 - 每个角色独立配置 SOCKS5 代理，支持多开规避同 IP 限制
-- Rust 侧物理限速，确保不触发服务器反 flood 机制
+- Rust 侧物理限速对抗服务器反 flood：令牌桶钉住长期速率（cmds_per_sec ≤ 20），
+  滑动窗口封顶突发密度（任意 2 秒 ≤ window_limit 条），无需与服务端 tick 对齐；
+  两条安全不等式在配置解析时校验，不满足则告警
 
 ### 2.2 ui/ — 终端 UI
 
@@ -403,7 +405,7 @@ RustLuaMud/
 │   ├── connection/            # 连接管理
 │   │   ├── manager.rs         # 多 session 管理
 │   │   ├── session.rs         # TCP 会话
-│   │   └── rate_limiter.rs    # 令牌桶限速
+│   │   └── rate_limiter.rs    # 令牌桶 + 滑动窗口限速
 │   ├── ui/                    # 终端 UI
 │   │   ├── terminal.rs        # 渲染主逻辑
 │   │   ├── ansi.rs            # ANSI SGR 解析

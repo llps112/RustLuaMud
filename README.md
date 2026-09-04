@@ -25,8 +25,13 @@
 - 仅前台渲染，后台静默记录日志
 
 **限速保护**
-- Rust 侧令牌桶限速（burst_size + cmds_per_sec + min_interval 三参数）
-- 默认：突发 10 条、每秒 20 条、最小间隔 50ms，确保不触发服务器反 flood 机制
+- Rust 侧令牌桶限速（burst_size + cmds_per_sec + cmd_interval_ms 三参数）钉住长期速率
+- 叠加滑动窗口（window_limit + window_duration_ms）封顶突发密度，任意 2 秒内 ≤ 60 条
+- 默认：突发 10 条、每秒 20 条、最小间隔 50ms、窗口 60 条/2 秒
+- 不依赖与服务端 tick 对齐，可防住 GPS 寻路重试等场景的多次突发跨 drain 周期累积
+- 安全前提：`cmds_per_sec ≤ 20`（服务端 drain 速率）且 `burst_size + 2×cmds_per_sec ≤ 60`；
+  滑动窗口封顶的是突发密度而非长期速率，两者必须同时成立才能保证 cnt ≤ 60
+- 配置解析时会校验上述不等式，不安全的参数组合在启动与 `/profile load` 时告警
 
 **编码兼容**
 - GBK / UTF-8 双编码，自动检测并转码
@@ -245,12 +250,26 @@ socks5_port = 1080
 # socks5_username = "user"
 # socks5_password = "pass"
 
-# 命令发送令牌桶限速（可选）
-# 三参数协同控制：突发容量、补充速率、最小间隔
+# 命令发送限速（可选）
+# 令牌桶控制速率与突发手感，滑动窗口封顶突发密度
 # burst_size = 10          # 令牌桶容量（突发上限），默认 10
 # cmds_per_sec = 20        # 每秒令牌补充速率，默认 20
 # cmd_interval_ms = 50     # 命令间最小间隔（毫秒），默认 50，范围 20~200
+# window_limit = 60        # 滑动窗口内最大命令数，默认 60，范围 1~1000
+# window_duration_ms = 2000 # 滑动窗口时长（毫秒），默认 2000，范围 2000~10000
 # 推荐值：cmd_interval_ms 50（普通玩家）、80（轻度延迟）、120（保守安全）
+#
+# 安全不等式（服务端 LPC cmd.c：每 2 秒 drain 40，cnt > 60 雷劈）：
+#   1) cmds_per_sec ≤ 20              —— 长期速率不得超过 drain 速率，
+#      否则 cnt 逐周期净增，长时间挂机必然雷劈
+#   2) burst_size + 2×cmds_per_sec ≤ 60 —— 单次突发 + 随后 2 秒匀速的峰值
+# 注意 cmd_interval_ms 不构成长期速率上限：它只约束非突发模式的相邻间隔，
+# 富余令牌会累积到 burst_size 再以突发形式花掉，长期速率由 cmds_per_sec 决定。
+#
+# 滑动窗口封顶的是突发密度（半开区间），不封顶长期速率：window_limit = 60
+# 只在上面两条不等式成立时才安全。若要无条件兜底，可把 window_limit 设为 40
+# （= 服务端每周期 drain 量），此时即使令牌桶参数配错，cnt 也恒 ≤ 40。
+# 参数组合不安全时，启动与 /profile load 都会输出告警。
 
 # 渲染控制（可选）
 # render_interval = 1000   # 渲染间隔（毫秒），范围 [50, 10000]

@@ -90,6 +90,8 @@ impl App {
                     cmd_interval_ms: 50,
                     burst_size: 10,
                     cmds_per_sec: 20,
+                    window_limit: 60,
+                    window_duration_ms: 2000,
                     reconnect_max_secs: 1800,
                     idle_timeout_secs: 300,
                     heartbeat_cmd: String::new(),
