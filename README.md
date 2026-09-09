@@ -695,7 +695,7 @@ panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀
 - GBK 自动同步 pre-commit 钩子
 - 命名空间遗漏检测工具 `tools/check_ns_leak.py`
 
-### v0.6.0 (2026-07-31)
+### v0.6.0 (2026-08-02)
 - 命令限速迁移至 Rust 令牌桶（burst_size + cmds_per_sec + min_interval）
 - 定时器系统优化，标记式禁用取代 closeclass 延迟
 - engine.rs 拆分，trigger/alias/timer 新增 name 索引和 group 索引
@@ -723,7 +723,7 @@ panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀
 ### v0.5.1 (2026-07-24)
 - 修复多 session 断线重连时客户端卡顿与错误刷屏
 
-### v0.5.0 (2026-07-27)
+### v0.5.0 (2026-07-23)
 - `omit_from_output` 文本过滤功能
 - 浮动面板 `SetPanel`/`RemovePanel` API + 长行自动换行
 - bootstrap 支持 Gitee stable 下载
@@ -737,7 +737,7 @@ panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀
 - Lua 定时器看门狗线程，防止无限循环永久卡死
 - 移除 Lua 侧 server_watch 模块，服务器响应追踪迁移到 Rust 侧
 
-### v0.3.0 (2026-07-22)
+### v0.3.0 (2026-07-19)
 - 新增 Rust 侧命令发送物理限速（`cmd_interval_ms` 配置项），配合 Lua 侧 burst 控制形成双层限速保护
 - 新增 Gitee Release 自动同步（Nightly 构建）
 - 新增 i686 架构预编译构建
@@ -747,10 +747,10 @@ panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀
 ### v0.2.2 (2026-07-15)
 - 隔离 `delayed_commands` 延迟队列，修复延迟期内命令被 `process_output` 清空的问题
 
-### v0.2.1 (2026-07-14)
+### v0.2.1 (2026-07-15)
 - 修复 `connect_delay_ms` 延迟触发机制
 
-### v0.2.0 (2026-07-14)
+### v0.2.0 (2026-07-10)
 - `bootstrap.sh` 改为一键初始化脚本
 - 新增游戏脚本自动部署支持
 - 修复目录/文件冲突处理
