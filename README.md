@@ -702,6 +702,27 @@ panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀
 - 修复终端渲染行间颜色泄漏、Lua 打印行切换 session 后丢失
 - 后台 session 面板增量写入，修复 pending_panels 内存泄漏
 
+### v0.5.6 (2026-07-29)
+- 修复 Lua 打印行在切换 session 后丢失
+- 修复 `test_panic_hook_writes_log_on_panic` 在 CI 并行环境下失败
+
+### v0.5.5 (2026-07-28)
+- 浮动面板按钮功能（Rust 侧）
+- CI 改用 `cargo-nextest` 并限制并发线程数（减少 runner OOM 风险）
+- 依赖升级：libc 0.2.186→0.2.189、serde 1.0.228→1.0.229
+
+### v0.5.4 (2026-07-28)
+- 补丁发布，仅同步子模块脚本指针，无客户端代码变更
+
+### v0.5.3 (2026-07-27)
+- 长行自动换行 + 浮动面板 Lua `SetPanel`/`RemovePanel` API 完善
+
+### v0.5.2 (2026-07-26)
+- 新增 GBK 尾部文本 `omit_from_output` 匹配测试
+
+### v0.5.1 (2026-07-24)
+- 修复多 session 断线重连时客户端卡顿与错误刷屏
+
 ### v0.5.0 (2026-07-27)
 - `omit_from_output` 文本过滤功能
 - 浮动面板 `SetPanel`/`RemovePanel` API + 长行自动换行
@@ -722,6 +743,9 @@ panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀
 - 新增 i686 架构预编译构建
 - 新增 i686 架构构建脚本 `scripts/build.sh --arch i686`
 - 优化命令限速算法：从漏桶算法回归 burst 计数 + 动态补偿等待
+
+### v0.2.2 (2026-07-15)
+- 隔离 `delayed_commands` 延迟队列，修复延迟期内命令被 `process_output` 清空的问题
 
 ### v0.2.1 (2026-07-14)
 - 修复 `connect_delay_ms` 延迟触发机制
