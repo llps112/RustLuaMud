@@ -755,8 +755,32 @@ panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀
 - 新增游戏脚本自动部署支持
 - 修复目录/文件冲突处理
 
-### v0.1.0 ~ v0.1.9 (2026-06-10 ~ 2026-07-14)
-- 完整实现 MUSHclient 兼容 API
+### v0.1.9 (2026-07-06)
+- 修复 `/close` 中间 session 后 ID 递补导致 `/profile load` 重连静默断开
+- 拆分规则文件为独立模块，补充加载清单同步、运行时数据提交等规范
+
+### v0.1.8 (2026-07-04)
+- 实现可配置渲染频率功能，分离渲染间隔与实时模式配置
+- 修复节流模式下 Lua 日志与 MUD 数据不同步
+
+### v0.1.7 (2026-07-01)
+- 实现 `AddTriggerEx`/`AddTrigger`/`AddAlias` 的 Replace 标志 + 综合测试
+- styles 表增加 text 字段；Lua 错误不再静默丢弃
+
+### v0.1.6 (2026-06-27)
+- 日志文件名加日期后缀 `YYMMDD_HH`，滚动保留最近 24 个文件
+- 新增 `/reconnect` 命令，开放 `/all /disconnect` 白名单
+
+### v0.1.5 (2026-06-26)
+- 实现 `GetStyle`/`RGBColourToName` API，触发器回调新增 styles 第 4 参数
+- 独立 session 输入缓冲区；修复 `/close` 级联重连与 dofile 递归限制
+
+### v0.1.4 (2026-06-22)
+- 新增 `/profile load` / `/profile list` 运行时角色加载命令
+- 修复翻看输出历史时缓冲区 drain 导致视口上移、channel-closed 错误刷屏
+
+### v0.1.0 ~ v0.1.3（无 tag，2026-06-02 ~ 2026-06-21）
+- 项目奠基：完整实现 MUSHclient 兼容 API
 - 多连接管理、SOCKS5 代理、输出历史滚动
 - ANSI SGR 解析、GBK 编码兼容
 - SQLite3 集成、JSON 序列化
