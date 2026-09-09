@@ -604,11 +604,82 @@ panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀
 
 ## 版本历史
 
+### v0.9.6 (2026-09-04)
+- 限速器叠加滑动窗口硬兜底，杜绝多次突发跨 drain 周期累积导致的“雷劈”
+- release changelog 过滤纯元数据提交，不再重复列“更新子模块指针”
+
+### v0.9.5 (2026-09-02)
+- 修复面板点击回调后未 flush：补 `drain_lua_logs`，Lua 输出不再滞留到下次 MUD 输出或定时器 tick 才落盘
+- 规则/文档更正：子模块隐私收窄为 L1/L2/L3 分级、`print` 亦写入日志、`iconv -o` 与 `core.hooksPath` 前置说明
+
+### v0.9.4 (2026-08-30)
+- Lua 状态栏按显示宽度截断，超宽内容不再写穿末行触发整屏上滚
+- `.trae/rules` 改为指向 `.qoder/rules` 的符号链接，两 IDE 共用单一规则源
+- `bootstrap.ps1` 补齐凭据占位符/限速/日志示例并生成 `.env.example`
+
+### v0.9.3 (2026-08-29)
+- 修复 Linux 下无法点击面板/切换标签（鼠标捕获按平台分治）
+- 底行状态栏改灰白底黑字，并修复输入行绿色与 SGR 前景可读性
+- 取消末行避让，将 Lua 角色统计栏移到底行并整行蓝底高亮
+- release CI 抓取完整 tag 历史，确保 changelog 完整
+
+### v0.9.2 (2026-08-29)
+- 稳定 conhost 布局：修复状态栏漂移与 CJK 字形重叠
+- 凭据支持环境变量占位符 + `.env` 加载
+
+### v0.9.1 (2026-08-27)
+- 将 conhost 宽字符处理闸门收窄至经典控制台（以 `WT_SESSION` 区分 Windows Terminal）
+- 修复 panic hook 测试的可移植性
+
 ### v0.9.0 (2026-08-27)
 - Windows 平台正式支持：x86_64 编译/运行适配，conhost 可用宽度自适应（避让滚动条遮挡右对齐 UI）
 - release/nightly CI 并行构建 `RustLuaMud-windows-x86_64.zip`，GitHub 与 Gitee Release 同步附带
 - 新增 `scripts/bootstrap.ps1` Windows 一键部署（默认 `%USERPROFILE%\RustLuaMud`，免管理员权限）
 - 启动自检：校验日志与 profiles 目录可写，失败即时退出并报告真实原因
+
+### v0.8.0 (2026-08-22)
+- ANSI 颜色继承状态机统一为「行末最后 SGR 决定」语义，消除跨模块对颜色延续的歧义
+
+### v0.7.8 (2026-08-22)
+- ANSI 颜色继承移除单行限制：颜色持续到服务端发送 reset，修复多行连续消息颜色被截断
+
+### v0.7.7 (2026-08-22)
+- 新增 `--version` 参数（打印版本号后退出，不启动客户端）
+- ANSI 调试增强：每行原始 ANSI 日志 + 跨包上下文捕获
+- 适配 CI clippy 1.98 的 `drain_collect` 检查（`drain(..).collect()` → `std::mem::take`）
+
+### v0.7.5 (2026-08-22)
+- ANSI 行首继承色补全 + 重置变体识别修正
+- `bootstrap` 的 Gitee API 增加 `per_page=100`，避免 release 列表分页截断
+
+### v0.7.4 (2026-08-22)
+- `/reload` 崩溃修复 + ANSI 调试日志增强
+
+### v0.7.3 (2026-08-21)
+- 热重载完全清理：显式取消旧 timer task，`/all reload` 仅重启成功 session 的 timer
+- 守护进程模式 `--daemon` / `stop` / `status`（仅 Unix）
+- `app.rs` 拆分为 `app/` 子模块
+
+### v0.7.0 ~ v0.7.2 (2026-08-20)
+- 连接稳定性改造：指数退避重连 `min(base*2^attempt, max_secs)`（成功即重置）；空闲心跳检测（`idle_timeout` 发心跳、`heartbeat_timeout` 主动断连）
+- 新增 Lua API：`GetSessionStats()`、`OnDisconnect(reason)` 回调 + 8 个新 `GetInfo` 编号
+- `[DCN]`/`[RCN]` 断连/重连日志标签 + `disconnect_time` 停机时长追踪
+- 新增 26 个测试（834→860），clippy 零警告
+- v0.7.1 / v0.7.2 为补丁发布，无客户端代码变更
+
+### v0.6.6 (2026-08-19)
+- 新增 Lua `wait.stop_all` 函数
+- 依赖升级：rusqlite 0.40.1→0.40.2、futures 0.3.33→0.3.34
+- 补充项目文档与规则文件
+
+### v0.6.5 (2026-08-17)
+- 命令通道发送错误对齐去重，防止 TCP 半死时同类错误刷屏
+- 空闲心跳节流防发送队列填满，原始数据发送错误去重防刷屏
+
+### v0.6.4 (2026-08-16)
+- 修复 `parse_style_runs` 与 `strip_ansi` 处理非 CSI 序列不一致导致的 panic
+- session 发送队列满时输出诊断日志到 stderr
+- README 修正标志位常量值、补充项目结构与 OneShot 文档
 
 ### v0.6.3 (2026-08-13)
 - 修复浮动面板闪烁问题：`draw_output_area` 跳过面板覆盖区域，消除"擦除→重画"中间态
