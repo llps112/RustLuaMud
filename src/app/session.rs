@@ -132,7 +132,7 @@ impl App {
         let (name, host, port) = match self.manager.get_by_id(session_id) {
             Some(s) => (s.name.clone(), s.host.clone(), s.port),
             None => {
-                self.terminal.append_output("[错误] 无效的连接 ID")?;
+                self.sys_output_to(session_id, "[错误] 无效的连接 ID")?;
                 return Ok(());
             }
         };
@@ -144,14 +144,18 @@ impl App {
                     "[系统] 连接 {} ({}) → {}:{} 已建立",
                     display_pos, name, host, port
                 );
-                self.terminal.append_output(&msg)?;
+                // 三写而非只写终端：紧随其后的 switch_foreground 会 replace_output，
+                // 只存在于终端缓冲的「已建立」会被抹掉
+                self.sys_output_to(session_id, &msg)?;
                 self.init_lua_for_session(session_id)?;
                 // 自动切换到新连接
                 self.switch_foreground(session_id)?;
             }
             Err(e) => {
+                // 失败时不切前台，消息本来就能看见；走 sys_output_to 是为了落日志，
+                // 否则挂机时无人盯屏，事后连「什么时候连不上」都查不到
                 let msg = format!("[系统] 连接失败 ({}:{}): {}", host, port, e);
-                self.terminal.append_output(&msg)?;
+                self.sys_output_to(session_id, &msg)?;
             }
         }
         Ok(())
@@ -182,19 +186,43 @@ impl App {
                 // 注入日志目录（供 GetInfo(58) 返回）
                 engine.set_log_dir(&self.config.general.log_dir);
 
-                // 注入登录凭证到 Lua 变量和全局变量
-                if let Some(ref uname) = username {
-                    if !uname.is_empty() {
+                // 注入登录凭证到 Lua 变量和全局变量。
+                // 缺失时必须显式告警，不能静默跳过：脚本顶层 me.charid = char_name 会得到 nil，
+                // 直到 include("config_"..me.charid..".lua") 拼接时才崩，报错点离真因很远。
+                // 仅在配了脚本时告警 —— 无脚本则无人读 char_name，告警是噪音。
+                let has_script = script_path.is_some();
+                match username.as_deref().filter(|u| !u.is_empty()) {
+                    Some(uname) => {
                         engine.set_variable("char_name", uname);
                         engine.set_global("char_name", uname);
                         engine.set_char_name(uname); // 供 GetInfo(3) 返回
                     }
+                    None if has_script => {
+                        self.sys_output_to(
+                            session_id,
+                            &format!(
+                                "[警告] 连接 {} ({}) 未配置 username，脚本中 char_name 将为 nil",
+                                display_pos, name
+                            ),
+                        )?;
+                    }
+                    None => {}
                 }
-                if let Some(ref pwd) = password {
-                    if !pwd.is_empty() {
+                match password.as_deref().filter(|p| !p.is_empty()) {
+                    Some(pwd) => {
                         engine.set_variable("char_password", pwd);
                         engine.set_global("char_password", pwd);
                     }
+                    None if has_script => {
+                        self.sys_output_to(
+                            session_id,
+                            &format!(
+                                "[警告] 连接 {} ({}) 未配置 password，脚本中 char_password 将为 nil",
+                                display_pos, name
+                            ),
+                        )?;
+                    }
+                    None => {}
                 }
 
                 // 加载脚本
@@ -206,10 +234,10 @@ impl App {
                             for cmd in &queued_cmds {
                                 if let Some(lua_code) = cmd.strip_prefix('/') {
                                     if let Err(e) = engine.eval_code(lua_code) {
-                                        self.terminal.append_output(&format!(
-                                            "[Lua] 执行排队命令失败: {}",
-                                            e
-                                        ))?;
+                                        self.sys_output_to(
+                                            session_id,
+                                            &format!("[Lua] 执行排队命令失败: {}", e),
+                                        )?;
                                     }
                                 } else {
                                     self.logger.log_command(&name, cmd);
@@ -220,17 +248,14 @@ impl App {
                             // 排空脚本加载期间的 Lua 日志
                             self.drain_lua_logs(session_id)?;
 
+                            // 同样走三写：这条消息也在 switch_foreground 之前，只写终端会被抹掉
                             let msg = format!("[Lua] 连接 {} 脚本已加载: {}", display_pos, path);
-                            self.terminal.append_output(&msg)?;
+                            self.sys_output_to(session_id, &msg)?;
                         }
                         Err(e) => {
-                            let err_msg = e.to_string();
-                            for line in format_lua_error(&err_msg) {
-                                self.terminal.append_output(&line)?;
-                            }
-                            // 脚本加载错误也写入日志
-                            for line in format_lua_error(&err_msg) {
-                                self.logger.log_debug(&name, &line);
+                            // sys_output_to 已覆盖终端与日志，不需要再写两遍
+                            for line in format_lua_error(&e.to_string()) {
+                                self.sys_output_to(session_id, &line)?;
                             }
                         }
                     }
@@ -285,7 +310,7 @@ impl App {
             }
             Err(e) => {
                 let msg = format!("[Lua] 连接 {} 引擎初始化失败: {}", display_pos, e);
-                self.terminal.append_output(&msg)?;
+                self.sys_output_to(session_id, &msg)?;
             }
         }
         Ok(())

@@ -164,21 +164,35 @@ impl App {
             .copied()
             .collect();
         for session_id in auto_connect_ids {
-            let name = self
+            // host/port 与 name 一并预提取：下面的 sys_output_to 需要 &mut self，
+            // 不能在持有 session 借用时调用
+            let (name, host, port) = self
                 .manager
                 .get_by_id(session_id)
-                .map(|s| s.name.clone())
+                .map(|s| (s.name.clone(), s.host.clone(), s.port))
                 .unwrap_or_default();
             let display_pos = self.manager.display_number_of(session_id);
             match self.manager.connect_session(session_id).await {
                 Ok(()) => {
-                    let msg = format!("[系统] 连接 {} ({}) 已建立", display_pos, name);
-                    self.terminal.append_output(&msg)?;
+                    // 文本与 perform_connect 的成功分支逐字一致。走三写而非只写终端：
+                    // 启动期自动连接是挂机场景最主要的连接路径，只写终端的话
+                    // Linux daemon 模式下会被 pty drain 线程丢弃，事后无从追溯「何时连上」。
+                    // 每 session 仅一次，不属 log_cat 的 fs::read_dir 开销敏感的高频路径。
+                    let msg = format!(
+                        "[系统] 连接 {} ({}) → {}:{} 已建立",
+                        display_pos, name, host, port
+                    );
+                    self.sys_output_to(session_id, &msg)?;
                     self.init_lua_for_session(session_id)?;
                 }
                 Err(e) => {
-                    let msg = format!("[系统] 连接 {} ({}) 失败: {}", display_pos, name, e);
-                    self.terminal.append_output(&msg)?;
+                    // 保留 display_pos/name：启动期一次连多个，终端上需要能分辨是哪个
+                    // 连接失败（perform_connect 的单连接失败文本不带 name）
+                    let msg = format!(
+                        "[系统] 连接 {} ({}) → {}:{} 失败: {}",
+                        display_pos, name, host, port, e
+                    );
+                    self.sys_output_to(session_id, &msg)?;
                 }
             }
         }

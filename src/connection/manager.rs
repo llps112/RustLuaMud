@@ -116,11 +116,35 @@ impl ConnectionManager {
         Ok(session_id)
     }
 
-    /// 动态添加连接（运行时通过命令行添加）
+    /// 动态添加连接（运行时通过 `/profile load`、`/connect` 添加）
+    ///
+    /// 与 [`add_connection`](Self::add_connection) 的区别是多了重名保护：两个同名
+    /// session 会用同一账号登录 → 服务端顶号 → 双方 `auto_reconnect` 互相触发
+    /// → 无限重连循环（实测日志以 MB/min 增长、账号反复上下线）。
+    ///
+    /// 启动期的 `add_connection` 故意不做此检查：那里拒绝等于静默减少连接数，
+    /// 且同名 profile 属配置错误，应由用户自行修正而不是在启动时吞掉一个连接。
     pub fn add_connection_dynamic(
         &mut self,
         config: &ConnectionConfig,
     ) -> Result<SessionId, String> {
+        // 走 session_order（Vec，插入序确定）而非 sessions（HashMap，迭代序不定）：
+        // 启动期 add_connection 故意不做重名检查，所以多个同名 session 是可能的；
+        // 那种情况下报错里的显示编号必须稳定指向最早那个，
+        // 否则用户按提示 /close 可能关掉非预期的连接
+        let duplicate = self.session_order.iter().copied().find(|&sid| {
+            self.sessions
+                .get(&sid)
+                .map(|s| s.name == config.name)
+                .unwrap_or(false)
+        });
+        if let Some(sid) = duplicate {
+            let n = self.display_number_of(sid);
+            return Err(format!(
+                "连接 '{}' 已存在（编号 {}）；重连请用 /reconnect {}，替换请先 /close {}",
+                config.name, n, n, n
+            ));
+        }
         self.add_connection(config)
     }
 
@@ -331,6 +355,99 @@ mod tests {
         assert_eq!(id1, SessionId(0));
         assert_eq!(id2, SessionId(1));
         assert_eq!(mgr.session_count(), 2);
+    }
+
+    /// 重名保护回归：两个同名 session 会用同一账号登录 → 服务端顶号 →
+    /// 双方 auto_reconnect 互相触发 → 无限重连循环。
+    /// 2026-09-11 实测：对已在运行的 lpssx 再次 /profile load lpssx，日志 ≈127 KB/min。
+    #[test]
+    fn test_add_connection_dynamic_rejects_duplicate_name() {
+        let mut mgr = ConnectionManager::new();
+        let id1 = mgr
+            .add_connection_dynamic(&make_config("lpssx", "host1", 5555))
+            .unwrap();
+        assert_eq!(id1, SessionId(0));
+
+        let err = mgr
+            .add_connection_dynamic(&make_config("lpssx", "host1", 5555))
+            .expect_err("同名连接必须被拒绝，否则双方会互相顶号");
+        assert!(err.contains("已存在"), "应说明连接已存在: {}", err);
+        assert!(
+            err.contains("编号 1"),
+            "应带显示编号便于直接 /close: {}",
+            err
+        );
+        assert!(
+            err.contains("/close") && err.contains("/reconnect"),
+            "应给出两条可操作出路: {}",
+            err
+        );
+        // 拒绝后不得残留半个 session
+        assert_eq!(mgr.session_count(), 1);
+        assert_eq!(mgr.ordered_session_ids().len(), 1);
+    }
+
+    /// 不同名连接不受重名保护影响
+    #[test]
+    fn test_add_connection_dynamic_allows_distinct_names() {
+        let mut mgr = ConnectionManager::new();
+        assert!(mgr
+            .add_connection_dynamic(&make_config("a", "h", 4000))
+            .is_ok());
+        assert!(mgr
+            .add_connection_dynamic(&make_config("b", "h", 4000))
+            .is_ok());
+        assert_eq!(mgr.session_count(), 2);
+    }
+
+    /// 启动期路径故意不做重名检查：拒绝等于静默减少连接数，
+    /// 同名 profile 属配置错误，应由用户修正而不是启动时吞掉一个连接
+    #[test]
+    fn test_add_connection_allows_duplicate_name_at_startup() {
+        let mut mgr = ConnectionManager::new();
+        assert!(mgr.add_connection(&make_config("dup", "h", 4000)).is_ok());
+        assert!(mgr.add_connection(&make_config("dup", "h", 4000)).is_ok());
+        assert_eq!(mgr.session_count(), 2);
+    }
+
+    /// 重名保护不得误伤「先关闭再重新加载」这个正常流程
+    #[test]
+    fn test_add_connection_dynamic_allows_name_reuse_after_remove() {
+        let mut mgr = ConnectionManager::new();
+        let id = mgr
+            .add_connection_dynamic(&make_config("lpssx", "h", 5555))
+            .unwrap();
+        assert!(mgr.remove_session(id).is_ok());
+        assert_eq!(mgr.session_count(), 0);
+        assert!(
+            mgr.add_connection_dynamic(&make_config("lpssx", "h", 5555))
+                .is_ok(),
+            "关闭后应允许同名重建（/close 后 /profile load 是官方推荐的替换流程）"
+        );
+    }
+
+    /// 存在多个同名 session 时（启动期 add_connection 故意不查重名，所以这是可能的），
+    /// 报错里的编号必须稳定指向**最早**那个 —— 实现走 session_order 而非 HashMap
+    /// 迭代序，否则用户按提示 /close 可能关掉非预期的连接
+    #[test]
+    fn test_add_connection_dynamic_reports_earliest_duplicate() {
+        let mut mgr = ConnectionManager::new();
+        let first = mgr.add_connection(&make_config("dup", "h", 4000)).unwrap();
+        mgr.add_connection(&make_config("dup", "h", 4000)).unwrap();
+        mgr.add_connection(&make_config("dup", "h", 4000)).unwrap();
+        assert_eq!(mgr.session_count(), 3);
+
+        let expected = mgr.display_number_of(first);
+        let err = mgr
+            .add_connection_dynamic(&make_config("dup", "h", 4000))
+            .expect_err("已有同名连接时必须拒绝");
+        assert!(
+            err.contains(&format!("编号 {}", expected)),
+            "应指向最早的同名连接（编号 {}），实际: {}",
+            expected,
+            err
+        );
+        assert_eq!(mgr.session_count(), 3, "拒绝后不得新增也不得移除 session");
     }
 
     #[test]

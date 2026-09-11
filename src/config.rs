@@ -1,6 +1,8 @@
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct GeneralConfig {
@@ -146,25 +148,47 @@ const SERVER_TICK_MS: u64 = 2000;
 impl ConnectionConfig {
     /// 从 TOML 文本解析角色配置的统一入口（启动批量加载与运行时 /profile load 均须走此），
     /// 解析成功后对凭据类字段做 `${ENV_VAR}` 占位符展开。
-    /// 启动路径专用：展开告警直接 eprintln（启动阶段终端可见）。
+    /// 启动路径专用：展开告警直接 eprintln（此时尚未进入 raw mode，stderr 可见）。
+    ///
+    /// 凭据展开失败（missing 非空）时**不跳过**该 profile：跳过会静默减少连接数，
+    /// 玩家只看到「少了一个角色」却不知原因；而且建连时 init_lua_for_session 还会
+    /// 就 char_name 缺失再告警一次。这里只负责把补救办法说清楚。
     pub fn from_toml_str(content: &str) -> Result<Self, String> {
         let mut warns = Vec::new();
-        let cfg = Self::from_toml_str_with_warnings(content, &mut warns)?;
+        let mut missing = Vec::new();
+        let cfg = Self::from_toml_str_with_warnings(content, &mut warns, &mut missing)?;
+        // warns 已逐项说清「哪个 profile 的哪个字段引用的哪个变量未设置」，
+        // 所以补救办法只汇总说一次 —— 逐项再说一遍会与 warns 的文案前半句
+        // 几乎逐字重复，启动时多个 profile 都有问题就会刷一屏相似告警
         for w in &warns {
             eprintln!("警告: {}", w);
+        }
+        if !missing.is_empty() {
+            eprintln!(
+                "提示: {} 有 {} 项凭据占位符未展开（具体变量名见上方告警），在 profiles 目录的 \
+                 .env 中补齐后执行 /profile load {} 即可生效（无需重启客户端）",
+                cfg.name,
+                missing.len(),
+                cfg.name
+            );
         }
         Ok(cfg)
     }
 
     /// 带告警收集的解析入口：环境变量缺失、限速参数不安全等告警追加到 warns，
-    /// 由调用方决定输出渠道。
+    /// 凭据占位符展开失败项追加到 missing，由调用方决定输出渠道与是否中止。
     /// 运行时 /profile load 时终端处于 raw mode，stderr 不可见，必须由终端 UI 展示。
+    ///
+    /// warns 与 missing 的分工：warns 是「可以继续」的告警（限速参数、以及展开失败的
+    /// 事实陈述），missing 是「必须拦下」的配置错误 —— 只包含 TOML 里确实写了 `${VAR}`
+    /// 却查不到的字段，不含「字段本来就没配」（后者是合法的手动输入语义）。
     pub fn from_toml_str_with_warnings(
         content: &str,
         warns: &mut Vec<String>,
+        missing: &mut Vec<CredentialMiss>,
     ) -> Result<Self, String> {
         let mut cfg: Self = toml::from_str(content).map_err(|e| e.to_string())?;
-        cfg.resolve_credential_env(warns);
+        cfg.resolve_credential_env(warns, missing);
         cfg.validate_rate_limit(warns);
         Ok(cfg)
     }
@@ -229,28 +253,35 @@ impl ConnectionConfig {
 
     /// 逐个展开凭据字段占位符。环境变量缺失时告警并置 None，
     /// 等同于未设置该凭据（留待手动输入），不会把占位符文本当密码发给服务器。
-    fn resolve_credential_env(&mut self, warns: &mut Vec<String>) {
-        Self::expand_opt("username", &mut self.username, &self.name, warns);
-        Self::expand_opt("password", &mut self.password, &self.name, warns);
+    fn resolve_credential_env(
+        &mut self,
+        warns: &mut Vec<String>,
+        missing: &mut Vec<CredentialMiss>,
+    ) {
+        Self::expand_opt("username", &mut self.username, &self.name, warns, missing);
+        Self::expand_opt("password", &mut self.password, &self.name, warns, missing);
         Self::expand_opt(
             "socks5_username",
             &mut self.socks5_username,
             &self.name,
             warns,
+            missing,
         );
         Self::expand_opt(
             "socks5_password",
             &mut self.socks5_password,
             &self.name,
             warns,
+            missing,
         );
     }
 
     fn expand_opt(
-        field: &str,
+        field: &'static str,
         holder: &mut Option<String>,
         profile: &str,
         warns: &mut Vec<String>,
+        missing: &mut Vec<CredentialMiss>,
     ) {
         let Some(raw) = holder.as_deref() else { return };
         match expand_credential_placeholder(raw) {
@@ -260,6 +291,10 @@ impl ConnectionConfig {
                     "{} 的 {} 引用的环境变量 {} 未设置，该字段按空处理",
                     profile, field, var
                 ));
+                missing.push(CredentialMiss {
+                    field,
+                    var: var.clone(),
+                });
                 *holder = None;
             }
         }
@@ -332,22 +367,131 @@ fn expand_credential_placeholder(value: &str) -> Result<String, String> {
     }
     if let Some(inner) = value.strip_prefix("${").and_then(|v| v.strip_suffix('}')) {
         if is_env_var_name(inner) {
-            return std::env::var(inner).map_err(|_| inner.to_string());
+            return lookup_credential_var(inner).ok_or_else(|| inner.to_string());
         }
     }
     Ok(value.to_string())
 }
 
-/// 加载 dotenv 格式的凭据文件（约定路径 `<profiles目录>/.env`）到进程环境变量。
+/// 凭据占位符展开失败项：TOML 里写了 `${VAR}` 但该变量未定义。
+///
+/// 必须与「字段本来就没配」区分开：后者是既有的「留待手动输入」语义，不该拦；
+/// 前者会让 Lua 侧 `char_name` 变成 nil，脚本顶层拼接（如
+/// `include("config_"..me.charid..".lua")`）时才崩溃 —— 报错点离真正原因很远，
+/// 必须在建 session 之前就拦下。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialMiss {
+    /// 出问题的字段名（username / password / socks5_username / socks5_password）
+    pub field: &'static str,
+    /// 未能解析的环境变量名
+    pub var: String,
+}
+
+/// .env 的内存态快照，替代运行时 `std::env::set_var`。
+#[derive(Default)]
+struct EnvStore {
+    /// .env 提供、且启动时真实环境中不存在的键 —— 可被运行时刷新覆盖
+    values: HashMap<String, String>,
+    /// 启动时真实环境已存在的键（setx/系统变量）—— 永不被 .env 覆盖，也不进 values
+    system_owned: HashSet<String>,
+    /// 凡由 .env 提供过的键，**只增不减**。
+    ///
+    /// 归 .env 管辖的键即使后来从 .env 里删掉，也必须留在本集合中：启动时
+    /// `load_env_file` 已把它 `set_var` 进真实进程环境，若查找时无条件回退
+    /// `std::env::var`，那份残留会让「删键」形同虚设 —— 实测表现为「删掉
+    /// .env 里的凭据键后 `/profile load` 仍用旧值成功登录，并因重名与
+    /// 原有 session 互相顶号进入无限重连循环」。
+    env_owned: HashSet<String>,
+}
+
+static ENV_STORE: OnceLock<RwLock<EnvStore>> = OnceLock::new();
+
+fn env_store() -> &'static RwLock<EnvStore> {
+    ENV_STORE.get_or_init(|| RwLock::new(EnvStore::default()))
+}
+
+/// 锁中毒时取出内部值继续用：凭据查找在配置解析与日志路径上，
+/// 不该因为别的线程 panic 过就把整个客户端带崩。
+fn read_lock(lock: &RwLock<EnvStore>) -> RwLockReadGuard<'_, EnvStore> {
+    lock.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn write_lock(lock: &RwLock<EnvStore>) -> RwLockWriteGuard<'_, EnvStore> {
+    lock.write().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 凭据占位符的变量查找：归 .env 管辖的键只认内存态快照，其余键回退真实进程环境。
+///
+/// 两条分支各自保证的语义：
+/// - `env_owned` 命中 → 只查 `values`，**绝不回退** `std::env::var`。这样运行时
+///   刷新的新值能生效，且从 .env 删键会立即失效（否则启动时 `set_var` 写进
+///   真实环境的旧值会被回退分支命中，删除操作形同虚设）。
+/// - `env_owned` 未命中 → 回退 `std::env::var`。保证 setx/系统变量不被 .env 覆盖
+///   （这类键记在 `system_owned`、从不进 `env_owned`），且测试或外部工具直接用
+///   `std::env::set_var` 设的变量仍然可见。
+///
+/// 大小写敏感（HashMap/HashSet 语义，向 Linux 看齐）。已核对现有 profiles 的占位符
+/// 与 .env 键精确匹配；回退分支在 Windows 上仍大小写不敏感，故无行为回退。
+pub fn lookup_credential_var(key: &str) -> Option<String> {
+    {
+        let store = read_lock(env_store());
+        if store.env_owned.contains(key) {
+            return store.values.get(key).cloned();
+        }
+    }
+    std::env::var(key).ok()
+}
+
+/// 解析 dotenv 文本为键值对，行级问题（缺 `=`、非法变量名）带行号写入 warns。
+///
+/// 只做语法解析，**不做**「真实环境优先」判断 —— 那是 load/reload 各自的策略。
+fn parse_env_content(content: &str, warns: &mut Vec<String>) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for (idx, raw_line) in content.lines().enumerate() {
+        // trim_start_matches 处理记事本等工具写入的 UTF-8 BOM（仅首行可能带）
+        let line = raw_line.trim_start_matches('\u{feff}').trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            warns.push(format!(".env 第 {} 行缺少 '='，已跳过", idx + 1));
+            continue;
+        };
+        let key = key.trim();
+        if !is_env_var_name(key) {
+            warns.push(format!(
+                ".env 第 {} 行变量名 '{}' 非法，已跳过",
+                idx + 1,
+                key
+            ));
+            continue;
+        }
+        let mut value = value.trim().to_string();
+        // 去除成对的首尾引号（"..." 或 '...'），保护含空格/特殊字符的密码
+        let chars: Vec<char> = value.chars().collect();
+        if chars.len() >= 2
+            && (chars[0] == '"' || chars[0] == '\'')
+            && chars[0] == chars[chars.len() - 1]
+        {
+            value = chars[1..chars.len() - 1].iter().collect();
+        }
+        pairs.push((key.to_string(), value));
+    }
+    pairs
+}
+
+/// 启动期加载 dotenv 格式的凭据文件（约定路径 `<profiles目录>/.env`）：
+/// 同时写入进程环境与内存态 [`EnvStore`]。
 ///
 /// 规则：
-/// - 每行 `KEY=VALUE`，按第一个 `=` 分割（值内可含 `=`）；空行与 `#` 注释行忽略
-/// - 键值两端空白自动去除；值被成对单/双引号包裹时去引号（保留密码中的空格）
-/// - 真实环境变量优先：同名变量已存在时不覆盖（setx/系统变量 > .env）
-/// - 非法变量名/缺少 `=` 的行带行号告警并跳过
+/// - 语法解析见 [`parse_env_content`]（`KEY=VALUE`、引号剥离、BOM/注释/非法行）
+/// - 真实环境变量优先：同名变量已存在时不覆盖（setx/系统变量 > .env），
+///   该键记入 `system_owned`，此后运行时刷新也不会改动它
 ///
 /// 返回实际写入的变量数量。调用方须保证在解析 profile（`${VAR}` 展开）之前执行。
-/// 仅启动时加载一次，修改 .env 后需重启客户端生效。
+///
+/// 这里调用 `set_var` 是安全的，因为本函数只在启动期单线程执行（`AppConfig::load_default`）。
+/// **运行期刷新必须走 [`reload_env_file`]**，它绝不触碰进程环境。
 pub fn load_env_file(path: &Path) -> usize {
     // 读取失败（非 UTF-8 编码/权限等）时明确告警而非静默返回 0：
     // 目标用户是中文 Windows 玩家，记事本默认存 ANSI(GBK)，若静默失败会导致全部占位符置空且无从排查。
@@ -363,39 +507,84 @@ pub fn load_env_file(path: &Path) -> usize {
             return 0;
         }
     };
+    let mut warns = Vec::new();
+    let pairs = parse_env_content(&content, &mut warns);
+    for w in &warns {
+        eprintln!("警告: {}", w);
+    }
+
     let mut loaded = 0;
-    for (idx, raw_line) in content.lines().enumerate() {
-        // trim_start_matches 处理记事本等工具写入的 UTF-8 BOM（仅首行可能带）
-        let line = raw_line.trim_start_matches('\u{feff}').trim();
-        if line.is_empty() || line.starts_with('#') {
+    let mut store = write_lock(env_store());
+    for (key, value) in pairs {
+        // 真实环境优先：已被 setx/系统设置的同名变量不被 .env 覆盖。
+        // 记入 system_owned 而不只是跳过，否则后续 reload 会把它当成 .env 自有键刷新
+        if std::env::var_os(&key).is_some() {
+            store.system_owned.insert(key);
             continue;
         }
-        let Some((key, value)) = line.split_once('=') else {
-            eprintln!("警告: .env 第 {} 行缺少 '='，已跳过", idx + 1);
-            continue;
-        };
-        let key = key.trim();
-        if !is_env_var_name(key) {
-            eprintln!("警告: .env 第 {} 行变量名 '{}' 非法，已跳过", idx + 1, key);
-            continue;
-        }
-        let mut value = value.trim().to_string();
-        // 去除成对的首尾引号（"..." 或 '...'），保护含空格/特殊字符的密码
-        let chars: Vec<char> = value.chars().collect();
-        if chars.len() >= 2
-            && (chars[0] == '"' || chars[0] == '\'')
-            && chars[0] == chars[chars.len() - 1]
-        {
-            value = chars[1..chars.len() - 1].iter().collect();
-        }
-        // 真实环境优先：已被 setx/系统设置的同名变量不被 .env 覆盖
-        if std::env::var_os(key).is_some() {
-            continue;
-        }
-        std::env::set_var(key, value);
+        std::env::set_var(&key, &value);
+        // 登记归 .env 管辖：即使日后从 .env 删掉，lookup 也不再回退到
+        // 上面这行 set_var 写进真实环境的残留值
+        store.env_owned.insert(key.clone());
+        store.values.insert(key, value);
         loaded += 1;
     }
     loaded
+}
+
+/// 运行时重读 .env，只刷新内存态 [`EnvStore`]，**绝不触碰进程环境**。
+///
+/// 为什么不用 `set_var`：Linux/glibc 的 `setenv` 会 realloc `environ` 数组，而
+/// `/profile load` 发生时进程是重度多线程的（tokio runtime、每 session 任务、
+/// 每引擎看门狗线程），任何线程此刻的 `getenv`（`chrono::Local::now` 触发的 tzset、
+/// 脚本的 `os.getenv`）都可能读到已释放的指针 → SIGSEGV。Windows 侧虽只表现为
+/// 「读不到新值」（`SetEnvironmentVariableW` 只改 Win32 块，CRT `_environ` 快照不动），
+/// 但两端统一走内存表可彻底消除这类平台差异。
+///
+/// 返回「新增或值发生变化」的键数量：内容未变时返回 0，避免每次 `/profile load` 都刷屏。
+/// 行级解析告警追加到 `warns`，由调用方经终端 UI 展示（raw mode 下 stderr 不可见）。
+///
+/// 从 .env **删除某行**会立即生效（无需重启）：被删的键仍留在 `env_owned` 中，
+/// [`lookup_credential_var`] 因此不再回退到启动时 `set_var` 写进真实环境的残留值，
+/// 展开失败会由调用方（`/profile load`）转为「已中止加载」的可操作提示。
+///
+/// **已知限制**：删掉整个文件不适用上述结论。本函数读不到文件时只告警并返回 0，
+/// 不改动 `values`（故意如此：把「读失败」当成「已清空」会在权限/编码故障时误删全部凭据），
+/// 而调用方 `/profile load` 又以 `path.exists()` 做了前置门控 —— 于是旧快照会一直用到重启。
+pub fn reload_env_file(path: &Path, warns: &mut Vec<String>) -> usize {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            warns.push(format!(
+                "无法读取 {} ({})，若为编码问题请以 UTF-8 保存",
+                path.display(),
+                e
+            ));
+            return 0;
+        }
+    };
+    let pairs = parse_env_content(&content, warns);
+
+    let mut store = write_lock(env_store());
+    // 整体重建 values：.env 里删掉的键不再由内存表提供，且因仍留在 env_owned 中，
+    // 也不会被 std::env::var 的启动期残留兜住 —— 删键立即生效
+    let mut values = HashMap::new();
+    let mut changed = 0;
+    for (key, value) in pairs {
+        // system_owned 启动后不再重算：真实环境不会自行变化，
+        // 重算反而会让「先 setx 后写 .env」的键在两路径下表现不一致
+        if store.system_owned.contains(&key) {
+            continue;
+        }
+        if store.values.get(&key) != Some(&value) {
+            changed += 1;
+        }
+        // env_owned 只增不减，见字段文档
+        store.env_owned.insert(key.clone());
+        values.insert(key, value);
+    }
+    store.values = values;
+    changed
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1023,7 +1212,8 @@ port = 6000"#
     /// 解析并收集告警，用于验证 validate_rate_limit
     fn rate_limit_warnings(toml_str: &str) -> Vec<String> {
         let mut warns = Vec::new();
-        ConnectionConfig::from_toml_str_with_warnings(toml_str, &mut warns).unwrap();
+        ConnectionConfig::from_toml_str_with_warnings(toml_str, &mut warns, &mut Vec::new())
+            .unwrap();
         warns
     }
 
@@ -1267,7 +1457,7 @@ port = 6000"#
 
     #[test]
     fn test_from_toml_str_with_warnings_collects_missing_var() {
-        // 告警收集：缺失变量的信息交给调用方决定输出渠道（启动 eprintln / TUI append_output）
+        // 告警收集：缺失变量的信息交给调用方决定输出渠道（启动 eprintln / TUI 终端 UI）
         let toml_str = r#"
             name = "warned"
             host = "example.com"
@@ -1275,11 +1465,21 @@ port = 6000"#
             password = "${RLM_TEST_WARN_MISSING_VAR}"
         "#;
         let mut warns = Vec::new();
-        let cfg = ConnectionConfig::from_toml_str_with_warnings(toml_str, &mut warns).unwrap();
+        let mut missing = Vec::new();
+        let cfg = ConnectionConfig::from_toml_str_with_warnings(toml_str, &mut warns, &mut missing)
+            .unwrap();
         assert_eq!(warns.len(), 1);
         assert!(warns[0].contains("RLM_TEST_WARN_MISSING_VAR"));
         assert!(warns[0].contains("warned"), "告警应含角色名便于定位");
         assert_eq!(cfg.password, None);
+        // missing 与 warns 并行上报：前者供运行时调用方判定是否中止加载
+        assert_eq!(
+            missing,
+            vec![CredentialMiss {
+                field: "password",
+                var: "RLM_TEST_WARN_MISSING_VAR".to_string()
+            }]
+        );
     }
 
     #[test]
@@ -1335,5 +1535,260 @@ port = 6000"#
         let app2 = AppConfig::load_default(dir2.path().to_str().unwrap());
         assert_eq!(app1.connections[0].password.as_deref(), Some("pw-one"));
         assert_eq!(app2.connections[0].password.as_deref(), Some("pw-two"));
+    }
+
+    // ===== 运行时 .env 刷新（EnvStore）=====
+    //
+    // 这批测试针对的线上事故：.env 原先只在启动时读一次，启动后新写入的键
+    // 对进程不可见 → /profile load 把凭据置 None 并静默建 session → Lua 侧
+    // char_name 为 nil → 脚本顶层拼接时崩溃。
+    //
+    // 注意：这些用例**故意不清空全局 EnvStore**。清空会与其他测试的
+    // 「load → lookup」窗口竞争（尤其 system_owned 被抹后系统键会被误当成
+    // .env 自有键刷新），反而引入 flaky。隔离靠每个用例独占的 RLM_ENV_R_* 键名。
+
+    #[test]
+    fn test_reload_env_file_picks_up_key_added_after_startup() {
+        // 主回归用例：复现「启动后才往 .env 里加键」的线上时序
+        let dir = TempDir::new().unwrap();
+        let env_path = dir.path().join(".env");
+        // 启动瞬间 .env 里只有 A
+        fs::write(&env_path, "RLM_ENV_R_A=pw-a\n").unwrap();
+        assert_eq!(load_env_file(&env_path), 1);
+        assert_eq!(lookup_credential_var("RLM_ENV_R_B"), None, "B 此时应不可见");
+
+        // 启动之后才追加 B
+        fs::write(&env_path, "RLM_ENV_R_A=pw-a\nRLM_ENV_R_B=pw-b\n").unwrap();
+        let mut warns = Vec::new();
+        assert_eq!(
+            reload_env_file(&env_path, &mut warns),
+            1,
+            "新增键应计入更新数"
+        );
+        assert!(warns.is_empty(), "合法内容不应告警，实际 {:?}", warns);
+
+        assert_eq!(
+            lookup_credential_var("RLM_ENV_R_B").as_deref(),
+            Some("pw-b")
+        );
+        // 端到端：占位符现在能展开，而不是 Err(变量名)
+        assert_eq!(
+            expand_credential_placeholder("${RLM_ENV_R_B}"),
+            Ok("pw-b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_reload_env_file_refreshes_changed_value() {
+        // 改值同样生效，且必须做到「不碰进程环境」（避开 Linux setenv 竞态）
+        let dir = TempDir::new().unwrap();
+        let env_path = dir.path().join(".env");
+        fs::write(&env_path, "RLM_ENV_R_C=old\n").unwrap();
+        load_env_file(&env_path);
+
+        fs::write(&env_path, "RLM_ENV_R_C=new\n").unwrap();
+        let mut warns = Vec::new();
+        assert_eq!(
+            reload_env_file(&env_path, &mut warns),
+            1,
+            "改值应计入更新数"
+        );
+        // 内存表优先于启动时 set_var 写进真实环境的旧值
+        assert_eq!(lookup_credential_var("RLM_ENV_R_C").as_deref(), Some("new"));
+        assert_eq!(
+            std::env::var("RLM_ENV_R_C").unwrap(),
+            "old",
+            "reload 不得调 set_var，否则 Linux 下会与并发 getenv 竞态"
+        );
+    }
+
+    #[test]
+    fn test_reload_env_file_returns_zero_when_unchanged() {
+        // 内容未变时返回 0，否则每次 /profile load 都会刷一行「已更新 N 个凭据键」
+        let dir = TempDir::new().unwrap();
+        let env_path = dir.path().join(".env");
+        fs::write(&env_path, "RLM_ENV_R_D=same\n").unwrap();
+        load_env_file(&env_path);
+
+        let mut warns = Vec::new();
+        assert_eq!(reload_env_file(&env_path, &mut warns), 0);
+        // 反复 reload 仍为 0（幂等）
+        assert_eq!(reload_env_file(&env_path, &mut warns), 0);
+        assert!(warns.is_empty());
+    }
+
+    #[test]
+    fn test_reload_env_file_does_not_override_system_owned() {
+        // setx/系统变量优先的语义在刷新后必须继续成立
+        std::env::set_var("RLM_ENV_R_SYS", "from_system");
+        let dir = TempDir::new().unwrap();
+        let env_path = dir.path().join(".env");
+        fs::write(&env_path, "RLM_ENV_R_SYS=from_envfile\n").unwrap();
+        assert_eq!(load_env_file(&env_path), 0, "系统键不计入写入数");
+
+        let mut warns = Vec::new();
+        assert_eq!(
+            reload_env_file(&env_path, &mut warns),
+            0,
+            "系统键不可被 .env 刷新"
+        );
+        assert_eq!(
+            lookup_credential_var("RLM_ENV_R_SYS").as_deref(),
+            Some("from_system")
+        );
+    }
+
+    #[test]
+    fn test_reload_env_file_collects_parse_warnings() {
+        // 行级告警走 warns 而非 eprintln：raw mode 下 stderr 不可见
+        let dir = TempDir::new().unwrap();
+        let env_path = dir.path().join(".env");
+        fs::write(&env_path, "RLM_ENV_R_E=ok\nbad name=x\nnoequals\n").unwrap();
+
+        let mut warns = Vec::new();
+        assert_eq!(reload_env_file(&env_path, &mut warns), 1, "合法行仍应生效");
+        assert_eq!(warns.len(), 2, "两条非法行各一条告警，实际 {:?}", warns);
+        assert!(
+            warns[0].contains("第 2 行") && warns[0].contains("非法"),
+            "首条应指回非法变量名，实际 {:?}",
+            warns[0]
+        );
+        assert!(
+            warns[1].contains("第 3 行") && warns[1].contains("缺少"),
+            "次条应指回缺等号，实际 {:?}",
+            warns[1]
+        );
+        assert_eq!(lookup_credential_var("RLM_ENV_R_E").as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn test_reload_env_file_missing_file_returns_zero() {
+        let mut warns = Vec::new();
+        let n = reload_env_file(Path::new("nonexistent_rlm_test_dir/.env"), &mut warns);
+        assert_eq!(n, 0);
+        assert_eq!(warns.len(), 1);
+        assert!(
+            warns[0].contains("无法读取") && warns[0].contains("UTF-8"),
+            "应给出可操作提示（记事本存 GBK 是常见起因），实际 {:?}",
+            warns[0]
+        );
+    }
+
+    /// 主回归：从 .env 删掉某键后必须立即失效，不能被启动期 `set_var` 的残留兜住。
+    ///
+    /// 2026-09-11 实测事故：删掉 MUD_LPSSX_USER 后 `/profile load lpssx` 仍用旧值
+    /// 成功登录，建出第二个同名 session 与原 session 互相顶号，双方 auto_reconnect
+    /// 触发无限重连循环（日志 ≈127 KB/min）。
+    #[test]
+    fn test_reload_env_file_invalidates_key_deleted_from_env() {
+        let dir = TempDir::new().unwrap();
+        let env_path = dir.path().join(".env");
+        fs::write(&env_path, "RLM_ENV_DEL_USER=alice\nRLM_ENV_DEL_KEEP=k\n").unwrap();
+        load_env_file(&env_path);
+        assert_eq!(
+            lookup_credential_var("RLM_ENV_DEL_USER").as_deref(),
+            Some("alice")
+        );
+
+        // 删掉 USER 行，保留 KEEP 行
+        fs::write(&env_path, "RLM_ENV_DEL_KEEP=k\n").unwrap();
+        let mut warns = Vec::new();
+        reload_env_file(&env_path, &mut warns);
+
+        assert_eq!(
+            lookup_credential_var("RLM_ENV_DEL_USER"),
+            None,
+            "从 .env 删键后必须立即失效，不得回退到 set_var 的残留值"
+        );
+        assert_eq!(
+            std::env::var("RLM_ENV_DEL_USER").unwrap(),
+            "alice",
+            "残留确实还在进程环境里 —— 是 lookup 主动屏蔽了它，而非它消失了"
+        );
+        // 展开随之失败，/profile load 才能转为「已中止加载」而不是建出重复 session
+        assert!(expand_credential_placeholder("${RLM_ENV_DEL_USER}").is_err());
+        // 未被删的键不受影响
+        assert_eq!(
+            lookup_credential_var("RLM_ENV_DEL_KEEP").as_deref(),
+            Some("k")
+        );
+    }
+
+    /// 删掉后再加回来要能恢复（可带新值），全程不需重启
+    #[test]
+    fn test_reload_env_file_restores_key_readded_to_env() {
+        let dir = TempDir::new().unwrap();
+        let env_path = dir.path().join(".env");
+        fs::write(&env_path, "RLM_ENV_READD=v1\n").unwrap();
+        load_env_file(&env_path);
+
+        fs::write(&env_path, "").unwrap();
+        let mut warns = Vec::new();
+        reload_env_file(&env_path, &mut warns);
+        assert_eq!(lookup_credential_var("RLM_ENV_READD"), None);
+
+        fs::write(&env_path, "RLM_ENV_READD=v2\n").unwrap();
+        assert_eq!(reload_env_file(&env_path, &mut warns), 1);
+        assert_eq!(
+            lookup_credential_var("RLM_ENV_READD").as_deref(),
+            Some("v2")
+        );
+    }
+
+    /// 回退分支不能被 `env_owned` 屏蔽逻辑破坏：从未经 .env 提供的键
+    /// （测试直接 set_var 的、用户 setx 的）仍必须可见
+    #[test]
+    fn test_lookup_credential_var_falls_back_for_keys_never_in_env() {
+        std::env::set_var("RLM_ENV_EXT_ONLY", "external");
+        assert_eq!(
+            lookup_credential_var("RLM_ENV_EXT_ONLY").as_deref(),
+            Some("external")
+        );
+        // 从未定义过的键返回 None，交给调用方转为 CredentialMiss
+        assert_eq!(
+            lookup_credential_var("RLM_ENV_NEVER_DEFINED_ANYWHERE"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_from_toml_str_with_warnings_no_miss_for_literal_credentials() {
+        // 字面值凭据不查环境，必须零 missing —— 否则 /profile load 会被中止逻辑误伤
+        let toml_str = r#"
+            name = "literal"
+            host = "example.com"
+            port = 4000
+            username = "plain-user"
+            password = "plain-pw"
+        "#;
+        let mut warns = Vec::new();
+        let mut missing = Vec::new();
+        let cfg = ConnectionConfig::from_toml_str_with_warnings(toml_str, &mut warns, &mut missing)
+            .unwrap();
+        assert!(missing.is_empty(), "字面值不该报缺失，实际 {:?}", missing);
+        assert!(warns.is_empty(), "安全配置不该告警，实际 {:?}", warns);
+        assert_eq!(cfg.username.as_deref(), Some("plain-user"));
+    }
+
+    #[test]
+    fn test_from_toml_str_with_warnings_no_miss_when_field_absent() {
+        // TOML 里根本没写 username/password 是既有的「留待手动输入」语义，
+        // 与「写了 ${VAR} 却查不到」是两回事，绝不能触发中止
+        let toml_str = r#"
+            name = "nocrd"
+            host = "example.com"
+            port = 4000
+        "#;
+        let mut warns = Vec::new();
+        let mut missing = Vec::new();
+        let cfg = ConnectionConfig::from_toml_str_with_warnings(toml_str, &mut warns, &mut missing)
+            .unwrap();
+        assert_eq!(cfg.username, None);
+        assert_eq!(cfg.password, None);
+        assert!(
+            missing.is_empty(),
+            "字段未配置不等于展开失败，实际 {:?}",
+            missing
+        );
     }
 }

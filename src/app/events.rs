@@ -505,6 +505,18 @@ impl App {
         let fg_name = self.manager.foreground_name().to_string();
         // 更新 panic hook 上下文中的 session name，使 panic 信息写入正确的日志文件
         crate::log::panic_hook::set_current_session(&fg_name);
+        // 切换记录本身也要存档 + 落日志：只写终端的话，下一次 switch_foreground 的
+        // replace_output 会把它抹掉，事后无法还原「玩家什么时候切过去的」。
+        //
+        // 必须**先入档、再整体 replace**，不能沿用 sys_output_to 的「replace 后 append」：
+        // 那样该行会同时存在于存档末尾与终端，下次切回同一 session 时 replace 先把它
+        // 显示一遍、紧接着 append 又写一遍，屏幕上出现两条相邻的重复记录，且每次
+        // 来回切换都多一条。这里改为入档后由 replace_output 一次性呈现，天然只有一条。
+        let switch_msg = format!("[系统] 切换到连接 {} ({})", display_pos, fg_name);
+        let cap = self.config.general.scroll_buffer;
+        if let Some(session) = self.manager.get_mut_by_id(session_id) {
+            push_session_output_capped(&mut session.output_lines, &switch_msg, cap);
+        }
         // 拆分借用：manager（不可变）和 terminal（可变）是 App 的不同字段
         let empty = Vec::new();
         let output: &[String] = self
@@ -513,8 +525,14 @@ impl App {
             .map(|s| s.output_lines.as_slice())
             .unwrap_or(&empty);
         self.terminal.replace_output(output)?;
-        self.terminal
-            .append_output(&format!("[系统] 切换到连接 {} ({})", display_pos, fg_name))?;
+        // 日志名与 sys_output_to 保持一致的空名兜底
+        let log_name = if fg_name.is_empty() {
+            "system"
+        } else {
+            &fg_name
+        };
+        self.logger
+            .log_debug(log_name, &AnsiParser::strip_ansi(&switch_msg));
 
         // 立即排空新前台 session 的 pending_data，避免切换后显示延迟
         let pending = self
@@ -537,5 +555,104 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// 把系统消息写入指定 session：终端 + 该 session 回看缓冲 + 日志文件。
+    ///
+    /// 为什么必须三写：
+    /// - 只写终端 → [`App::switch_foreground`] 用 `replace_output` 整体覆盖，消息被永久销毁。
+    ///   `/profile load` 正是最坏组合：先打印凭据告警，建连成功后自动切前台。
+    /// - 不写日志 → Linux daemon 模式下 pty 输出被 drain 线程读掉丢弃，事后无从追溯。
+    ///
+    /// 终端写入是无条件的（即使 `session_id` 不是前台）：连接失败、凭据展开失败
+    /// 这类消息发生在旧前台视图上，玩家必须当场看见。
+    ///
+    /// 只用于低频诊断类消息：`Logger::log_cat` 每次都会 `fs::read_dir` 做轮转清理，
+    /// 高频路径（每条服务端数据、每次按键）接入会在 J1800 上产生可感知的 IO 开销。
+    pub(crate) fn sys_output_to(&mut self, session_id: SessionId, text: &str) -> io::Result<()> {
+        // 预提取 name，避开下面与 terminal / logger 的借用冲突（同 switch_foreground 的手法）
+        let name = self
+            .manager
+            .get_by_id(session_id)
+            .map(|s| s.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "system".to_string());
+        let cap = self.config.general.scroll_buffer;
+
+        self.terminal.append_output(text)?;
+
+        if let Some(session) = self.manager.get_mut_by_id(session_id) {
+            push_session_output_capped(&mut session.output_lines, text, cap);
+        }
+
+        // 日志里剥掉 ANSI：系统消息本身无色，但调用方可能传入带色文本
+        self.logger.log_debug(&name, &AnsiParser::strip_ansi(text));
+        Ok(())
+    }
+
+    /// [`App::sys_output_to`] 的前台快捷版
+    pub(crate) fn sys_output(&mut self, text: &str) -> io::Result<()> {
+        let fg_id = self.manager.foreground_id;
+        self.sys_output_to(fg_id, text)
+    }
+}
+
+/// 把一行（或多行）系统消息压入 session 回看缓冲，并按 cap 从头裁剪。
+///
+/// 裁剪逻辑与上方处理服务端数据、Lua 日志的既有实现保持一致（`scroll_buffer`）。
+/// 抽成自由函数是为了能脱离 `App` 单测 —— 构造 `App` 需要真实终端。
+/// `pub(super)` 供 `app::commands` 的 `/profile load` 复用（向新 session 播种加载告警）。
+pub(super) fn push_session_output_capped(lines: &mut Vec<String>, text: &str, cap: usize) {
+    for part in text.split('\n') {
+        let trimmed = part.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        lines.push(trimmed.to_string());
+    }
+    if lines.len() > cap {
+        let drain_count = lines.len() - cap;
+        lines.drain(..drain_count);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::push_session_output_capped;
+
+    #[test]
+    fn test_push_session_output_capped_appends() {
+        let mut lines = vec!["旧消息".to_string()];
+        push_session_output_capped(&mut lines, "[系统] 新消息", 5000);
+        assert_eq!(lines, vec!["旧消息", "[系统] 新消息"]);
+    }
+
+    #[test]
+    fn test_push_session_output_capped_drains_over_cap() {
+        // 超出 cap 时从头部 drain，保留最新 —— 与服务端数据路径的裁剪方向一致
+        let mut lines: Vec<String> = (0..5).map(|i| format!("l{}", i)).collect();
+        push_session_output_capped(&mut lines, "l5", 4);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines, vec!["l2", "l3", "l4", "l5"]);
+    }
+
+    #[test]
+    fn test_push_session_output_capped_splits_multiline_and_skips_empty() {
+        // format_lua_error 等调用方会传入含 \n 的多行文本；空行不入缓冲
+        let mut lines = Vec::new();
+        push_session_output_capped(&mut lines, "a\nb\n\n", 5000);
+        assert_eq!(lines, vec!["a", "b"]);
+
+        // CRLF 也不能把 \r 留在缓冲里
+        let mut crlf = Vec::new();
+        push_session_output_capped(&mut crlf, "x\r\ny\r\n", 5000);
+        assert_eq!(crlf, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn test_push_session_output_capped_ignores_blank_input() {
+        let mut lines = vec!["保留".to_string()];
+        push_session_output_capped(&mut lines, "", 5000);
+        assert_eq!(lines, vec!["保留"], "空文本不得压入空行");
     }
 }

@@ -8,30 +8,41 @@ use std::path::Path;
 use crate::config::AppConfig;
 use crate::connection::SessionId;
 
+use super::events::push_session_output_capped;
 use super::parse::{format_lua_error, parse_builtin_command, BuiltinCommand, ProfileSubcommand};
 use super::session::{ConnectRequest, ReconnectRequest};
 use super::{App, TermSettings};
 
 /// 注入 session 登录凭证到新建引擎（与 init_lua_for_session 对齐）：
-/// 脚本顶层 me.charid=char_name 依赖 char_name 全局变量
+/// 脚本顶层 me.charid=char_name 依赖 char_name 全局变量。
+///
+/// 返回凭据缺失告警而不自行输出：本函数只持有 engine，拿不到终端与日志，
+/// 由调用方经 `sys_output` 三写。**静默跳过是线上事故的成因之一** ——
+/// 玩家只看到「charid 为 nil」的远距离崩溃，看不到「凭据根本没注入」这个真因。
+/// 四个调用点（/load、/reload、/all reload、/all /load）紧接着都会 load_script，
+/// 所以无需像 init_lua_for_session 那样再按「是否配了脚本」做门控。
 fn inject_session_credentials(
     engine: &mut crate::lua::LuaEngine,
     username: &Option<String>,
     password: &Option<String>,
-) {
-    if let Some(uname) = username {
-        if !uname.is_empty() {
+) -> Vec<String> {
+    let mut warns = Vec::new();
+    match username.as_deref().filter(|u| !u.is_empty()) {
+        Some(uname) => {
             engine.set_variable("char_name", uname);
             engine.set_global("char_name", uname);
             engine.set_char_name(uname);
         }
+        None => warns.push("未配置 username，脚本中 char_name 将为 nil".to_string()),
     }
-    if let Some(pwd) = password {
-        if !pwd.is_empty() {
+    match password.as_deref().filter(|p| !p.is_empty()) {
+        Some(pwd) => {
             engine.set_variable("char_password", pwd);
             engine.set_global("char_password", pwd);
         }
+        None => warns.push("未配置 password，脚本中 char_password 将为 nil".to_string()),
     }
+    warns
 }
 
 impl App {
@@ -280,7 +291,10 @@ impl App {
                         if let Some(ref conn_state) = saved_conn_state {
                             engine.restore_connection_state(conn_state);
                         }
-                        inject_session_credentials(&mut engine, &fg_username, &fg_password);
+                        for w in inject_session_credentials(&mut engine, &fg_username, &fg_password)
+                        {
+                            self.sys_output(&format!("[警告] [{}] {}", fg_name, w))?;
+                        }
                         engine.set_log_dir(&self.config.general.log_dir);
                         match engine.load_script(&path) {
                             Ok(()) => {
@@ -350,7 +364,11 @@ impl App {
                             }
                             // 重新注入登录凭证（与 init_lua_for_session 一致）：
                             // 脚本顶层 me.charid=char_name 依赖该全局变量
-                            inject_session_credentials(&mut engine, &fg_username, &fg_password);
+                            for w in
+                                inject_session_credentials(&mut engine, &fg_username, &fg_password)
+                            {
+                                self.sys_output(&format!("[警告] [{}] {}", fg_name, w))?;
+                            }
                             // 重新注入日志目录（供 GetInfo(58) 返回，不在 ConnectionState 中）
                             engine.set_log_dir(&self.config.general.log_dir);
                             match engine.load_script(&path) {
@@ -594,14 +612,15 @@ impl App {
                 ProfileSubcommand::Load { name } => {
                     // /profile load 与 load_profiles 一致，拒绝加载示例配置
                     if name.eq_ignore_ascii_case("example") {
-                        self.terminal
-                            .append_output("[错误] 不能加载示例配置文件 (example.toml)")?;
+                        self.sys_output("[错误] 不能加载示例配置文件 (example.toml)")?;
                         return Ok(());
                     }
-                    let profile_dir = &self.config.general.profile_dir;
-                    let profile_path = Path::new(profile_dir).join(format!("{}.toml", name));
+                    // 必须 clone：下面多处 sys_output 需要 &mut self，
+                    // 而 profile_dir 在构造 env_path 时还要再读一次
+                    let profile_dir = self.config.general.profile_dir.clone();
+                    let profile_path = Path::new(&profile_dir).join(format!("{}.toml", name));
                     if !profile_path.exists() {
-                        self.terminal.append_output(&format!(
+                        self.sys_output(&format!(
                             "[错误] 角色配置不存在: {}",
                             profile_path.display()
                         ))?;
@@ -610,7 +629,7 @@ impl App {
                     let content = match fs::read_to_string(&profile_path) {
                         Ok(c) => c,
                         Err(e) => {
-                            self.terminal.append_output(&format!(
+                            self.sys_output(&format!(
                                 "[错误] 无法读取配置文件 {}: {}",
                                 profile_path.display(),
                                 e
@@ -618,29 +637,99 @@ impl App {
                             return Ok(());
                         }
                     };
+
+                    // 先刷新 .env 再解析占位符。.env 原先只在启动时读一次，启动后
+                    // 新增的键对本进程不可见 → 凭据被置 None → Lua 侧 char_name 为 nil
+                    // → 脚本顶层拼接时崩溃。刷新只走内存态 EnvStore，绝不调 set_var
+                    // （Linux 下 setenv 会 realloc environ，与并发 getenv 竞态可致段错误）。
+                    let env_path = Path::new(&profile_dir).join(".env");
+                    let env_exists = env_path.exists();
+                    let mut env_warns = Vec::new();
+                    // 文件不存在时故意不刷新：reload 会把整个内存表当成「.env 已清空」重建，
+                    // 而 EnvStore 是进程级全局态，清空会连带抹掉其他测试/其他 profile 正在用的键
+                    // （测试靠独占键名前缀隔离，一个「清全部」的入口会直接破坏该策略）。
+                    // 代价：运行时删掉单行立即生效，删掉**整个文件**则需重启才失效 ——
+                    // 此时仍用旧凭据登录。因重名保护已独立修好，这只是意外而非危害。
+                    let updated = if env_exists {
+                        crate::config::reload_env_file(&env_path, &mut env_warns)
+                    } else {
+                        0
+                    };
+                    for w in env_warns {
+                        self.sys_output(&format!("[警告] .env 解析: {}", w))?;
+                    }
+                    if updated > 0 {
+                        self.sys_output(&format!(
+                            "[系统] 已重新读取 {}，更新 {} 个凭据键",
+                            env_path.display(),
+                            updated
+                        ))?;
+                    }
+
                     // TUI 运行中 stderr 不可见，展开告警须通过终端 UI 展示给玩家，
                     // 否则环境变量缺失时密码静默置空，只见登录失败无从排查。
                     let mut warns = Vec::new();
+                    let mut missing = Vec::new();
                     let conn_config =
                         match crate::config::ConnectionConfig::from_toml_str_with_warnings(
-                            &content, &mut warns,
+                            &content,
+                            &mut warns,
+                            &mut missing,
                         ) {
                             Ok(c) => c,
                             Err(e) => {
-                                self.terminal
-                                    .append_output(&format!("[错误] 配置文件格式错误: {}", e))?;
+                                self.sys_output(&format!("[错误] 配置文件格式错误: {}", e))?;
                                 return Ok(());
                             }
                         };
-                    for w in warns {
-                        self.terminal
-                            .append_output(&format!("[警告] 凭据展开: {}", w))?;
+
+                    // 展开失败必须在建 session 之前拦下：session 一旦建起来就会自动
+                    // connect → switch_foreground，凭据为 nil 的脚本必然崩，而且崩在
+                    // 离真因很远的 include("config_"..charid..".lua")。
+                    // 注意与「TOML 里根本没写凭据」区分：后者是合法的手动输入语义，missing 为空。
+                    if !missing.is_empty() {
+                        for m in &missing {
+                            self.sys_output(&format!(
+                                "[错误] 凭据展开失败: {} 的 {} 引用的环境变量 {} 未定义",
+                                conn_config.name, m.field, m.var
+                            ))?;
+                        }
+                        let vars: Vec<&str> = missing.iter().map(|m| m.var.as_str()).collect();
+                        // 文件不存在时说「补齐」会误导（没文件可补），得说「创建」
+                        let fix_hint = if env_exists {
+                            format!("请在 {} 中补齐 {}", env_path.display(), vars.join(" / "))
+                        } else {
+                            format!(
+                                "请创建 {}（UTF-8 保存）并写入 {}",
+                                env_path.display(),
+                                vars.join(" / ")
+                            )
+                        };
+                        self.sys_output(&format!(
+                            "[错误] 已中止加载 '{}': {} 后重新执行 /profile load {}（无需重启客户端）",
+                            name, fix_hint, name
+                        ))?;
+                        return Ok(());
+                    }
+
+                    // 非致命告警既要当场可见，也要在自动切前台后依然可见 ——
+                    // 所以同时收集起来，等 session 建好后播种进它的回看缓冲。
+                    //
+                    // 走到这里的 warns **只可能是限速类配置告警**：凭据展开失败会同时
+                    // 进 missing，已在上方整体中止。所以前缀不能写「凭据展开」（原文案
+                    // 从旧代码沿用而来，当时 warns 确实混着两类），否则限速告警被
+                    // 标成凭据问题，玩家会去查 .env 而不是查 cmds_per_sec
+                    let mut load_notes: Vec<String> = Vec::new();
+                    for w in &warns {
+                        let line = format!("[警告] 配置: {}", w);
+                        self.sys_output(&line)?;
+                        load_notes.push(line);
                     }
 
                     let session_id = match self.manager.add_connection_dynamic(&conn_config) {
                         Ok(id) => id,
                         Err(e) => {
-                            self.terminal.append_output(&format!("[错误] {}", e))?;
+                            self.sys_output(&format!("[错误] {}", e))?;
                             return Ok(());
                         }
                     };
@@ -656,11 +745,28 @@ impl App {
                     }
 
                     self.update_status_bar()?;
-                    let _ = self.connect_tx.try_send(ConnectRequest { session_id });
-                    self.terminal.append_output(&format!(
+                    let loading_msg = format!(
                         "[系统] 正在从配置文件加载角色 '{}' 并连接 ({}:{})",
                         conn_config.name, conn_config.host, conn_config.port
-                    ))?;
+                    );
+
+                    // 播种进新 session 的回看缓冲：connect 成功后 perform_connect 会自动
+                    // switch_foreground，而它用新 session 的 output_lines 整体 replace_output ——
+                    // 上面这些消息此刻只存在于旧前台缓冲，不播种就会被抹掉。
+                    // 必须在 try_send 之前完成：否则 connect 事件一旦被处理就来不及了。
+                    load_notes.push(loading_msg.clone());
+                    let cap = self.config.general.scroll_buffer;
+                    if let Some(session) = self.manager.get_mut_by_id(session_id) {
+                        for note in &load_notes {
+                            push_session_output_capped(&mut session.output_lines, note, cap);
+                        }
+                    }
+                    // try_send 紧随播种、先于任何可失败的输出：sys_output 内部要 flush
+                    // stdout，daemon 模式或管道断裂时会返回 Err，若排在前面就会让
+                    // session 建好却永不连接 —— 而它占着名字，重名保护会拦住后续的
+                    // /profile load，用户必须先 /close 才能恢复（改动前的顺序正是如此）
+                    let _ = self.connect_tx.try_send(ConnectRequest { session_id });
+                    self.sys_output(&loading_msg)?;
                 }
             },
 
@@ -854,11 +960,13 @@ impl App {
                                     }
                                     // 重新注入登录凭证（与 init_lua_for_session 一致）：
                                     // 脚本顶层 me.charid=char_name 依赖该全局变量
-                                    inject_session_credentials(
+                                    for w in inject_session_credentials(
                                         &mut engine,
                                         &s_username,
                                         &s_password,
-                                    );
+                                    ) {
+                                        self.sys_output(&format!("[警告] [{}] {}", name, w))?;
+                                    }
                                     // 重新注入日志目录（供 GetInfo(58) 返回，不在 ConnectionState 中）
                                     engine.set_log_dir(&self.config.general.log_dir);
                                     match engine.load_script(&path) {
@@ -915,7 +1023,13 @@ impl App {
                                 if let Some(ref conn) = saved_conn {
                                     engine.restore_connection_state(conn);
                                 }
-                                inject_session_credentials(&mut engine, &l_username, &l_password);
+                                for w in inject_session_credentials(
+                                    &mut engine,
+                                    &l_username,
+                                    &l_password,
+                                ) {
+                                    self.sys_output(&format!("[警告] [{}] {}", name, w))?;
+                                }
                                 engine.set_log_dir(&self.config.general.log_dir);
                                 match engine.load_script(&path) {
                                     Ok(()) => {
@@ -989,5 +1103,69 @@ impl App {
             _ => unreachable!(),
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inject_session_credentials;
+    use crate::lua::LuaEngine;
+
+    /// P1 回归：凭据缺失必须产出告警而不是静默跳过。
+    /// 线上事故的成因之一即「静默跳过」——玩家只看到脚本里 charid 为 nil 的
+    /// 远距离崩溃，看不到「凭据根本没注入」这个真因。
+    #[test]
+    fn test_inject_credentials_warns_when_username_missing() {
+        let mut engine = LuaEngine::new().unwrap();
+        let warns = inject_session_credentials(&mut engine, &None, &Some("secret".to_string()));
+        assert_eq!(warns.len(), 1, "只应告警 username 一项: {:?}", warns);
+        assert!(
+            warns[0].contains("username") && warns[0].contains("char_name"),
+            "告警应点名缺失字段与受影响的全局变量: {}",
+            warns[0]
+        );
+        // password 不应被连带清空
+        assert_eq!(
+            engine.eval_to_string("return char_password").unwrap(),
+            "secret"
+        );
+        // char_name 确实未注入（nil），脚本顶层拼接会崩 —— 这正是必须告警的原因
+        assert!(
+            engine.eval_to_string("return char_name").is_err(),
+            "未注入时 char_name 应为 nil"
+        );
+    }
+
+    /// 空字符串与 None 同等对待：`.env` 里写了 `MUD_X_USER=`（值为空）时
+    /// 占位符展开成功但内容为空，同样会让脚本拿到 nil，必须告警。
+    #[test]
+    fn test_inject_credentials_warns_when_credentials_empty() {
+        let mut engine = LuaEngine::new().unwrap();
+        let warns =
+            inject_session_credentials(&mut engine, &Some(String::new()), &Some(String::new()));
+        assert_eq!(warns.len(), 2, "username 与 password 都应告警: {:?}", warns);
+        assert!(warns.iter().any(|w| w.contains("char_name")));
+        assert!(warns.iter().any(|w| w.contains("char_password")));
+    }
+
+    #[test]
+    fn test_inject_credentials_no_warn_when_present() {
+        let mut engine = LuaEngine::new().unwrap();
+        let warns = inject_session_credentials(
+            &mut engine,
+            &Some("fcriar".to_string()),
+            &Some("secret".to_string()),
+        );
+        assert!(warns.is_empty(), "凭据齐全时不应产生告警: {:?}", warns);
+        assert_eq!(engine.eval_to_string("return char_name").unwrap(), "fcriar");
+        assert_eq!(
+            engine.eval_to_string("return char_password").unwrap(),
+            "secret"
+        );
+        // set_char_name 同步进 ConnectionState，GetInfo(3) 才能返回角色名
+        assert_eq!(
+            engine.eval_to_string("return GetInfo(3)").unwrap(),
+            "fcriar"
+        );
     }
 }
