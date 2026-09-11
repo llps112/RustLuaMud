@@ -744,7 +744,6 @@ impl App {
                         self.logger.set_session_max_files(&conn_config.name, count);
                     }
 
-                    self.update_status_bar()?;
                     let loading_msg = format!(
                         "[系统] 正在从配置文件加载角色 '{}' 并连接 ({}:{})",
                         conn_config.name, conn_config.host, conn_config.port
@@ -761,11 +760,14 @@ impl App {
                             push_session_output_capped(&mut session.output_lines, note, cap);
                         }
                     }
-                    // try_send 紧随播种、先于任何可失败的输出：sys_output 内部要 flush
-                    // stdout，daemon 模式或管道断裂时会返回 Err，若排在前面就会让
-                    // session 建好却永不连接 —— 而它占着名字，重名保护会拦住后续的
-                    // /profile load，用户必须先 /close 才能恢复（改动前的顺序正是如此）
+                    // try_send 前置到所有可失败的 stdout 输出之前（update_status_bar 与
+                    // sys_output 内部都要 flush stdout，管道断裂/写失败时返回 Err），只为保证
+                    // connect 请求已入队。注意这不是为了防「孤儿 session 阻断重试」：Err 会一路
+                    // 传播到 run() 触发整个 app 退出（本 app 对 stdout 断裂的全局设计就是退出），
+                    // 重启后 profile 会重新加载。update_status_bar 一并移到 try_send 之后，是因为
+                    // 它排在前面时一旦失败，connect 连入队都做不到。
                     let _ = self.connect_tx.try_send(ConnectRequest { session_id });
+                    self.update_status_bar()?;
                     self.sys_output(&loading_msg)?;
                 }
             },
