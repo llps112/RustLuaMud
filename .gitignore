@@ -40,6 +40,9 @@ xkxMAP.db
 # 注意：位于仓库根目录，scripts/* 那条规则覆盖不到，必须单独锚定
 /class-gbk-old/
 /class-utf8-old/
+# class-cine：另一套 GBK 变体脚本快照（本地版本对比用，同样含业务逻辑，严禁入库）
+/class-cine/
+/class-cine.zip
 
 # 本地稳定性测试脚本（临时排障用，不入库）
 /stability_test.ps1
@@ -49,6 +52,7 @@ xkxMAP.db
 /docs/war_refactor_analysis.md
 /docs/j1800-performance-optimization-plans.md
 /docs/workflow_p3_plan.md
+/docs/shim-cleanup-plan.md
 
 # 本地资产（不入库）
 /michen_system_old.lua
