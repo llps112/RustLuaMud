@@ -61,7 +61,7 @@
 | Windows 10/11 64 位，即下即用 | [Windows 一键部署](#windows-一键部署) |
 | ARM64 / 需要改客户端代码 | [从源码编译](#方式二从源码编译) |
 
-> **Windows 说明**：Windows 平台已提供预编译 `RustLuaMud-windows-x86_64.zip`（stable 与 nightly 均附带），**仅支持 64 位系统**，暂不支持 32 位与 ARM64。本项目的 ANSI 样式、CJK 对齐与浮动面板依赖现代终端的 VT/ANSI 支持：**最低 Windows 10 version 1511**（保底可运行），**推荐 1809 及以上**（体验完整）；Win7/8/XP 不支持。终端推荐使用 Windows Terminal（传统 conhost 已做宽度自适应，但滚动条等固有缺陷无法完全消除）。
+> **Windows 说明**：Windows 平台已提供预编译 `RustLuaMud-windows-x86_64.zip`（stable 与 nightly 均附带），**仅支持 64 位系统**，暂不支持 32 位与 ARM64。本项目的 ANSI 样式、CJK 对齐与浮动面板依赖现代终端的 VT/ANSI 支持，启动时还会切换到备用屏幕缓冲区（`CSI ?1049h`）：**最低 Windows 10 version 1607 / Windows Server 2016**（同为 build 14393，已在 Server 2016 实机连续运行验证），**推荐 1809 及以上**（体验完整）；更早的 1511 只有 VT 基础开关、解析不了备用屏序列，Win7/8/XP 连开关都没有，均不支持。终端推荐使用 Windows Terminal（传统 conhost 已做宽度自适应，但滚动条等固有缺陷无法完全消除）。
 
 > **国内镜像加速**：`--gitee` 参数从 Gitee 下载，支持 stable 和 nightly 两种版本：
 > ```bash
@@ -562,7 +562,7 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 
 | 项目 | 要求 |
 |------|------|
-| 操作系统 | Linux（已测试）/ macOS / Windows 10 1511+（仅 64 位，推荐 1809+） |
+| 操作系统 | Linux（已测试）/ macOS / Windows 10 1607+ 或 Windows Server 2016+（仅 64 位，推荐 1809+） |
 | CPU | x86_64、i686（仅 Linux）或 aarch64 |
 | 内存 | 最低 512MB，推荐 2GB（10 连接） |
 | 终端 | 支持 UTF-8 + ANSI 转义序列；Windows 推荐 Windows Terminal |

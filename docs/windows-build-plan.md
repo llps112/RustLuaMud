@@ -25,7 +25,7 @@
 | 依赖 | Windows 兼容性 | 注意事项 |
 |------|---------------|----------|
 | `tokio` (full) | ✅ | Windows 走 IOCP，完全支持 |
-| `crossterm` 0.29 | ✅ | 需要 Win10+ 控制台 VT 模式（见第 5 节） |
+| `crossterm` 0.29 | ✅ | 需控制台 VT 模式与备用屏幕缓冲区（Win10 1607+ / Server 2016+，见第 6、7 节） |
 | `mlua` (luajit, vendored) | ⚠️ | LuaJIT 在 Windows **仅支持 x86 / x86_64**，不支持 ARM64；vendored 构建需要 C 编译器 |
 | `rusqlite` (bundled) | ✅ | bundled 通过 `cc` crate 编译 SQLite C 源码，需要 C 编译器 |
 | `encoding_rs` / `regex` / `serde` / `chrono` / `tempfile` / `tokio-socks` | ✅ | 纯 Rust，无障碍 |
@@ -88,8 +88,10 @@ GitHub Actions 增加 windows job（`runs-on: windows-latest`），复用现有 
   - 任务计划程序开机自启
   - 如需服务化，可用第三方工具（如 NSSM）包装为 Windows 服务（未经评估）
 - **终端要求**：crossterm 的 raw mode 与 ANSI 渲染要求控制台支持 VT 序列：
-  Windows 10 1607+ 的 cmd/PowerShell（自动启用 VT）或 Windows Terminal；
-  更老的系统（Win7/Win8）不支持，**不建议支持**。
+  Windows 10 1607+ / Server 2016+ 的 cmd/PowerShell 或 Windows Terminal 均可。
+  VT 开关（`ENABLE_VIRTUAL_TERMINAL_PROCESSING`）并非系统默认打开，而是由应用自行调
+  `SetConsoleMode` 打开，本项目经 crossterm 自动完成，无需用户配置；
+  更老的系统（Win7/Win8）连该开关都没有，**不支持**。
 - **脚本编码**：`scripts/class/`（GBK）+ `encoding_rs` 运行时转码机制与平台无关，Windows 下无需调整。
 - **防火墙**：游戏直连与 SOCKS5 代理出站需放行 `RustLuaMud.exe`。
 - **日志**：`logs/` 目录按账号名 + 时间滚动写入，与 Linux 行为一致，无平台差异。
@@ -109,7 +111,7 @@ GitHub Actions 增加 windows job（`runs-on: windows-latest`），复用现有 
 
 | 项目 | 最低要求 | 说明 |
 |------|----------|------|
-| 操作系统 | **Windows Server 2016** / Windows 10 1607+ | Windows Server 2016 (build 14393) 与 Windows 10 1607 同内核，支持控制台 VT 序列；crossterm 的 raw mode 与 ANSI 渲染依赖此特性 |
+| 操作系统 | **Windows Server 2016** / Windows 10 1607+ | 二者同为 build 14393。下限由**备用屏幕缓冲区** `CSI ?1049h` 决定（理由见下），而非 VT 基础开关 |
 | 架构 | x86_64（或 i686） | LuaJIT 限制，不支持 ARM64 |
 | 内存 | ≥ 512 MB | 项目资源占用极低（Linux 侧 10 连接实测 2GB 整机无压力） |
 | 终端 | Windows Terminal 或系统自带 cmd/PowerShell | 需支持 ANSI/VT |
@@ -117,13 +119,27 @@ GitHub Actions 增加 windows job（`runs-on: windows-latest`），复用现有 
 
 **Windows Server 版本选择理由**：
 - **Windows Server 2016** (build 14393) 是最低支持版本，原因：
-  1. 控制台 VT 序列支持从 Windows 10 1607 / Server 2016 开始引入（crossterm 必需）
-  2. Rust 工具链（msvc 目标）与 VS 2022 Build Tools 均要求此版本或更高
-  3. tokio 等依赖使用的 Windows API 最低要求此版本
-- **Windows Server 2019** (build 17763) 是更稳妥的选择：
-  1. VT 模式默认启用，无需额外配置
-  2. 控制台渲染性能更好
-  3. 长期支持版本（LTSC），适合生产环境部署
+  1. **客户端启动即切备用屏幕缓冲区**：`src/ui/terminal.rs` 的 `init_screen()` 执行 crossterm 的
+     `EnterAlternateScreen`（写出 `CSI ?1049h`），由 `src/app.rs` 的 `App::run()` 无条件调用。
+     Microsoft 文档把备用屏幕缓冲区归入 Windows 10 Anniversary Update（1607 / build 14393）
+     新增的控制台特性，服务器侧对应的首个版本即 Server 2016。
+     已在 Windows Server 2016（build 10.0.14393）实机连续运行验证。
+  2. **1511 不是可用下限**：Windows 10 1511 (build 10586) 已引入 VT 基础开关
+     `ENABLE_VIRTUAL_TERMINAL_PROCESSING`，但 crossterm 只在「开关设不上、且没有非 `dumb` 的
+     `TERM` 环境变量」（Win7/Win8 原生控制台）时才回退 WinAPI 路径——见其 `ansi_support.rs`
+     的 `supports_ansi()` 与 `command.rs` 的分发逻辑。1511 上开关能设成功、`?1049h` 却无人解析，
+     不会触发回退，全屏渲染会落进主缓冲区。
+  3. Rust 工具链（msvc 目标）与 VS 2022 Build Tools 均要求此版本或更高
+     （仅影响自行编译，预编译产物不受此约束）。
+- **Windows Server 2019** (build 17763，与 Windows 10 1809 同代码基) 是更稳妥的选择：
+  长期支持版本（LTSC），适合 7×24 生产环境挂机部署。
+
+> **更正记录**：本文早前写的「控制台 VT 序列支持从 Windows 10 1607 / Server 2016 开始引入」不准确——
+> VT 基础开关是 1511 引入的，1607 引入的是备用屏幕缓冲区等扩展序列；本项目依赖后者，故**下限数字不变、
+> 理由换了**。早前的「tokio 等依赖使用的 Windows API 最低要求此版本」按 tokio 1.53.1 源码核对**不成立**：
+> 其中唯一的版本相关说明是 `IP_TOS` 需 Win8+ / Server 2012+（本项目未使用），不构成 Server 2016 下限。
+> 「Server 2019 VT 模式默认启用、控制台渲染性能更好」两条无据可查，已删除，只保留可核实的 LTSC 长期支持。
+> 同时，公开侧 `README.md` 原写的「最低 Windows 10 version 1511」与本文冲突，已统一为 1607 / Server 2016。
 
 ## 8. 风险与未决事项
 
