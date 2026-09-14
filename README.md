@@ -125,6 +125,9 @@ Unblock-File bootstrap.ps1
 .\bootstrap.ps1 D:\Games\RustLuaMud  # 自定义安装目录
 ```
 
+> 装完首次启动若提示「丢失 VCRUNTIME140.dll」，不是下载损坏，是系统缺 VC++ 运行库：
+> 见下方「故障排查」小节，装一次即可。
+
 初始化后目录结构：
 
 ```
@@ -563,6 +566,7 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 | CPU | x86_64、i686（仅 Linux）或 aarch64 |
 | 内存 | 最低 512MB，推荐 2GB（10 连接） |
 | 终端 | 支持 UTF-8 + ANSI 转义序列；Windows 推荐 Windows Terminal |
+| Windows 运行库 | **需 [VC++ 2015-2022 可再发行组件 x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)**：预编译 exe 动态链接 MSVC CRT，缺失时启动报「丢失 VCRUNTIME140.dll」 |
 | Rust 编译 | 1.70+（edition 2021） |
 
 ### 32 位平台 (i686)
@@ -588,6 +592,24 @@ export RUST_BACKTRACE=1
 ```
 
 panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀）。
+
+### Windows 启动报「丢失 VCRUNTIME140.dll」
+
+系统缺少 VC++ 运行库，**不是程序损坏或下载出错**。下载安装
+[vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe)（约 25 MB，VC++ 2015-2022
+统一版），完成后重新运行即可，无需重启系统。若之后又提示缺 `VCRUNTIME140_1.dll` 或
+`MSVCP140.dll`，同一个包已包含，不必另外寻找。
+
+成因：Windows 预编译产物按 `x86_64-pc-windows-msvc` 的默认方式**动态链接 MSVC CRT**（构建
+环境自带运行库，目标机器不一定带）。因此无论是从 Release 下载，还是从另一台 Windows
+机器**手工复制** exe 过去，只要那台机器没装过 Visual Studio / 其他依赖 VC++ 运行库的软件，
+都会报同一个错。
+
+> 可改为静态链接 CRT（target 级 `rustflags = ["-C", "target-feature=+crt-static"]`）彻底消除
+> 这个依赖。当前方案保持动态链接 + 文档声明前置：静态化会连带影响 `rusqlite`（bundled）与
+> `mlua`（vendored LuaJIT）的 C 编译方式（需确认它们是否同步切到 `/MT`），必须经一次真实的
+> Windows 构建 + 干净目标机验证才敢发 Release，
+> 详见 [docs/windows-build-plan.md](docs/windows-build-plan.md)。
 
 ---
 

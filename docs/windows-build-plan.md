@@ -113,7 +113,7 @@ GitHub Actions 增加 windows job（`runs-on: windows-latest`），复用现有 
 | 架构 | x86_64（或 i686） | LuaJIT 限制，不支持 ARM64 |
 | 内存 | ≥ 512 MB | 项目资源占用极低（Linux 侧 10 连接实测 2GB 整机无压力） |
 | 终端 | Windows Terminal 或系统自带 cmd/PowerShell | 需支持 ANSI/VT |
-| 运行库 | MSVC 运行时（随 exe 分发需 VC++ Redistributable，或静态链接 CRT 规避） | 方案 A 产物默认动态链接 CRT |
+| 运行库 | **VC++ 2015-2022 可再发行组件 x64**：<https://aka.ms/vs/17/release/vc_redist.x64.exe> | Release 产物动态链接 MSVC CRT，缺失时启动报「丢失 VCRUNTIME140.dll」（实机验证：装一次运行库即恢复，非下载损坏） |
 
 **Windows Server 版本选择理由**：
 - **Windows Server 2016** (build 14393) 是最低支持版本，原因：
@@ -133,7 +133,13 @@ GitHub Actions 增加 windows job（`runs-on: windows-latest`），复用现有 
    Windows 控制台字体渲染差异可能导致面板错位，需实测。
 3. **测试矩阵**：809 个单元测试需在 Windows 目标下跑通，
    涉及文件路径、行尾（CRLF）、编码的测试可能需要适配。
-4. **分发方式**：是否随 Release 分发 exe、是否静态链接 CRT（`+crt-static`），待实施时决定。
+4. **分发方式**：✅ 已决定 —— Release 继续附带 exe，**保持动态链接 CRT**，不引入 `+crt-static`，
+   改由 README 的系统要求表与「故障排查」小节把运行库写成明示前置条件。
+   取舍：干净目标机首次启动要先装一次 VC++ 运行库，换来构建配置零改动（不新增
+   `.cargo/config.toml` / `RUSTFLAGS`），避免波及 LuaJIT vendored、rusqlite bundled 等 C 依赖的链接方式——
+   那类改动必须实机复测才能确认，而当前没有稳定的 Windows 验证环境。
+   日后若要改为静态链接，先单独加一个 `RUSTFLAGS="-C target-feature=+crt-static"` 的构建产物在真机验证，
+   再决定是否全线切换。
 5. **维护成本**：双平台意味着 CI 时间与问题排查面翻倍，
    与项目「J1800 Linux 挂机」的定位权衡，是暂缓实施的主要原因。
 
