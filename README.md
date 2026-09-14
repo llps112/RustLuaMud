@@ -125,7 +125,7 @@ Unblock-File bootstrap.ps1
 .\bootstrap.ps1 D:\Games\RustLuaMud  # 自定义安装目录
 ```
 
-> 装完首次启动若提示「丢失 VCRUNTIME140.dll」，不是下载损坏，是系统缺 VC++ 运行库：
+> 装完首次启动若弹窗「由于找不到 VCRUNTIME140.dll，无法继续执行代码」，不是下载损坏，是系统缺 VC++ 运行库：
 > 见下方「故障排查」小节，装一次即可。
 
 初始化后目录结构：
@@ -566,7 +566,7 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 | CPU | x86_64、i686（仅 Linux）或 aarch64 |
 | 内存 | 最低 512MB，推荐 2GB（10 连接） |
 | 终端 | 支持 UTF-8 + ANSI 转义序列；Windows 推荐 Windows Terminal |
-| Windows 运行库 | **需 [VC++ 2015-2022 可再发行组件 x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)**：预编译 exe 动态链接 MSVC CRT，缺失时启动报「丢失 VCRUNTIME140.dll」 |
+| Windows 运行库 | **需 [VC++ 2015-2022 可再发行组件 x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)**：预编译 exe 动态链接 MSVC CRT，缺失时启动弹窗报「由于找不到 VCRUNTIME140.dll，无法继续执行代码」 |
 | Rust 编译 | 1.70+（edition 2021） |
 
 ### 32 位平台 (i686)
@@ -593,12 +593,16 @@ export RUST_BACKTRACE=1
 
 panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀）。
 
-### Windows 启动报「丢失 VCRUNTIME140.dll」
+### Windows 启动弹窗「由于找不到 VCRUNTIME140.dll，无法继续执行代码」
 
 系统缺少 VC++ 运行库，**不是程序损坏或下载出错**。下载安装
 [vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe)（约 25 MB，VC++ 2015-2022
-统一版），完成后重新运行即可，无需重启系统。若之后又提示缺 `VCRUNTIME140_1.dll` 或
-`MSVCP140.dll`，同一个包已包含，不必另外寻找。
+统一版），完成后重新运行即可，无需重启系统。英文系统的对应消息为
+`The code execution cannot proceed because VCRUNTIME140.dll was not found.`。
+
+需装运行库的只有 `VCRUNTIME140.dll` 这一项：按导入表核对，其余 CRT 依赖全部走
+UCRT（`api-ms-win-crt-*`，Windows 10 起随系统提供），产物也不链 C++ 标准库，
+因此不会提示缺 `MSVCP140.dll` 或 `VCRUNTIME140_1.dll`。
 
 成因：Windows 预编译产物按 `x86_64-pc-windows-msvc` 的默认方式**动态链接 MSVC CRT**（构建
 环境自带运行库，目标机器不一定带）。因此无论是从 Release 下载，还是从另一台 Windows

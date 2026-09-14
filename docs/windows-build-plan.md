@@ -113,7 +113,7 @@ GitHub Actions 增加 windows job（`runs-on: windows-latest`），复用现有 
 | 架构 | x86_64（或 i686） | LuaJIT 限制，不支持 ARM64 |
 | 内存 | ≥ 512 MB | 项目资源占用极低（Linux 侧 10 连接实测 2GB 整机无压力） |
 | 终端 | Windows Terminal 或系统自带 cmd/PowerShell | 需支持 ANSI/VT |
-| 运行库 | **VC++ 2015-2022 可再发行组件 x64**：<https://aka.ms/vs/17/release/vc_redist.x64.exe> | Release 产物动态链接 MSVC CRT，缺失时启动报「丢失 VCRUNTIME140.dll」（实机验证：装一次运行库即恢复，非下载损坏） |
+| 运行库 | **VC++ 2015-2022 可再发行组件 x64**：<https://aka.ms/vs/17/release/vc_redist.x64.exe> | Release 产物动态链接 MSVC CRT，缺失时启动弹窗报「由于找不到 VCRUNTIME140.dll，无法继续执行代码」（已按导入表核对：exe 确实导入 `VCRUNTIME140.dll`，且 Windows 产物 zip 不附带任何 DLL） |
 
 **Windows Server 版本选择理由**：
 - **Windows Server 2016** (build 14393) 是最低支持版本，原因：
