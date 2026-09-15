@@ -248,7 +248,119 @@ Note("example.lua loaded")
 '@ | Set-Content -Path $exampleLua -Encoding ASCII
 }
 
-# --- 5. Launcher (double-click to start; pins CWD to install dir) ---
+# --- 5. Console geometry helper + launcher (double-click to start) ---
+# Sizing AND centering the conhost window needs Win32 calls cmd cannot make, so
+# the launcher delegates to this helper. Keep this copy in sync with the
+# repo-root console_setup.ps1 (the launcher expects it beside itself).
+# The inner C# block is a multi-line single-quoted string rather than a
+# here-string on purpose: a here-string terminator at the start of a line would
+# close this outer here-string early.
+$setup = Join-Path $Target "console_setup.ps1"
+Write-Host "==> Creating console geometry helper: $setup"
+@'
+# ============================================
+# RustLuaMud conhost geometry setup
+#
+# Resizes and centers the legacy console window before RustLuaMud.exe starts:
+#   * target 160x56 cells, clamped to whatever the screen actually fits at the
+#     current console font -- J1800 boxes often drive 1024x768 monitors, where
+#     160 columns (about 1280 px) simply do not fit
+#   * screen buffer is set equal to the window, because a taller buffer makes
+#     conhost show a vertical scrollbar that overlays the floating panel and
+#     the right-aligned status bar
+#   * window is centered on the primary screen's working area (taskbar excluded)
+#
+# Exits 0 without touching anything when there is no real conhost window to
+# manage: under Windows Terminal, when output is redirected, or in a service
+# context. A geometry failure is never a reason to skip the launch.
+#
+# Called from start_mud.bat. Override the target with MUD_COLS / MUD_LINES.
+#
+# ASCII-only source on purpose: Windows PowerShell 5.1 may misdecode non-ASCII
+# UTF-8 without BOM (same policy as deploy.ps1 / bootstrap.ps1). The C# block
+# below uses a multi-line single-quoted string, not a here-string, so that
+# bootstrap.ps1 can embed this file verbatim inside its own here-string.
+# ============================================
+
+param(
+    [int]$Cols = 160,
+    [int]$Rows = 56
+)
+
+if ($env:MUD_COLS -match '^\d+$') { $Cols = [int]$env:MUD_COLS }
+if ($env:MUD_LINES -match '^\d+$') { $Rows = [int]$env:MUD_LINES }
+
+$ErrorActionPreference = 'SilentlyContinue'
+
+# Windows Terminal hosts the console itself: GetConsoleWindow() returns a pseudo
+# handle and buffer resizing is rejected. Leave geometry to WT's own settings.
+if ($env:WT_SESSION) { exit 0 }
+
+Add-Type -TypeDefinition '
+using System;
+using System.Runtime.InteropServices;
+public static class ConWin {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left, Top, Right, Bottom; }
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+    [DllImport("user32.dll")]
+    public static extern bool MoveWindow(IntPtr hWnd, int x, int y, int w, int h, bool repaint);
+    [DllImport("user32.dll")]
+    public static extern bool SystemParametersInfo(int action, int param, ref RECT area, int ini);
+}
+'
+
+if (-not ('ConWin' -as [type])) { exit 0 }
+
+$hwnd = [ConWin]::GetConsoleWindow()
+if ($hwnd -eq [IntPtr]::Zero) { exit 0 }
+
+$raw = $Host.UI.RawUI
+
+# MaxPhysicalWindowSize is reported in character cells -- the same unit
+# WindowSize uses -- so it is exactly the clamp we need. Implausible values
+# mean the metrics did not come from a real conhost; bail out rather than
+# resize the window into something unusable.
+$max = $raw.MaxPhysicalWindowSize
+if ($max.Width -lt 20 -or $max.Width -gt 500) { exit 0 }
+if ($max.Height -lt 5 -or $max.Height -gt 200) { exit 0 }
+if ($Cols -gt $max.Width) { $Cols = $max.Width }
+if ($Rows -gt $max.Height) { $Rows = $max.Height }
+
+# The only resize order that cannot fail: the window may never be wider than
+# the buffer, so grow the buffer first, then set the window, then shrink the
+# buffer back onto the window to drop the scrollbar.
+$cur = $raw.BufferSize
+$grownW = [Math]::Max($Cols, $cur.Width)
+$grownH = [Math]::Max($Rows, $cur.Height)
+$grown = New-Object System.Management.Automation.Host.Size -ArgumentList $grownW, $grownH
+$raw.BufferSize = $grown
+$target = New-Object System.Management.Automation.Host.Size -ArgumentList $Cols, $Rows
+$raw.WindowSize = $target
+$raw.BufferSize = $target
+
+# Center via SPI_GETWORKAREA (0x30) instead of System.Windows.Forms: this runs
+# on every launch, and loading WinForms costs more than the whole script on
+# J1800-class hardware.
+$rect = New-Object ConWin+RECT
+if (-not [ConWin]::GetWindowRect($hwnd, [ref]$rect)) { exit 0 }
+$work = New-Object ConWin+RECT
+if (-not [ConWin]::SystemParametersInfo(0x0030, 0, [ref]$work, 0)) { exit 0 }
+
+$winW = $rect.Right - $rect.Left
+$winH = $rect.Bottom - $rect.Top
+$x = $work.Left + [int](($work.Right - $work.Left - $winW) / 2)
+$y = $work.Top + [int](($work.Bottom - $work.Top - $winH) / 2)
+if ($x -lt $work.Left) { $x = $work.Left }
+if ($y -lt $work.Top) { $y = $work.Top }
+
+[ConWin]::MoveWindow($hwnd, $x, $y, $winW, $winH, $true) | Out-Null
+exit 0
+'@ | Set-Content -Path $setup -Encoding ASCII
+
 $bat = Join-Path $Target "start_mud.bat"
 Write-Host "==> Creating launcher: $bat"
 @'
@@ -261,6 +373,21 @@ setlocal
 set NO_COLOR=1
 set RUST_LOG=error
 cd /d "%~dp0"
+
+rem Console geometry: 160x56 cells by default, clamped to what the screen fits
+rem at the current console font, and centered on the working area. Override by
+rem setting MUD_COLS / MUD_LINES before launching. console_setup.ps1 no-ops
+rem under Windows Terminal, which owns its own geometry.
+rem A missing helper or an unavailable PowerShell is not fatal: an unresized
+rem window still works, so never block the launch on cosmetics.
+if not defined MUD_COLS set "MUD_COLS=160"
+if not defined MUD_LINES set "MUD_LINES=56"
+set "PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+set "SETUP=%~dp0console_setup.ps1"
+if exist "%SETUP%" if exist "%PS%" (
+    "%PS%" -NoProfile -ExecutionPolicy Bypass -File "%SETUP%"
+)
+
 RustLuaMud.exe %*
 if errorlevel 1 pause
 '@ | Set-Content -Path $bat -Encoding ASCII
@@ -275,6 +402,7 @@ Write-Host "  Directory layout:"
 Write-Host "    $Target\"
 Write-Host "      RustLuaMud.exe        <- main program"
 Write-Host "      start_mud.bat         <- double-click to launch"
+Write-Host "      console_setup.ps1     <- sizes/centers the window (called by the .bat)"
 Write-Host "      profiles\             <- role TOML configs (terminal.json lives here)"
 Write-Host "        example.toml        <- example config"
 Write-Host "        .env.example        <- copy to .env to keep passwords out of the TOMLs"

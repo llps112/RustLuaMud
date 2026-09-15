@@ -8,6 +8,20 @@ set NO_COLOR=1
 set RUST_LOG=error
 cd /d "%~dp0"
 
+rem Console geometry: 160x56 cells by default, clamped to what the screen fits
+rem at the current console font, and centered on the working area. Override by
+rem setting MUD_COLS / MUD_LINES before launching. console_setup.ps1 no-ops
+rem under Windows Terminal, which owns its own geometry.
+rem A missing helper or an unavailable PowerShell is not fatal: an unresized
+rem window still works, so never block the launch on cosmetics.
+if not defined MUD_COLS set "MUD_COLS=160"
+if not defined MUD_LINES set "MUD_LINES=56"
+set "PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+set "SETUP=%~dp0console_setup.ps1"
+if exist "%SETUP%" if exist "%PS%" (
+    "%PS%" -NoProfile -ExecutionPolicy Bypass -File "%SETUP%"
+)
+
 rem Prefer the exe next to this script, fall back to the cargo build output.
 set "EXE="
 if exist "RustLuaMud.exe" set "EXE=RustLuaMud.exe"
