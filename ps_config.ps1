@@ -1,8 +1,16 @@
 # ============================================
 # RustLuaMud PowerShell console configuration
-# Black background + white foreground, fixed window size, and buffer==window
-# (buffer height equal to window height removes the conhost vertical scrollbar
-#  that otherwise overlays the floating panel / right-aligned status logo).
+# Black background + white foreground, fixed window size, buffer == window.
+#
+# Scope: the everyday PowerShell window only. RustLuaMud's own window is sized
+# by console_setup.ps1 (160x56, clamped to the screen and centered), which
+# start_mud.bat calls before launching the exe -- running the .bat from here
+# hands the window over to it, so the two need no matching numbers.
+#
+# buffer == window also drops scroll-back for long output (cargo test, git log).
+# That trade-off came from the MUD, where a scrollbar can cover the floating
+# panel; PowerShell has no such constraint, so raise the BufferSize below if
+# you need scroll-back.
 #
 # Usage: dot-source from your $PROFILE, or run:  . .\ps_config.ps1
 # ============================================
