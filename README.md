@@ -7,7 +7,7 @@
 ## 特性
 
 **MUSHclient 兼容层**
-- 常用 API 全覆盖：触发器、别名、定时器、变量、日志、数据库、样式查询
+- 常用 API 类别全覆盖：触发器、别名、定时器、变量、日志、数据库、样式查询
 - 触发器 `wildcards[0]`（完整匹配文本）与 MUSHclient 行为完全一致
 - 多行触发器、颜色样式回调（`GetStyle`）、模拟输出（`Simulate`）
 - 参考 `help/api/` 目录查阅完整 API 文档
@@ -30,7 +30,7 @@
 - 默认：突发 10 条、每秒 20 条、最小间隔 50ms、窗口 60 条/2 秒
 - 不依赖与服务端 tick 对齐，可防住 GPS 寻路重试等场景的多次突发跨 drain 周期累积
 - 安全前提：`cmds_per_sec ≤ 20`（服务端 drain 速率）且 `burst_size + 2×cmds_per_sec ≤ 60`；
-  滑动窗口封顶的是突发密度而非长期速率，两者必须同时成立才能保证 cnt ≤ 60
+  滑动窗口封顶的是突发密度而非长期速率，两条不等式必须同时成立才能保证 cnt ≤ 60
 - 配置解析时会校验上述不等式，不安全的参数组合在启动与 `/profile load` 时告警
 
 **编码兼容**
@@ -63,7 +63,7 @@
 
 > **Windows 说明**：Windows 平台已提供预编译 `RustLuaMud-windows-x86_64.zip`（stable 与 nightly 均附带），**仅支持 64 位系统**，暂不支持 32 位与 ARM64。本项目的 ANSI 样式、CJK 对齐与浮动面板依赖现代终端的 VT/ANSI 支持，启动时还会切换到备用屏幕缓冲区（`CSI ?1049h`）：**最低 Windows 10 version 1607 / Windows Server 2016**（同为 build 14393，已在 Server 2016 实机连续运行验证），**推荐 1809 及以上**（体验完整）；更早的 1511 只有 VT 基础开关、解析不了备用屏序列，Win7/8/XP 连开关都没有，均不支持。终端推荐使用 Windows Terminal（传统 conhost 已做宽度自适应，但滚动条等固有缺陷无法完全消除）。
 
-> **国内镜像加速**：`--gitee` 参数从 Gitee 下载，支持 stable 和 nightly 两种版本：
+> **国内镜像加速**：`--gitee` 参数从 Gitee 下载，支持稳定版和 Nightly 两种版本：
 > ```bash
 > # 稳定版（推荐）
 > bash <(curl -Ls https://gitee.com/bai-yifei180/RustLuaMud/raw/main/scripts/bootstrap.sh) --gitee
@@ -242,7 +242,7 @@ reconnect_delay_secs = 5
 # connect_delay_ms = 1000
 
 # 登录凭证（自动注入 Lua 变量 char_name / char_password）
-# 支持环境变量占位符避免明文，见下方“凭据安全保存”
+# 支持环境变量占位符避免明文，见下方「凭据安全保存」
 username = "your_character_name"
 password = "your_password"
 
@@ -286,7 +286,7 @@ socks5_port = 1080
 
 ### 凭据安全保存（密码不写进配置）
 
-`username` / `password` / `socks5_username` / `socks5_password` 支持环境变量占位符：字段整值写成 `${变量名}` 时，启动时自动替换为同名环境变量的值。分享/备份 profiles 目录时不再携带密码。
+`username` / `password` / `socks5_username` / `socks5_password` 支持环境变量占位符：字段值整体写成 `${变量名}` 时，启动时自动替换为同名环境变量的值。分享/备份 profiles 目录时不再携带密码。
 
 两种提供变量的方式：
 
@@ -382,7 +382,7 @@ export MUD_MYCHAR_PWD="我的真实密码"  # Linux/macOS，或写入 ~/.bashrc 
 
 本客户端实现了 MUSHclient 的部分常用 API。完整 API 文档见 [help/api/](help/api/) 目录。
 
-> **兼容性提示**：如你的脚本使用了未实现的 API（`Accelerator`、`AddFont`、`ArrayCreate` 等），将无法正常运行。使用前请确认脚本中调用的所有 API 都在兼容范围内。
+> **兼容性提示**：若你的脚本使用了未实现的 API（`Accelerator`、`AddFont`、`ArrayCreate` 等），将无法正常运行。使用前请确认脚本中调用的所有 API 都在兼容范围内。
 
 ### 触发器
 
@@ -514,7 +514,7 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 | `sendto` | 发送目标 |
 | `error_code` / `error_desc` | 错误码与描述 |
 
-常用值：`Enabled=1`、`KeepEvaluating=8`、`RegularExpression=32`、`Replace=1024`、`Temporary=16384`（三者统一）、`OneShot=32768`（触发器/别名）/ `OneShot=4`（定时器）。
+常用值：`Enabled=1`、`KeepEvaluating=8`、`RegularExpression=32`、`Replace=1024`、`Temporary=16384`（trigger/alias/timer 三表数值一致）、`OneShot=32768`（触发器/别名）/ `OneShot=4`（定时器）。
 
 ---
 
@@ -532,6 +532,7 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 │   ├── main.rs            # 入口
 │   ├── lib.rs             # 库入口（集成测试入口）
 │   ├── app.rs             # 应用主逻辑
+│   ├── app/               # app 子模块（session / commands / events / parse）
 │   ├── config.rs          # 配置解析
 │   ├── connection/        # 连接管理（manager / session / rate_limiter）
 │   ├── ui/                # 终端 UI（terminal / input / ansi）
@@ -569,7 +570,7 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 | Windows 运行库 | **需 [VC++ 2015-2022 可再发行组件 x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)**：预编译 exe 动态链接 MSVC CRT，缺失时启动弹窗报「由于找不到 VCRUNTIME140.dll，无法继续执行代码」 |
 | Rust 编译 | 1.70+（edition 2021） |
 
-### 32 位平台 (i686)
+### 32 位平台（i686）
 
 预编译二进制已支持。从源码编译需安装 32 位工具链：
 
@@ -637,8 +638,8 @@ UCRT（`api-ms-win-crt-*`，Windows 10 起随系统提供），产物也不链 C
 - 动态新增连接增加重名保护，杜绝同名 session 互相顶号导致的无限重连
 
 ### v0.9.6 (2026-09-04)
-- 限速器叠加滑动窗口硬兜底，杜绝多次突发跨 drain 周期累积导致的“雷劈”
-- release changelog 过滤纯元数据提交，不再重复列“更新子模块指针”
+- 限速器叠加滑动窗口硬兜底，杜绝多次突发跨 drain 周期累积导致的「雷劈」
+- release changelog 过滤纯元数据提交，不再重复列「更新子模块指针」
 
 ### v0.9.5 (2026-09-02)
 - 修复面板点击回调后未 flush：补 `drain_lua_logs`，Lua 输出不再滞留到下次 MUD 输出或定时器 tick 才落盘
@@ -651,7 +652,7 @@ UCRT（`api-ms-win-crt-*`，Windows 10 起随系统提供），产物也不链 C
 
 ### v0.9.3 (2026-08-29)
 - 修复 Linux 下无法点击面板/切换标签（鼠标捕获按平台分治）
-- 底行状态栏改灰白底黑字，并修复输入行绿色与 SGR 前景可读性
+- 底行状态栏改灰白底黑字，并修复输入行绿字与 SGR 前景色的可读性问题
 - 取消末行避让，将 Lua 角色统计栏移到底行并整行蓝底高亮
 - release CI 抓取完整 tag 历史，确保 changelog 完整
 
@@ -714,7 +715,7 @@ UCRT（`api-ms-win-crt-*`，Windows 10 起随系统提供），产物也不链 C
 - README 修正标志位常量值、补充项目结构与 OneShot 文档
 
 ### v0.6.3 (2026-08-13)
-- 修复浮动面板闪烁问题：`draw_output_area` 跳过面板覆盖区域，消除"擦除→重画"中间态
+- 修复浮动面板闪烁问题：`draw_output_area` 跳过面板覆盖区域，消除「擦除→重画」中间态
 - 新增 `truncate_ansi_to_width` 辅助函数，安全截断含 ANSI 转义的输出文本
 - 新增 `panel_coverage_mask` 方法，计算每行面板覆盖范围
 
@@ -763,14 +764,13 @@ UCRT（`api-ms-win-crt-*`，Windows 10 起随系统提供），产物也不链 C
 
 ### v0.4.0 (2026-07-23)
 - Rust 侧命令发送物理限速（`cmd_interval_ms` 配置项），配合 Lua 侧 burst 控制形成双层限速保护
-- Gitee Release 自动同步
+- Gitee Release 同步加固（curl 重试与超时控制）
 - README 文档全面重构
 - panic 日志捕获功能，panic 写入日志文件
 - Lua 定时器看门狗线程，防止无限循环永久卡死
 - 移除 Lua 侧 server_watch 模块，服务器响应追踪迁移到 Rust 侧
 
 ### v0.3.0 (2026-07-19)
-- 新增 Rust 侧命令发送物理限速（`cmd_interval_ms` 配置项），配合 Lua 侧 burst 控制形成双层限速保护
 - 新增 Gitee Release 自动同步（Nightly 构建）
 - 新增 i686 架构预编译构建
 - 新增 i686 架构构建脚本 `scripts/build.sh --arch i686`
@@ -823,7 +823,7 @@ UCRT（`api-ms-win-crt-*`，Windows 10 起随系统提供），产物也不链 C
 
 ## 外部程序集成
 
-客户端支持通过 `json_encode` / `json_decode` API 与外部程序交换数据：
+Lua 脚本可通过 `json_encode` / `json_decode` API 与外部程序交换 JSON 数据；二次开发时也可在 Rust 侧直接调用：
 
 ```rust
 // Rust 侧获取 Lua 数据
