@@ -8,6 +8,11 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/ci.yml'
+      # 模板一致性守卫测试（src/config.rs）依赖下列文件，改动它们必须跑 CI
+      - 'profiles/example.toml'
+      - 'profiles/.env.example'
+      - 'scripts/bootstrap.sh'
+      - 'scripts/bootstrap.ps1'
   pull_request:
     branches: [main]
     paths:
@@ -15,6 +20,10 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/ci.yml'
+      - 'profiles/example.toml'
+      - 'profiles/.env.example'
+      - 'scripts/bootstrap.sh'
+      - 'scripts/bootstrap.ps1'
 
 permissions:
   contents: write

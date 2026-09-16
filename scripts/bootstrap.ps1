@@ -163,15 +163,49 @@ render_interval = 1000
 # Log files kept (optional; default 24 = last 24 hourly log files)
 log_rotation_count = 24
 
-# Command rate limiting (token bucket, anti-flood) -- matched to the server:
-#   server counts each command +1, drains 40 every 2s; >60 -> struck/kicked, >20 -> minor penalty.
-#   safe rule: burst_size + (commands in 2s at cmd_interval_ms) must stay <= 60 (leave headroom).
-# Min gap after the burst is spent (ms): 50ms = 20/s = 40 per 2s drain cycle
+# Command rate limiting (token bucket + sliding window, optional)
+#   Rate limiting is enforced on the Rust side; Lua scripts only enqueue.
+#
+# Server-side mechanism (LPC cmd.c):
+#   - cnt counts every command (+1); every 2s it drains 40 (clear_cmd_count)
+#   - cnt > 60 -> struck/unconscious/kicked;  cnt > 20 -> minor penalty
+#   Equivalent token bucket: capacity 60, refilled 40 every 2s.
+#
+# Safety inequalities (BOTH must hold, otherwise long idle sessions still get struck):
+#   1) cmds_per_sec <= 20                 - long-term rate must not exceed the drain rate
+#   2) burst_size + 2*cmds_per_sec <= 60  - one burst plus 2s of steady traffic
+#   e.g. burst=15, cmds_per_sec=20 -> 15 + 40 = 55 <= 60, leaving 5 tokens of headroom.
+#   Note: cmd_interval_ms is NOT a long-term rate cap - it only spaces out non-burst
+#   sends; surplus tokens accumulate up to burst_size and are then spent in a burst.
+#   The long-term rate is set by cmds_per_sec. Both inequalities are validated when the
+#   config is parsed; a warning is printed at startup and on /profile load if violated.
+#
+# Min gap after the burst is spent (ms, default 50, range 20~200)
+#   50ms = 20/s = 40 per 2s drain cycle
 cmd_interval_ms = 50
-# Burst allowance at 0ms gap right after connect/idle (recommended <= 20)
+#
+# Burst allowance at 0ms gap right after connect/idle (default 10;
+# must satisfy burst_size + 2*cmds_per_sec <= 60)
 burst_size = 15
-# Steady refill rate (tokens/sec), should track the server drain rate (40/2s = 20/s)
+#
+# Steady refill rate (tokens/sec, default 20) - tracks the server drain rate (40/2s)
+#   Never raise it above 20: cnt then grows every cycle and window_limit = 60 cannot
+#   stop this kind of long-term overspeed
 cmds_per_sec = 20
+#
+# Max commands allowed inside the sliding window (default 60, range 1~1000)
+#   Matches the server strike threshold 3*CMDS_PER_TICK; does not rely on being
+#   aligned with the server tick. It caps burst DENSITY (half-open interval), not the
+#   long-term rate. With 60 the two inequalities above still have to hold; to cap
+#   unconditionally set 40 (= what the server drains per cycle), which keeps cnt <= 40
+#   even if the token bucket is misconfigured, at the cost of burst throughput.
+window_limit = 60
+#
+# Sliding window duration (ms, default 2000, range 2000~10000)
+#   Matches the server's 2s clear_cmd_count drain period; usually leave as is.
+#   Must not go below 2000: shorter windows make the fallback ineffective, the runtime
+#   raises it back to 2000 and prints a warning.
+window_duration_ms = 2000
 '@ | Set-Content -Path $exampleToml -Encoding ASCII
 }
 

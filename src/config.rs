@@ -1791,4 +1791,155 @@ port = 6000"#
             missing
         );
     }
+
+    // ==================== 模板副本防漂移守卫 ====================
+    //
+    // profiles/ 下的权威模板与两份一键部署脚本的内嵌副本是同一内容的三份拷贝
+    // （bootstrap.sh 用 heredoc、bootstrap.ps1 用 here-string 自带模板，不读仓库）。
+    // 改权威源而忘同步副本已实际发生三次：08-29 的 .env 凭据体系只补了 ps1、
+    // 09-04 的滑动窗口参数两份都没补，导致 Linux 一键部署出的机器上根本没有
+    // .env.example，example.toml 也停在两个功能周期之前。
+    //
+    // 措辞允许多语言（sh 中文 / ps1 英文），因此按「配置键集合被覆盖」校验，
+    // 而不是全文比对：新增一个配置项而漏任一份模板，就是本测试负责拦住的情形。
+
+    const PROFILE_EXAMPLE_TOML: &str = include_str!("../profiles/example.toml");
+    const PROFILE_ENV_EXAMPLE: &str = include_str!("../profiles/.env.example");
+    const BOOTSTRAP_SH: &str = include_str!("../scripts/bootstrap.sh");
+    const BOOTSTRAP_PS1: &str = include_str!("../scripts/bootstrap.ps1");
+
+    /// 收集扁平 TOML 的顶层配置键（跳过注释与空行）
+    fn toplevel_toml_keys(src: &str) -> Vec<String> {
+        let mut keys: Vec<String> = Vec::new();
+        for line in src.lines() {
+            let t = line.trim_start();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            if let Some(eq) = t.find('=') {
+                let key = t[..eq].trim();
+                let valid = !key.is_empty()
+                    && !key.contains('.')
+                    && key.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                    && !keys.iter().any(|k| k == key);
+                if valid {
+                    keys.push(key.to_string());
+                }
+            }
+        }
+        keys
+    }
+
+    /// 模板副本里是否存在 `key = ...` 形式的赋值行
+    fn has_toml_assignment(src: &str, key: &str) -> bool {
+        let prefix = format!("{key} =");
+        src.lines()
+            .any(|l| l.trim_start().starts_with(prefix.as_str()))
+    }
+
+    /// 收集 .env 示例里非注释态的变量名（仅取 MUD_ 前缀的示例条目）
+    fn env_example_var_names(src: &str) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for line in src.lines() {
+            let t = line.trim_start();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            if let Some((name, _)) = t.split_once('=') {
+                let name = name.trim();
+                let valid = name.starts_with("MUD_")
+                    && name.len() > 4
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                    && !names.iter().any(|n| n == name);
+                if valid {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        names
+    }
+
+    /// 模板副本里是否存在 `NAME=value` 形式的条目
+    fn has_env_entry(src: &str, name: &str) -> bool {
+        let prefix = format!("{name}=");
+        src.lines()
+            .any(|l| l.trim_start().starts_with(prefix.as_str()))
+    }
+
+    /// 两份 bootstrap 脚本，用于统一遍历断言
+    fn bootstrap_scripts() -> [(&'static str, &'static str); 2] {
+        [
+            ("scripts/bootstrap.sh", BOOTSTRAP_SH),
+            ("scripts/bootstrap.ps1", BOOTSTRAP_PS1),
+        ]
+    }
+
+    #[test]
+    fn profile_example_toml_keys_have_non_empty_baseline() {
+        // 守卫自身依赖的提取逻辑不能默不作声地退化：关键参数必须被解析到
+        let keys = toplevel_toml_keys(PROFILE_EXAMPLE_TOML);
+        for expect in [
+            "name",
+            "host",
+            "script",
+            "password",
+            "burst_size",
+            "cmds_per_sec",
+            "window_limit",
+            "window_duration_ms",
+        ] {
+            assert!(
+                keys.iter().any(|k| k == expect),
+                "toplevel_toml_keys 未能从 profiles/example.toml 解析出 {expect}，提取逻辑或文件格式已变动"
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_templates_cover_all_profile_keys() {
+        let keys = toplevel_toml_keys(PROFILE_EXAMPLE_TOML);
+        assert!(
+            !keys.is_empty(),
+            "未能从 profiles/example.toml 解析出配置键"
+        );
+        for (path, script) in bootstrap_scripts() {
+            let missing: Vec<&str> = keys
+                .iter()
+                .filter(|k| !has_toml_assignment(script, k.as_str()))
+                .map(String::as_str)
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{path} 内嵌的 example.toml 模板缺少配置键 {missing:?}；\
+                 请同步该脚本（权威源：profiles/example.toml）"
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_templates_create_env_example() {
+        let vars = env_example_var_names(PROFILE_ENV_EXAMPLE);
+        assert!(
+            vars.len() >= 2,
+            "未能从 profiles/.env.example 解析出示例变量名"
+        );
+        for (path, script) in bootstrap_scripts() {
+            assert!(
+                script.contains(".env.example"),
+                "{path} 完全没有生成 .env.example，用它部署的机器上凭据模板会缺失"
+            );
+            let missing: Vec<&str> = vars
+                .iter()
+                .filter(|v| !has_env_entry(script, v.as_str()))
+                .map(String::as_str)
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{path} 内嵌的 .env.example 模板缺少变量 {missing:?}；\
+                 请同步该脚本（权威源：profiles/.env.example）"
+            );
+        }
+    }
 }

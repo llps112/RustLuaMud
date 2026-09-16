@@ -90,7 +90,8 @@ bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/script
 ~/RustLuaMud/
 ├── RustLuaMud           # 主程序
 ├── profiles/            # 角色 TOML 配置文件
-│   └── example.toml     # 示例配置
+│   ├── example.toml     # 示例配置
+│   └── .env.example     # 凭据模板（复制为 .env 后密码无需写进 toml）
 ├── scripts/             # Lua 脚本
 │   └── example.lua      # 示例脚本
 └── logs/                # 日志文件自动生成
@@ -104,6 +105,17 @@ cp profiles/example.toml profiles/mychar.toml
 vim profiles/mychar.toml
 ./RustLuaMud
 ```
+
+> 示例配置与凭据模板**只在文件不存在时创建**，重跑初始化脚本不会覆盖你改过的配置。
+> 如果升级后想参考新增的配置项，删掉这两个文件重跑脚本，或直接从仓库拉取新版：
+>
+> ```bash
+> cd ~/RustLuaMud/profiles
+> curl -LO https://raw.githubusercontent.com/llps112/RustLuaMud/main/profiles/example.toml
+> curl -LO https://raw.githubusercontent.com/llps112/RustLuaMud/main/profiles/.env.example
+> ```
+>
+> Gitee 镜像把域名换成 `https://gitee.com/bai-yifei180/RustLuaMud/raw/main/profiles/` 即可。
 
 配置项说明见[配置](#配置)章节。
 
