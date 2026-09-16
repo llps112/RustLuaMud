@@ -647,6 +647,14 @@ UCRT（`api-ms-win-crt-*`，Windows 10 起随系统提供），产物也不链 C
 
 ## 版本历史
 
+### v0.9.8 (2026-09-16)
+- 修复 Linux 一键部署产物落后：`bootstrap.sh` 内嵌模板补齐到与权威源同等（凭据占位符、五项限速参数、`.env.example` 生成）
+- 新增三份模板防漂移守卫测试（`config.rs`）并接入 CI 触发路径，改权威源漏同步内嵌副本会被拦住
+- 更正限速说明：`cmd_interval_ms` 不构成长期速率上限，长期速率由 `cmds_per_sec` 决定
+- Windows 启动脚本设置 conhost 窗口 160×56 并居中（`console_setup.ps1`），划清与 `ps_config.ps1` 的窗口职责边界
+- Windows 最低版本统一为 1607 / Server 2016，补充预编译产物依赖 VC++ 运行库的前置说明
+- 依赖升级 `encoding_rs` 0.8.35 → 0.8.41
+
 ### v0.9.7 (2026-09-11)
 - 凭据改由 `.env` 环境变量注入，profile 不再明文存密码；`/profile load` 支持运行时热加载 `.env`
 - 凭据缺失或展开失败改为显式告警并中止加载，不再静默置空导致脚本崩溃
