@@ -111,11 +111,15 @@ vim profiles/mychar.toml
 >
 > ```bash
 > cd ~/RustLuaMud/profiles
+> # GitHub
 > curl -LO https://raw.githubusercontent.com/llps112/RustLuaMud/main/profiles/example.toml
 > curl -LO https://raw.githubusercontent.com/llps112/RustLuaMud/main/profiles/.env.example
+> # Gitee（国内更快）
+> curl -LO https://gitee.com/bai-yifei180/RustLuaMud/raw/main/profiles/example.toml
+> curl -LO https://gitee.com/bai-yifei180/RustLuaMud/raw/main/profiles/.env.example
 > ```
 >
-> Gitee 镜像把域名换成 `https://gitee.com/bai-yifei180/RustLuaMud/raw/main/profiles/` 即可。
+> Gitee 侧代码与 GitHub 同步，两个源均可拉到最新模板（已实测）。
 
 配置项说明见[配置](#配置)章节。
 
