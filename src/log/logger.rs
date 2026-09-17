@@ -176,9 +176,12 @@ impl Logger {
         );
     }
 
-    /// 记录 panic 信息（带 backtrace）
+    /// 记录严重错误信息（附带详情行，通常是 backtrace）
+    ///
+    /// 第三参数是「详情」槽位而非严格意义的 backtrace：真实 panic 传栈回溯，
+    /// 看门狗超时等非 panic 事件传说明文字（那种场景栈不可采样）。
     /// 不执行 cleanup_old_logs，避免在 panic hook 中触发新的 panic
-    pub fn log_panic(&self, session_name: &str, panic_msg: &str, backtrace: &str) {
+    pub fn log_panic(&self, session_name: &str, panic_msg: &str, detail: &str) {
         let path = self.log_path(session_name);
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
             let timestamp = Local::now().format("%H:%M:%S%.3f");
@@ -190,7 +193,7 @@ impl Logger {
                 tag,
                 panic_msg.trim_end()
             );
-            for line in backtrace.lines() {
+            for line in detail.lines() {
                 let _ = writeln!(file, "[{}] [{}] {}", timestamp, tag, line);
             }
         }

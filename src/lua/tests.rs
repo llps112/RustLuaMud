@@ -60,13 +60,16 @@ fn test_format_watchdog_timeout_msg_carries_callback_and_elapsed() {
     // 回归护栏：超时诊断消息必须带上「执行入口名」——执行线程的栈不可采样
     // （std::backtrace 只能捕获调用线程自身，原先采集到的是 watchdog 线程
     // 睡在轮询循环里的栈，对定位死循环零价值），入口名是唯一可靠线索；
-    // 同时输出实际耗时，便于区分「刚过阈值」与「严重卡死」。
+    // 同时输出实际耗时（会大于阈值最多约 5s，原因见函数文档）。
     let msg = LuaEngine::format_watchdog_timeout_msg("my_timer", 30, 31);
     assert!(msg.contains("my_timer"), "应包含执行入口名: {}", msg);
-    assert!(msg.contains("30s"), "应包含配置的超时阈值: {}", msg);
-    assert!(msg.contains("31s"), "应包含实际耗时: {}", msg);
+    // 带标签锚定：裸 contains("30s") 会被 130s/131s 之类更长数字满足，钉不住格式
+    assert!(msg.contains("exceeded 30s"), "应包含超时阈值: {}", msg);
+    assert!(msg.contains("elapsed 31s"), "应包含实际耗时: {}", msg);
 
-    // 入口名未知时（如脚本加载期卡死，无 timer 名）也应正常输出，不得 panic
+    // <unknown> 兜底：当前不可达——exec_with_watchdog 先设名字再设 start，
+    // 故 start != 0 时名字必为 Some（脚本加载期也有路径名）。保留该分支是
+    // 防未来重构破坏此顺序；这里仅验证该形态能正常成串、不 panic。
     let unknown = LuaEngine::format_watchdog_timeout_msg("<unknown>", 60, 60);
     assert!(
         unknown.contains("<unknown>"),

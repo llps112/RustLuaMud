@@ -212,6 +212,10 @@ impl LuaEngine {
     ///
     /// 单独抽出以便单元测试：消息里的「执行入口名」是定位死循环脚本的唯一可靠
     /// 线索（执行线程的栈不可采样，原因见 spawn_watchdog 内注释）。
+    ///
+    /// 注意 `elapsed_secs` 会比阈值**最多大约 5 秒**——看门狗按 50×100ms 分段
+    /// 睡眠、每轮才检查一次，采样点与执行起点不对齐。故日志中出现
+    /// 「exceeded 30s (elapsed 34s)」属正常，不代表计时或时钟误差。
     pub(super) fn format_watchdog_timeout_msg(
         callback: &str,
         timeout_secs: u64,
