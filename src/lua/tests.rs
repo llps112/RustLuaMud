@@ -6444,6 +6444,33 @@ fn test_styles_passed_as_fourth_parameter() {
 }
 
 #[test]
+fn test_nil_styles_when_matched_line_has_no_visible_chars() {
+    with_engine(|engine| {
+        // 纯 SGR 行（strip_ansi 后为空）→ parse_style_runs 产出 0 个样式段，
+        // 但 catch-all 触发器照样匹配得上。此时第 4 参数必须是 nil：
+        // 门控同时覆盖「没有匹配」与「没有样式段」两条快路径，与 Simulate
+        // 路径（恒传 nil）保持同一契约。带样式段的普通行不受影响
+        // （见 test_no_styles_for_plain_text，那边应为 1 个默认运行）。
+        exec(
+            engine,
+            r#"
+            style_kind = 'unset'
+            AddTrigger('no_visible_chars', '*', '', 1, 0, 0, '',
+                    'function(n,l,w,s) style_kind = (s == nil) and "nil" or "table" end', 0, 0)
+        "#,
+        )
+        .unwrap();
+        engine.process_output("\x1b[0m");
+
+        let kind: String = eval(engine, "return style_kind").unwrap();
+        assert_eq!(
+            kind, "nil",
+            "matched line without visible chars should pass nil styles"
+        );
+    });
+}
+
+#[test]
 fn test_no_styles_for_plain_text() {
     with_engine(|engine| {
         // 无 ANSI 的行 → styles 为包含 1 个默认运行的表

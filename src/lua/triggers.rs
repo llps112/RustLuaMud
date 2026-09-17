@@ -161,11 +161,12 @@ impl LuaEngine {
 
         // 构建 styles Lua 表（所有回调共享同一行数据）
         //
-        // 仅在有触发器匹配时才构建：它只是回调的第 4 个参数，没有匹配就没人读。
+        // 它在两种情况下都不该建：没有触发器匹配时没人会读第 4 个参数；匹配到的行
+        // strip_ansi 后没有可见字符（空行、纯 SGR 行）时 style_runs 为空，建出来
+        // 也只是一张空表。两种情况统一传 nil，与 Simulate 路径（恒传 nil）一致。
         // 无条件构建会让每一行都造出「1 个外层表 + 每样式段 1 个表（各 8 次 set）」
         // 并立刻成为 GC 垃圾（实测 0.8~4.6µs/行，随样式段数增长）。
-        let styles_table: mlua::Value = if matches.is_empty() {
-            // 没有匹配的触发器，没人会读这个参数
+        let styles_table: mlua::Value = if matches.is_empty() || style_runs.is_empty() {
             mlua::Value::Nil
         } else if let Ok(t) = self.lua.create_table() {
             for (i, sr) in style_runs.iter().enumerate() {
