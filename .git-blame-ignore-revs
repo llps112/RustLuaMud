@@ -23,3 +23,7 @@
 # src/lua/api.rs 拆为 src/lua/api/ 下 10 个子模块，纯移动。
 # 查看方式用 `git blame -C <文件>`（见上方边界说明）。
 4ea6ed4f144ca32018096cb1b56d1b0192f05131
+
+# refactor(lua): 收敛 api 子模块行数至 ≤400，无行为变更
+# 继续把 module_loader.rs / trigger_api.rs 按原有分节拆细，同属纯移动。
+d26111f7594465f0d83d09228dfbbaf1e1a3a200
