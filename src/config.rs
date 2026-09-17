@@ -137,9 +137,10 @@ pub struct ConnectionConfig {
 
 /// 与上方 serde 的 `#[serde(default = "default_*")]` 共用同一批 `default_*()` 函数，
 /// 保证「不带字段的 TOML 解析结果」与「代码内构造的默认实例」两条默认值来源同源。
-/// 一致性由 tests::test_default_impl_matches_serde_defaults 逐字段钉死，但它只拦
-/// 「单侧分叉」：某字段被换成另一个 `default_*()`、或被改成独立字面量时会失败。
-/// 某个 `default_*()` 自身的返回值改动会同时作用于两侧，测试不会（也无法）察觉。
+/// 一致性由 tests::test_default_impl_matches_serde_defaults 逐字段钉死（name/host/port
+/// 无 serde 默认值，不参与比对），但它只拦「单侧分叉」：某字段被换成另一个
+/// `default_*()`、或被改成独立字面量时会失败。某个 `default_*()` 自身的返回值改动
+/// 会同时作用于两侧，测试不会（也无法）察觉。
 impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
@@ -818,8 +819,9 @@ mod tests {
     }
 
     /// 钉死两条默认值来源：serde 的 `#[serde(default = "default_*")]` 与手写的
-    /// `impl Default for ConnectionConfig`。任一侧改动而另一侧漏改，本测试即失败 ——
-    /// 这是配置默认值不漂移的唯一机制。
+    /// `impl Default for ConnectionConfig`。两侧都调用同一批 `default_*()`，改函数体
+    /// 会同时生效；本测试拦的是「单侧分叉」——某字段被换成另一个 `default_*()`、
+    /// 或被改成独立字面量。name/host/port 无 serde 默认值，不参与比对。
     #[test]
     fn test_default_impl_matches_serde_defaults() {
         // 只给必填字段，其余全走 serde 默认值函数（形状照抄 test_connection_config_deserialize）
