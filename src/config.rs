@@ -137,8 +137,9 @@ pub struct ConnectionConfig {
 
 /// 与上方 serde 的 `#[serde(default = "default_*")]` 共用同一批 `default_*()` 函数，
 /// 保证「不带字段的 TOML 解析结果」与「代码内构造的默认实例」两条默认值来源同源。
-/// 两者的一致性由 tests::test_default_impl_matches_serde_defaults 逐字段钉死：
-/// 改动任一 `default_*()` 或本实现的字段取值，都必须同步另一侧，否则该测试失败。
+/// 一致性由 tests::test_default_impl_matches_serde_defaults 逐字段钉死，但它只拦
+/// 「单侧分叉」：某字段被换成另一个 `default_*()`、或被改成独立字面量时会失败。
+/// 某个 `default_*()` 自身的返回值改动会同时作用于两侧，测试不会（也无法）察觉。
 impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
