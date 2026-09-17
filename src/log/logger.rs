@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use chrono::Local;
-use regex::Regex;
 
 /// 日志分类
 #[derive(Clone, Copy)]
@@ -48,6 +47,12 @@ pub struct Logger {
     max_files: usize,
     /// 按 session 覆盖的保留数量（session_name -> count）
     per_session_max_files: Mutex<HashMap<String, usize>>,
+    /// 上次执行目录清理时的时间后缀（session_name -> `YYMMDD_HH`）
+    ///
+    /// 旧文件只会在跨小时产生新文件时出现，故清理只需在新小时的首条日志执行一次。
+    /// 没有这张表，每条日志都要重新编译正则、扫描并排序整个日志目录（实测占单条
+    /// 写入开销的 98%）。
+    last_cleanup_suffix: Mutex<HashMap<String, String>>,
 }
 
 impl Logger {
@@ -60,6 +65,7 @@ impl Logger {
             max_size_mb,
             max_files,
             per_session_max_files: Mutex::new(HashMap::new()),
+            last_cleanup_suffix: Mutex::new(HashMap::new()),
         }
     }
 
@@ -82,9 +88,20 @@ impl Logger {
 
     /// 获取当前时间对应的日志文件路径
     /// 格式: `<session>_<YYMMDD_HH>.log`，例如 `mud_250626_14.log`，每小时滚动
-    fn log_path(&self, session_name: &str) -> PathBuf {
-        let filename = format!("{}_{}.log", session_name, Self::timestamp_suffix());
-        self.log_dir.join(filename)
+    fn log_path(&self, session_name: &str, suffix: &str) -> PathBuf {
+        self.log_dir
+            .join(format!("{}_{}.log", session_name, suffix))
+    }
+
+    /// 判断文件名是否为该 session 的日志文件
+    ///
+    /// 命名固定为 `<session>_<YYMMDD_HH>.log`，前缀必须紧跟 `_`，避免
+    /// `sess` 误配到 `sess10_...`。
+    fn is_session_log(file_name: &str, session_name: &str) -> bool {
+        file_name
+            .strip_prefix(session_name)
+            .and_then(|rest| rest.strip_prefix('_'))
+            .is_some_and(|rest| rest.ends_with(".log"))
     }
 
     /// 清理同 session 的旧日志文件，只保留最新的 max_files 个
@@ -96,28 +113,46 @@ impl Logger {
             .and_then(|map| map.get(session_name).copied())
             .unwrap_or(self.max_files);
 
-        let pattern = format!("{}_.*\\.log", regex::escape(session_name));
-
-        let re = match Regex::new(&pattern) {
-            Ok(r) => r,
-            Err(_) => return,
-        };
-
-        let mut entries: Vec<_> = match fs::read_dir(&self.log_dir) {
+        let mut entries: Vec<(String, PathBuf)> = match fs::read_dir(&self.log_dir) {
             Ok(rd) => rd
                 .filter_map(|e| e.ok())
                 .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-                .filter(|e| re.is_match(&e.file_name().to_string_lossy()))
+                .filter_map(|e| {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    Self::is_session_log(&name, session_name).then(|| (name.into_owned(), e.path()))
+                })
                 .collect(),
             Err(_) => return,
         };
 
-        // 按文件名（即时间）排序，最新的排前面
-        entries.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+        // 按文件名（即时间）降序，最新的排前面
+        entries.sort_by(|a, b| b.0.cmp(&a.0));
 
         // 删除超出 max_files 的旧文件
-        for entry in entries.iter().skip(max_files) {
-            let _ = fs::remove_file(entry.path());
+        for (_, path) in entries.iter().skip(max_files) {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    /// 仅当该 session 跨入新的小时（时间后缀变化）时清理一次旧日志
+    ///
+    /// 代价从「每条日志一次目录扫描」降为「每 session 每小时一次」。副作用：
+    /// 已有 session 的 `max_files` 若在整点之间被下调，新上限要到下个整点才生效。
+    fn cleanup_if_rolled_over(&self, session_name: &str, suffix: &str) {
+        let rolled_over = match self.last_cleanup_suffix.lock() {
+            Ok(mut map) => match map.get(session_name) {
+                Some(last) if last == suffix => false,
+                _ => {
+                    map.insert(session_name.to_string(), suffix.to_string());
+                    true
+                }
+            },
+            // 锁中毒（持锁线程 panic）时跳过清理，不能影响正常写入
+            Err(_) => false,
+        };
+        if rolled_over {
+            self.cleanup_old_logs(session_name);
         }
     }
 
@@ -128,7 +163,8 @@ impl Logger {
 
     /// 写入分类日志
     pub fn log_cat(&self, session_name: &str, category: LogCategory, line: &str) {
-        let path = self.log_path(session_name);
+        let suffix = Self::timestamp_suffix();
+        let path = self.log_path(session_name, &suffix);
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
             let timestamp = Local::now().format("%H:%M:%S%.3f");
             let _ = writeln!(
@@ -139,8 +175,8 @@ impl Logger {
                 line.trim_end()
             );
         }
-        // 文件写入成功后清理旧文件
-        self.cleanup_old_logs(session_name);
+        // 跨入新小时时才清理旧文件（而非每条日志都扫描目录）
+        self.cleanup_if_rolled_over(session_name, &suffix);
     }
 
     /// 记录脚本发送的指令
@@ -182,7 +218,7 @@ impl Logger {
     /// 看门狗超时等非 panic 事件传说明文字（那种场景栈不可采样）。
     /// 不执行 cleanup_old_logs，避免在 panic hook 中触发新的 panic
     pub fn log_panic(&self, session_name: &str, panic_msg: &str, detail: &str) {
-        let path = self.log_path(session_name);
+        let path = self.log_path(session_name, &Self::timestamp_suffix());
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
             let timestamp = Local::now().format("%H:%M:%S%.3f");
             let tag = LogCategory::Panic.tag();
@@ -428,5 +464,55 @@ mod tests {
         assert!(content.contains("[RCN]"));
         assert!(content.contains("reconnected"));
         assert!(content.contains("downtime=120s"));
+    }
+
+    #[test]
+    fn test_is_session_log_matches_exact_prefix_only() {
+        assert!(Logger::is_session_log("mud_250626_14.log", "mud"));
+        // 相似前缀不得误配（前缀后必须紧跟 `_`）
+        assert!(!Logger::is_session_log("mud10_250626_14.log", "mud"));
+        assert!(!Logger::is_session_log("mud250626_14.log", "mud"));
+        // 名字出现在中段不算本 session 的日志
+        assert!(!Logger::is_session_log("xmud_250626_14.log", "mud"));
+        // 非 .log 后缀不算
+        assert!(!Logger::is_session_log("mud_250626_14.log.txt", "mud"));
+        assert!(!Logger::is_session_log("mud_", "mud"));
+    }
+
+    #[test]
+    fn test_cleanup_runs_once_per_hour_not_per_line() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 1);
+
+        // 首条日志建立该 session 的清理记录
+        logger.log("sess", "first");
+        // 之后人为塞入一个更旧的文件，模拟目录里出现的过期日志
+        let stale = dir.path().join("sess_250101_00.log");
+        fs::write(&stale, "dummy").unwrap();
+
+        // 同一小时内的后续写入不应再扫描目录，过期文件保持不变
+        logger.log("sess", "second");
+        assert!(stale.exists(), "同一小时内的写入不应重复触发目录扫描与清理");
+
+        // 新实例（等价于进程重启后的首次写入）应执行一次清理
+        let fresh = Logger::new(dir.path().to_str().unwrap(), 10, 1);
+        fresh.log("sess", "third");
+        assert!(!stale.exists(), "新实例的首条日志应触发一次清理");
+    }
+
+    #[test]
+    fn test_cleanup_scope_limited_to_exact_session_prefix() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 1);
+
+        let other_session = dir.path().join("sess10_250101_00.log");
+        let not_log = dir.path().join("sess_250101_00.txt");
+        fs::write(&other_session, "dummy").unwrap();
+        fs::write(&not_log, "dummy").unwrap();
+
+        logger.log("sess", "line");
+
+        assert!(other_session.exists(), "`sess` 不应波及 `sess10_...`");
+        assert!(not_log.exists(), "非 .log 文件不应被清理");
     }
 }
