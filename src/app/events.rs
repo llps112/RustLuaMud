@@ -587,7 +587,7 @@ impl App {
     ///
     /// 只用于低频诊断类消息：它每次都开/写/关文件句柄 + 一次 flush，
     /// 高频路径（每条服务端数据、每次按键）接入会在 J1800 上产生可感知的 IO 开销。
-    /// （`Logger::log_cat` 的目录轮转清理已于 1.0.0 收敛为跨小时一次，不再是瓶颈。）
+    /// （`Logger::log_cat` 的目录轮转清理已于 1.0.1 收敛为跨小时一次，不再是瓶颈。）
     pub(crate) fn sys_output_to(&mut self, session_id: SessionId, text: &str) -> io::Result<()> {
         // 预提取 name，避开下面与 terminal / logger 的借用冲突（同 switch_foreground 的手法）
         let name = self
