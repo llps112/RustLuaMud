@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, ConnectionConfig};
 use crate::connection::SessionId;
 
 use super::events::push_session_output_capped;
@@ -45,6 +45,25 @@ fn inject_session_credentials(
     warns
 }
 
+/// 构造 /connect 动态建连所用的配置。
+///
+/// 只显式给出 5 个字段，其余走 `ConnectionConfig::default()`（与 serde 的
+/// `default_*()` 同源，见 config.rs 的 Default 实现）：抽出本函数是为了让
+/// /connect 的默认值语义可被单测锁定，避免这段内联字面量随 config.rs 漂移。
+fn dynamic_connect_config(name: &str, host: &str, port: u16) -> ConnectionConfig {
+    ConnectionConfig {
+        name: name.to_string(),
+        host: host.to_string(),
+        port,
+        encoding: Some("gbk".to_string()),
+        // /connect 由本函数自行发 ConnectRequest（见下方 connect_tx），
+        // 而 ConnectionConfig 的默认 auto_connect 是 true（default_true），
+        // 不显式置 false 会重复建连。
+        auto_connect: false,
+        ..Default::default()
+    }
+}
+
 impl App {
     /// 排空引擎在脚本加载期间 run/Execute 压入的命令并分发：
     /// '/' 前缀按 Lua 代码执行（嵌套产生的命令继续排空），其余发给服务端。
@@ -78,36 +97,7 @@ impl App {
     pub(crate) fn handle_builtin_command(&mut self, cmd: &str) -> io::Result<()> {
         match parse_builtin_command(cmd) {
             BuiltinCommand::Connect { name, host, port } => {
-                let conn_config = crate::config::ConnectionConfig {
-                    name: name.clone(),
-                    host: host.clone(),
-                    port,
-                    encoding: Some("gbk".to_string()),
-                    script: None,
-                    auto_connect: false,
-                    auto_reconnect: true,
-                    reconnect_delay_secs: 5,
-                    username: None,
-                    password: None,
-                    socks5_enable: false,
-                    socks5_host: None,
-                    socks5_port: 1080,
-                    socks5_username: None,
-                    socks5_password: None,
-                    log_rotation_count: None,
-                    render_interval: 1000,
-                    realtime: false,
-                    connect_delay_ms: 1000,
-                    cmd_interval_ms: 50,
-                    burst_size: 10,
-                    cmds_per_sec: 20,
-                    window_limit: 60,
-                    window_duration_ms: 2000,
-                    reconnect_max_secs: 1800,
-                    idle_timeout_secs: 300,
-                    heartbeat_cmd: String::new(),
-                    heartbeat_timeout_secs: 60,
-                };
+                let conn_config = dynamic_connect_config(&name, &host, port);
 
                 let session_id = match self.manager.add_connection_dynamic(&conn_config) {
                     Ok(id) => id,
@@ -1110,8 +1100,29 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::inject_session_credentials;
+    use super::{dynamic_connect_config, inject_session_credentials};
     use crate::lua::LuaEngine;
+
+    /// /connect 动态建连的语义：GBK 编码、不自建连（本函数已发 ConnectRequest）、
+    /// 断线自动重连、日志保留数走全局默认（None）。这些字段以前以内联字面量写死，
+    /// 抽成 dynamic_connect_config 后由本测试锁定，避免随 config.rs 的默认值漂移。
+    #[test]
+    fn test_dynamic_connect_config_semantics() {
+        let cfg = dynamic_connect_config("char1", "mud.example.com", 4000);
+        assert_eq!(cfg.encoding.as_deref(), Some("gbk"), "动态建连应固定 GBK");
+        assert!(
+            !cfg.auto_connect,
+            "auto_connect 必须为 false，否则与 connect_tx 重复建连"
+        );
+        assert!(cfg.auto_reconnect, "动态建连应默认自动重连");
+        assert_eq!(
+            cfg.log_rotation_count, None,
+            "未指定时日志保留数应走全局默认"
+        );
+        assert_eq!(cfg.name, "char1");
+        assert_eq!(cfg.host, "mud.example.com");
+        assert_eq!(cfg.port, 4000);
+    }
 
     /// P1 回归：凭据缺失必须产出告警而不是静默跳过。
     /// 线上事故的成因之一即「静默跳过」——玩家只看到脚本里 charid 为 nil 的

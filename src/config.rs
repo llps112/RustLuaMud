@@ -135,6 +135,45 @@ pub struct ConnectionConfig {
     pub heartbeat_timeout_secs: u64,
 }
 
+/// 与上方 serde 的 `#[serde(default = "default_*")]` 共用同一批 `default_*()` 函数，
+/// 保证「不带字段的 TOML 解析结果」与「代码内构造的默认实例」两条默认值来源同源。
+/// 两者的一致性由 tests::test_default_impl_matches_serde_defaults 逐字段钉死：
+/// 改动任一 `default_*()` 或本实现的字段取值，都必须同步另一侧，否则该测试失败。
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            host: String::new(),
+            port: 0,
+            encoding: None,
+            script: None,
+            auto_connect: default_true(),
+            auto_reconnect: default_true(),
+            reconnect_delay_secs: default_reconnect_delay(),
+            username: None,
+            password: None,
+            socks5_enable: false,
+            socks5_host: None,
+            socks5_port: default_socks5_port(),
+            socks5_username: None,
+            socks5_password: None,
+            log_rotation_count: None,
+            render_interval: default_render_interval(),
+            realtime: false,
+            connect_delay_ms: default_connect_delay(),
+            cmd_interval_ms: default_cmd_interval_ms(),
+            burst_size: default_burst_size(),
+            cmds_per_sec: default_cmds_per_sec(),
+            window_limit: default_window_limit(),
+            window_duration_ms: default_window_duration_ms(),
+            reconnect_max_secs: default_reconnect_max_secs(),
+            idle_timeout_secs: default_idle_timeout_secs(),
+            heartbeat_cmd: String::new(),
+            heartbeat_timeout_secs: default_heartbeat_timeout_secs(),
+        }
+    }
+}
+
 /// 服务端 LPC cmd.c 的反 flood 常量，用于校验限速参数组合是否安全。
 /// 改动前需先核对 LPC/cmd.c：`#define CMDS_PER_TICK 20` / `#define TICK 2`
 const SERVER_CMDS_PER_TICK: u64 = 20;
@@ -775,6 +814,104 @@ mod tests {
         assert_eq!(config.reconnect_delay_secs, 10);
         assert_eq!(config.username.as_deref(), Some("user1"));
         assert_eq!(config.password.as_deref(), Some("pass1"));
+    }
+
+    /// 钉死两条默认值来源：serde 的 `#[serde(default = "default_*")]` 与手写的
+    /// `impl Default for ConnectionConfig`。任一侧改动而另一侧漏改，本测试即失败 ——
+    /// 这是配置默认值不漂移的唯一机制。
+    #[test]
+    fn test_default_impl_matches_serde_defaults() {
+        // 只给必填字段，其余全走 serde 默认值函数（形状照抄 test_connection_config_deserialize）
+        let toml_str = r#"
+            name = "dflt"
+            host = "dflt.example.com"
+            port = 4000
+        "#;
+        let from_toml = ConnectionConfig::from_toml_str(toml_str).unwrap();
+        let d = ConnectionConfig::default();
+
+        assert_eq!(from_toml.encoding, d.encoding, "encoding 默认值分叉");
+        assert_eq!(from_toml.script, d.script, "script 默认值分叉");
+        assert_eq!(
+            from_toml.auto_connect, d.auto_connect,
+            "auto_connect 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.auto_reconnect, d.auto_reconnect,
+            "auto_reconnect 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.reconnect_delay_secs, d.reconnect_delay_secs,
+            "reconnect_delay_secs 默认值分叉"
+        );
+        assert_eq!(from_toml.username, d.username, "username 默认值分叉");
+        assert_eq!(from_toml.password, d.password, "password 默认值分叉");
+        assert_eq!(
+            from_toml.socks5_enable, d.socks5_enable,
+            "socks5_enable 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.socks5_host, d.socks5_host,
+            "socks5_host 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.socks5_port, d.socks5_port,
+            "socks5_port 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.socks5_username, d.socks5_username,
+            "socks5_username 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.socks5_password, d.socks5_password,
+            "socks5_password 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.log_rotation_count, d.log_rotation_count,
+            "log_rotation_count 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.render_interval, d.render_interval,
+            "render_interval 默认值分叉"
+        );
+        assert_eq!(from_toml.realtime, d.realtime, "realtime 默认值分叉");
+        assert_eq!(
+            from_toml.connect_delay_ms, d.connect_delay_ms,
+            "connect_delay_ms 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.cmd_interval_ms, d.cmd_interval_ms,
+            "cmd_interval_ms 默认值分叉"
+        );
+        assert_eq!(from_toml.burst_size, d.burst_size, "burst_size 默认值分叉");
+        assert_eq!(
+            from_toml.cmds_per_sec, d.cmds_per_sec,
+            "cmds_per_sec 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.window_limit, d.window_limit,
+            "window_limit 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.window_duration_ms, d.window_duration_ms,
+            "window_duration_ms 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.reconnect_max_secs, d.reconnect_max_secs,
+            "reconnect_max_secs 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.idle_timeout_secs, d.idle_timeout_secs,
+            "idle_timeout_secs 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.heartbeat_cmd, d.heartbeat_cmd,
+            "heartbeat_cmd 默认值分叉"
+        );
+        assert_eq!(
+            from_toml.heartbeat_timeout_secs, d.heartbeat_timeout_secs,
+            "heartbeat_timeout_secs 默认值分叉"
+        );
     }
 
     #[test]
