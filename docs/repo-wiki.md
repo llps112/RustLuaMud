@@ -83,7 +83,7 @@ RustLuaMud 采用 **Rust 引擎 + Lua 脚本** 的双层架构：
 |------|------|------|
 | `mod.rs` | 0.2KB | 模块声明 |
 | `engine.rs` | 9.8KB | LuaJIT 引擎管理，协程支持，`dofile` 自动 GBK 转码 |
-| `api.rs` | 115.8KB | MUSHclient 兼容 API 实现（核心文件） |
+| `api/` | 129KB | MUSHclient 兼容 API 实现（核心，按 API 族拆为 12 个子模块） |
 | `triggers.rs` | 17.7KB | 触发器系统，含 name 索引和 group 索引 |
 | `aliases.rs` | 5.1KB | 别名系统 |
 | `timers.rs` | 9.2KB | 定时器系统，标记式禁用 |
@@ -283,7 +283,7 @@ cargo nextest run
 
 ### 7.1 MUSHclient API 实现
 
-`src/lua/api.rs`（115.8KB）实现了 MUSHclient 的核心 API，覆盖以下类别：
+`src/lua/api/`（12 个子模块，共 129KB）实现了 MUSHclient 的核心 API，覆盖以下类别：
 
 | 类别 | 主要 API |
 |------|---------|
@@ -416,7 +416,7 @@ RustLuaMud/
 │   │   └── debug.rs           # 调试辅助
 │   └── lua/                   # Lua 引擎 + API
 │       ├── engine.rs          # LuaJIT 管理
-│       ├── api.rs             # MUSHclient API
+│       ├── api/               # MUSHclient API（按族拆分的子模块）
 │       ├── triggers.rs        # 触发器系统
 │       ├── aliases.rs         # 别名系统
 │       ├── timers.rs          # 定时器系统

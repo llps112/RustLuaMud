@@ -12,7 +12,7 @@ trigger: always_on
 | `Note("msg")` | ✅ 前台显示，带 `[Lua]` 前缀 | ✅ 写入 | 单个字符串参数 |
 | `print("msg")` | ✅ 同上 | ✅ 写入 | 多参数用 `\t` 连接 |
 
-两者共用同一条落盘链路：`print`/`Note` → 引擎 `pending_logs`（`src/lua/api.rs:358-414`）→ `drain_lua_logs` 逐条写文件（`src/app/session.rs:682-692`）。写入时按**消息前缀**分类，与用哪个函数无关：
+两者共用同一条落盘链路：`print`/`Note` → 引擎 `pending_logs`（`src/lua/api/output.rs:41-97`）→ `drain_lua_logs` 逐条写文件（`src/app/session.rs:710-757`）。写入时按**消息前缀**分类，与用哪个函数无关：
 
 | 消息前缀 | 日志标签 |
 |---|---|
@@ -40,7 +40,7 @@ trigger: always_on
 
 ### 字符串拼接规范
 
-**禁止在 `print`/`Note` 中用逗号分隔多参数**（`print` 的多参数由 `src/lua/api.rs:401` 的 `parts.join("\t")` 拼接，会插入制表符，间距过大）。**优先用 `string.format` 替代 `..` 拼接**：
+**禁止在 `print`/`Note` 中用逗号分隔多参数**（`print` 的多参数由 `src/lua/api/output.rs:84` 的 `parts.join("\t")` 拼接，会插入制表符，间距过大）。**优先用 `string.format` 替代 `..` 拼接**：
 
 ```lua
 -- ❌ 差：逗号分隔导致制表符间距过大

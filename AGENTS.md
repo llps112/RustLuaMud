@@ -51,7 +51,7 @@ src/                          — Rust 源码
 │   └── debug.rs              — 调试输出
 └── lua/                      — Lua 脚本引擎模块
     ├── engine.rs             — LuaJIT 引擎初始化与管理
-    ├── api.rs                — MUSHclient 兼容 API 实现
+    ├── api/                  — MUSHclient 兼容 API 实现（按 API 族拆分的子模块目录）
     ├── triggers.rs           — 触发器系统
     ├── aliases.rs            — 别名系统
     ├── timers.rs             — 定时器系统
