@@ -2241,7 +2241,8 @@ impl LuaEngine {
             loaded.set(*module, lua.create_table()?)?;
         }
 
-        // 注册 MushClient 兼容全局模块（rex PCRE 正则库，基于 Rust regex crate 实现）
+        // 注册 MushClient 兼容全局模块（rex 正则库，基于 Rust regex crate 实现，
+        // PCRE 语法子集：\Z/\z 自动转换，不支持反向引用与前后查找）
         let rex_table = lua.create_table()?;
 
         // rex.new(pattern) -> 返回正则对象

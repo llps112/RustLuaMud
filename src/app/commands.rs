@@ -459,7 +459,7 @@ impl App {
                     TermSettings {
                         keep_command: enabled,
                     }
-                    .save();
+                    .save(&self.config.general.profile_dir);
                     self.terminal
                         .append_output(&format!("[系统] 保留命令栏输入: {} (已保存)", status))?;
                 }

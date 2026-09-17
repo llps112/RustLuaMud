@@ -232,19 +232,23 @@ impl LuaEngine {
                 for (i, m) in caps_list.iter().enumerate() {
                     let _ = wildcards_table.set(i + 1, m.as_str());
                 }
-                // 用 catch_unwind 防止 Rust panic 跨越 Lua FFI 边界导致静默崩溃
+                // 用 catch_unwind 防止 Rust panic 跨越 Lua FFI 边界导致静默崩溃；
+                // 看门狗布防：回调死循环时由 watchdog 线程中止进程，
+                // 避免 7×24 挂机场景下单条触发器卡死整个客户端
                 if std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    if let Err(e) = callback.call::<()>((
-                        trigger_name.as_str(),
-                        clean_line.as_str(),
-                        wildcards_table,
-                        styles_table.clone(),
-                    )) {
-                        self.log_error(&format!(
-                            "[Lua] 触发器 '{}' 回调中发生 Lua 错误: {}",
-                            trigger_name, e
-                        ));
-                    }
+                    self.exec_with_watchdog(&trigger_name, || {
+                        if let Err(e) = callback.call::<()>((
+                            trigger_name.as_str(),
+                            clean_line.as_str(),
+                            wildcards_table,
+                            styles_table.clone(),
+                        )) {
+                            self.log_error(&format!(
+                                "[Lua] 触发器 '{}' 回调中发生 Lua 错误: {}",
+                                trigger_name, e
+                            ));
+                        }
+                    });
                 }))
                 .is_err()
                 {

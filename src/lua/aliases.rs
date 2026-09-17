@@ -73,12 +73,15 @@ impl LuaEngine {
                     state.aliases[idx].name.clone()
                 };
                 let lua_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    if let Err(e) = self.lua.load(&code).exec() {
-                        self.log_error(&format!(
-                            "[Lua] 别名 '{}' send_to=12 执行错误: {:?}",
-                            name, e
-                        ));
-                    }
+                    // 看门狗布防：send_to=12 代码死循环时中止进程，防止整个客户端卡死
+                    self.exec_with_watchdog(&name, || {
+                        if let Err(e) = self.lua.load(&code).exec() {
+                            self.log_error(&format!(
+                                "[Lua] 别名 '{}' send_to=12 执行错误: {:?}",
+                                name, e
+                            ));
+                        }
+                    })
                 }));
                 if lua_result.is_err() {
                     self.log_error(&format!("别名 send_to=12 执行中发生 panic: {}", code));
@@ -97,17 +100,20 @@ impl LuaEngine {
                     for (i, m) in caps_list.iter().enumerate() {
                         let _ = wildcards.set(i + 1, m.as_str());
                     }
-                    // 使用 catch_unwind 防止 Rust panic 跨越 Lua FFI 边界导致静默崩溃
+                    // 使用 catch_unwind 防止 Rust panic 跨越 Lua FFI 边界导致静默崩溃；
+                    // 看门狗布防：回调死循环时中止进程，防止整个客户端卡死
                     let name_for_err = alias_name.clone();
                     if std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        if let Err(e) =
-                            callback.call::<()>((alias_name, input.to_string(), wildcards))
-                        {
-                            self.log_error(&format!(
-                                "[Lua] 别名 '{}' 回调中发生 Lua 错误: {}",
-                                name_for_err, e
-                            ));
-                        }
+                        self.exec_with_watchdog(&name_for_err, || {
+                            if let Err(e) =
+                                callback.call::<()>((alias_name, input.to_string(), wildcards))
+                            {
+                                self.log_error(&format!(
+                                    "[Lua] 别名 '{}' 回调中发生 Lua 错误: {}",
+                                    name_for_err, e
+                                ));
+                            }
+                        });
                     }))
                     .is_err()
                     {

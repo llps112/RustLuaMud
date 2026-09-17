@@ -62,26 +62,37 @@ impl LuaEngine {
 
     /// 看门狗标记 helper：包裹执行逻辑，自动标记开始/结束
     /// 使用 Drop guard 确保 panic 时也能清除看门狗状态
-    fn exec_with_watchdog(&self, name: &str, f: impl FnOnce()) {
-        *self
+    ///
+    /// 支持嵌套调用（如定时器回调内同步执行触发器匹配）：guard 结束时
+    /// 恢复外层的开始时间而非直接清零，内层标记不会遮蔽外层的超时监控
+    pub(super) fn exec_with_watchdog(&self, name: &str, f: impl FnOnce()) {
+        let prev_name = self
             .exec_timer_name
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(name.to_string());
-        self.exec_start.store(
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(name.to_string());
+        let prev_start = self.exec_start.swap(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as u64,
             Ordering::Relaxed,
         );
-        // Drop guard：无论 f() 正常返回还是 panic，都清除看门狗状态
-        struct WatchdogGuard<'a>(&'a LuaEngine);
+        // Drop guard：无论 f() 正常返回还是 panic，都恢复外层看门狗状态
+        // （开始时间与回调名一并恢复，避免内层退出后外层死循环时
+        // watchdog 报错内层的名字）
+        struct WatchdogGuard<'a>(&'a LuaEngine, u64, Option<String>);
         impl Drop for WatchdogGuard<'_> {
             fn drop(&mut self) {
-                self.0.exec_start.store(0, Ordering::Relaxed);
+                self.0.exec_start.store(self.1, Ordering::Relaxed);
+                *self
+                    .0
+                    .exec_timer_name
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = self.2.take();
             }
         }
-        let _guard = WatchdogGuard(self);
+        let _guard = WatchdogGuard(self, prev_start, prev_name);
         f();
     }
 

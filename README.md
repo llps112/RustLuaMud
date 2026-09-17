@@ -10,6 +10,7 @@
 - 常用 API 类别全覆盖：触发器、别名、定时器、变量、日志、数据库、样式查询
 - 触发器 `wildcards[0]`（完整匹配文本）与 MUSHclient 行为完全一致
 - 多行触发器、颜色样式回调（`GetStyle`）、模拟输出（`Simulate`）
+- 触发器正则基于 Rust `regex` 引擎（PCRE 语法子集：自动转换 `\Z`/`\z`，不支持反向引用与前后查找，不兼容的模式在注册时即时报错）
 - 参考 `help/api/` 目录查阅完整 API 文档
 
 **脚本引擎**
@@ -514,7 +515,7 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 | API | 说明 |
 |-----|------|
 | `dofile(filename)` | 加载 Lua 脚本（自动 GBK 转码） |
-| `rex` | 正则模块 |
+| `rex` | 正则模块（Rust `regex` 引擎，PCRE 语法子集，不支持反向引用与前后查找） |
 | `bit` | 位运算（band / bor / bxor / bnot / lshift / rshift） |
 | `json_encode(val)` / `json_decode(str)` | JSON 序列化/反序列化 |
 | `SendPkt(data)` | 发送原始数据包 |
@@ -530,7 +531,7 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 | `sendto` | 发送目标 |
 | `error_code` / `error_desc` | 错误码与描述 |
 
-常用值：`Enabled=1`、`KeepEvaluating=8`、`RegularExpression=32`、`Replace=1024`、`Temporary=16384`（trigger/alias/timer 三表数值一致）、`OneShot=32768`（触发器/别名）/ `OneShot=4`（定时器）。
+常用值（三表数值一致的）：`Enabled=1`、`KeepEvaluating=8`、`Replace=1024`、`Temporary=16384`；`RegularExpression=32`（触发器）/ `128`（别名，定时器无此项）；`OneShot=32768`（触发器/别名）/ `4`（定时器）。完整定义以 `trigger_flag` / `alias_flag` / `timer_flag` 表为准。
 
 ---
 

@@ -108,7 +108,7 @@ iconv -f UTF-8 -t GBK scripts/class-utf8/<file> > scripts/class/<file>
 
 1. **编码双轨制**：`scripts/class-utf8/` 是开发源（UTF-8），`scripts/class/` 是运行时（GBK，iconv 生成）。**绝对禁止直接编辑 GBK 文件中的中文**。
 2. **MushClient API 100% 兼容**：所有 API 常量表（`trigger_flag`、`alias_flag`、`timer_flag`、`custom_colour`、`sendto`、`error_code`/`error_desc`）必须完整匹配上游源码。
-3. **正则双引擎**：Rust 侧使用 PCRE（regex crate），Lua 侧使用 Lua 模式，转义方式完全不同。不可混用。
+3. **正则双引擎**：Rust 侧使用 regex crate（PCRE 语法子集，`\Z`/`\z` 自动转换，不支持反向引用与前后查找），Lua 侧使用 Lua 模式，转义方式完全不同。不可混用。
 4. **子模块隐私隔离**：`scripts/private` 是私有仓库（地址见 `.gitmodules`）。公开侧按 L1/L2/L3 三级判定：工程结构（`class/`、`class-utf8/`、`hooks/`）与机制性文件名可写，**业务实现与 raw URL 禁止新增**。详见 `submodule-privacy.md`。
 5. **Git 子模块工作流**：子模块独立提交，主仓库仅更新指针。子模块指针更新不触发 CI。
 6. **测试覆盖**：新增功能必须附带测试，`src/lua/tests.rs` 包含大量 Lua 引擎集成测试。

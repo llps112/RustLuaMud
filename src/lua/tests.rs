@@ -14,6 +14,48 @@ use regex::bytes::Regex as BytesRegex;
 // ================================================================
 
 #[test]
+fn test_watchdog_nested_execution_restores_outer_mark() {
+    // 回归护栏：嵌套 exec_with_watchdog（如定时器回调内同步执行触发器匹配）
+    // 结束时必须恢复外层开始时间而非清零，否则内层退出后外层失去看门狗保护
+    use std::sync::atomic::Ordering;
+
+    let engine = LuaEngine::new().expect("引擎创建失败");
+    engine.exec_with_watchdog("outer", || {
+        let outer_start = engine.exec_start.load(Ordering::Relaxed);
+        assert_ne!(outer_start, 0, "外层进入后看门狗标记应非零");
+        engine.exec_with_watchdog("inner", || {
+            assert_ne!(engine.exec_start.load(Ordering::Relaxed), 0);
+        });
+        assert_eq!(
+            engine.exec_start.load(Ordering::Relaxed),
+            outer_start,
+            "内层退出后应恢复外层标记"
+        );
+        let name = engine
+            .exec_timer_name
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(
+            name.as_deref(),
+            Some("outer"),
+            "内层退出后应恢复外层回调名，避免 watchdog 报错内层名字"
+        );
+    });
+    assert_eq!(
+        engine.exec_start.load(Ordering::Relaxed),
+        0,
+        "最外层退出后应清零"
+    );
+    let name = engine
+        .exec_timer_name
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert_eq!(name.as_deref(), None, "最外层退出后应清空回调名");
+}
+
+#[test]
 fn test_i64_to_lua_integer_zero() {
     assert_eq!(i64_to_lua_integer(0), 0);
 }

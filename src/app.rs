@@ -34,14 +34,15 @@ struct TermSettings {
 }
 
 impl TermSettings {
-    fn path() -> &'static str {
-        "profiles/terminal.json"
+    /// 持久化路径跟随 --profiles 指定的目录，多实例间互不干扰
+    fn path(profiles_dir: &str) -> std::path::PathBuf {
+        Path::new(profiles_dir).join("terminal.json")
     }
 
-    fn load() -> Self {
-        let path = Self::path();
-        if Path::new(path).exists() {
-            fs::read_to_string(path)
+    fn load(profiles_dir: &str) -> Self {
+        let path = Self::path(profiles_dir);
+        if path.exists() {
+            fs::read_to_string(&path)
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default()
@@ -50,8 +51,8 @@ impl TermSettings {
         }
     }
 
-    fn save(&self) {
-        let path = Self::path();
+    fn save(&self, profiles_dir: &str) {
+        let path = Self::path(profiles_dir);
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = fs::write(path, json);
         }
@@ -108,8 +109,8 @@ impl App {
 
         let mut terminal = Terminal::new()?;
 
-        // 加载并应用终端设置
-        let ts = TermSettings::load();
+        // 加载并应用终端设置（路径跟随 --profiles 目录，多实例隔离）
+        let ts = TermSettings::load(&config.general.profile_dir);
         terminal.state_mut().keep_command = ts.keep_command;
 
         let (reconnect_tx, reconnect_rx) = mpsc::channel(32);
@@ -394,6 +395,14 @@ mod tests {
 
     #[test]
     fn test_term_settings_path() {
-        assert_eq!(TermSettings::path(), "profiles/terminal.json");
+        // 路径跟随 --profiles 参数指定的目录，多实例间互不干扰
+        assert_eq!(
+            TermSettings::path("profiles"),
+            Path::new("profiles").join("terminal.json")
+        );
+        assert_eq!(
+            TermSettings::path("profiles2"),
+            Path::new("profiles2").join("terminal.json")
+        );
     }
 }

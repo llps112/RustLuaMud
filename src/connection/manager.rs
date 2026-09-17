@@ -9,8 +9,9 @@ use crate::config::ConnectionConfig;
 pub enum ManagerEvent {
     /// 某连接收到数据 (session_id, data)
     Data(SessionId, String),
-    /// 某连接状态变化 (session_id, new_state)
-    StateChange(SessionId, SessionState),
+    /// 某连接状态变化 (session_id, new_state, 连接代际号)
+    /// 代际号由 session.connect_generation 提供，app 层据此丢弃旧连接残留任务的过期事件
+    StateChange(SessionId, SessionState, u64),
     /// 某连接出错 (session_id, error)
     Error(SessionId, String),
 }
@@ -161,8 +162,8 @@ impl ConnectionManager {
             while let Some(event) = event_rx.recv().await {
                 let mgr_event = match event {
                     SessionEvent::Data(data) => ManagerEvent::Data(session_id, data),
-                    SessionEvent::StateChange(state) => {
-                        ManagerEvent::StateChange(session_id, state)
+                    SessionEvent::StateChange(state, generation) => {
+                        ManagerEvent::StateChange(session_id, state, generation)
                     }
                     SessionEvent::Error(err) => ManagerEvent::Error(session_id, err),
                 };

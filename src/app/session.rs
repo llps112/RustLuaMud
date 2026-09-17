@@ -93,6 +93,10 @@ impl App {
                     let downtime = session.downtime_secs();
                     self.logger.log_reconnect(&name, downtime);
                     session.on_connect_success();
+                    // 复位心跳状态：断线期间 last_recv_time / heartbeat_sent 停滞，
+                    // 不复位的话重连成功后首个 tick 就会用旧时间戳误判心跳超时
+                    session.last_recv_time = std::time::Instant::now();
+                    session.heartbeat_sent = None;
                 }
             }
             Err(e) => {
@@ -576,7 +580,19 @@ impl App {
                     if sent_at.elapsed().as_secs() >= hb_timeout {
                         if let Some(session) = self.manager.get_mut_by_id(session_id) {
                             session.set_disconnect_reason("heartbeat_timeout".to_string());
-                            session.disconnect();
+                            // 不用 disconnect()：它依赖「写半关闭 → FIN → EOF」事件链
+                            // 驱动重连，网络静默死亡（无 FIN/RST，且 TCP keepalive
+                            // 未覆盖的平台）时 EOF 永不到来，重连永远不会触发。
+                            // 改用 shutdown() 直接取消读任务，断线后处理
+                            // （[DCN] 日志 / 重连排期）由下方 after_disconnect 统一执行。
+                            // 定时器轮询任务与连接解耦（MUSHclient ActiveWhenClosed
+                            // 语义，断线期间 wait.time 等仍需继续走），跨 shutdown 保留
+                            let keep_timer = session.timer_cancel_tx.take();
+                            session.shutdown();
+                            session.timer_cancel_tx = keep_timer;
+                            if let Some(ref mut engine) = session.lua_engine {
+                                engine.notify_disconnect("heartbeat_timeout");
+                            }
                         }
                         let name = self
                             .manager
@@ -588,6 +604,13 @@ impl App {
                             "[系统] 连接 {} ({}) 心跳超时 ({}s)，主动断开",
                             display_pos, name, hb_timeout
                         ))?;
+                        // 统一断线后处理：记录日志 + 按退避排期自动重连
+                        self.after_disconnect(session_id)?;
+                        // shutdown() 静默取消读任务，无 Disconnected 事件触发
+                        // 状态栏刷新，此处前台会话需显式刷新一次
+                        if session_id == self.manager.foreground_id {
+                            self.update_status_bar()?;
+                        }
                     }
                 } else if idle_secs >= idle_timeout {
                     // 空闲超时，发送心跳

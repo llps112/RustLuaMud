@@ -133,7 +133,12 @@ impl LuaEngine {
 
     /// 直接执行 Lua 代码（用于 /eval 命令）
     pub fn eval_code(&self, code: &str) -> Result<(), String> {
-        self.lua.load(code).exec().map_err(|e| format!("{}", e))
+        // 看门狗布防：/lua 与排队命令执行的任意代码死循环时中止进程
+        let mut result = Ok(());
+        self.exec_with_watchdog("eval_code", || {
+            result = self.lua.load(code).exec().map_err(|e| format!("{}", e));
+        });
+        result
     }
 
     /// 执行 Lua 代码并返回字符串结果
@@ -172,12 +177,17 @@ impl LuaEngine {
         // 预处理 Lua 源码，修复 LuaJIT 不兼容的无效转义序列
         let code = fix_lua_escape_sequences(&code);
 
-        // 执行脚本
-        self.lua
-            .load(&code)
-            .set_name(path)
-            .exec()
-            .map_err(|e| format!("脚本 '{}' 执行错误: {}", path, e))?;
+        // 执行脚本（看门狗布防：脚本顶层死循环时中止进程，超时以脚本路径标注）
+        let mut exec_result: Result<(), String> = Ok(());
+        self.exec_with_watchdog(path, || {
+            exec_result = self
+                .lua
+                .load(&code)
+                .set_name(path)
+                .exec()
+                .map_err(|e| format!("脚本 '{}' 执行错误: {}", path, e));
+        });
+        exec_result?;
 
         Ok(())
     }
@@ -240,7 +250,7 @@ impl LuaEngine {
                         .unwrap_or_else(|| "<unknown>".to_string());
 
                     let panic_msg = format!(
-                        "Lua execution watchdog timeout - timer '{}' exceeded {}s, forcing abort",
+                        "Lua execution watchdog timeout - callback '{}' exceeded {}s, forcing abort",
                         timer, timeout_secs
                     );
                     eprintln!("{}", panic_msg);

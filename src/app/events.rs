@@ -352,30 +352,34 @@ impl App {
                     self.update_status_bar()?;
                 }
             }
-            ManagerEvent::StateChange(id, state) => {
-                // 检查 session 是否仍然存在（可能已被 /close 移除）
-                if self.manager.get_by_id(id).is_none() {
+            ManagerEvent::StateChange(id, state, generation) => {
+                // 检查 session 是否仍然存在（可能已被 /close 移除）；
+                // 代际校验：事件代际落后于当前值，说明它来自旧连接的残留读任务
+                // （重连竞态窗口内旧连接 EOF），直接丢弃，防止把健康的新连接
+                // 误判为断线并触发重复重连
+                let Some(session) = self.manager.get_mut_by_id(id) else {
+                    return Ok(());
+                };
+                if session.connect_generation != generation {
                     return Ok(());
                 }
-                if let Some(session) = self.manager.get_mut_by_id(id) {
-                    session.state = state.clone();
-                    // 同步 Lua 引擎的连接状态（同步到对应 session，不限于前台）
-                    if let Some(ref mut engine) = session.lua_engine {
-                        if state == SessionState::Connected {
-                            engine.set_connected(true);
-                        } else if state == SessionState::Disconnected {
-                            let reason = session
-                                .last_disconnect_reason
-                                .clone()
-                                .unwrap_or_else(|| "disconnected".to_string());
-                            engine.notify_disconnect(&reason);
-                        }
+                session.state = state.clone();
+                // 同步 Lua 引擎的连接状态（同步到对应 session，不限于前台）
+                if let Some(ref mut engine) = session.lua_engine {
+                    if state == SessionState::Connected {
+                        engine.set_connected(true);
+                    } else if state == SessionState::Disconnected {
+                        let reason = session
+                            .last_disconnect_reason
+                            .clone()
+                            .unwrap_or_else(|| "disconnected".to_string());
+                        engine.notify_disconnect(&reason);
                     }
-                    // 断线时清理发送通道，避免 Lua 引擎通过已关闭通道发送数据触发“channel closed”错误刷屏
-                    if state == SessionState::Disconnected {
-                        session.send_tx = None;
-                        session.send_raw_tx = None;
-                    }
+                }
+                // 断线时清理发送通道，避免 Lua 引擎通过已关闭通道发送数据触发“channel closed”错误刷屏
+                if state == SessionState::Disconnected {
+                    session.send_tx = None;
+                    session.send_raw_tx = None;
                 }
                 if id == self.manager.foreground_id {
                     self.update_status_bar()?;
@@ -399,37 +403,7 @@ impl App {
 
                 // 自动重连：断开时启动延迟重连任务
                 if state == SessionState::Disconnected {
-                    // 仅在未预设原因时设置默认断线原因（心跳超时等场景已预设）
-                    if let Some(session) = self.manager.get_mut_by_id(id) {
-                        if session.last_disconnect_reason.is_none() {
-                            session.set_disconnect_reason("disconnected".to_string());
-                        }
-                    }
-                    let (backoff, auto_reconnect) = self
-                        .manager
-                        .get_by_id(id)
-                        .map(|s| (s.current_backoff_secs(), s.auto_reconnect))
-                        .unwrap_or((5, false));
-                    // 记录断线日志 [DCN]
-                    if let Some(session) = self.manager.get_by_id(id) {
-                        let reason = session
-                            .last_disconnect_reason
-                            .as_deref()
-                            .unwrap_or("unknown");
-                        self.logger.log_disconnect(&name, reason, backoff);
-                    }
-                    if auto_reconnect {
-                        self.terminal.append_output(&format!(
-                            "[系统] {} 秒后尝试重连 {}...",
-                            backoff, name
-                        ))?;
-                        // 启动延迟重连任务
-                        let tx = self.reconnect_tx.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(tokio::time::Duration::from_secs(backoff)).await;
-                            let _ = tx.send(ReconnectRequest { session_id: id }).await;
-                        });
-                    }
+                    self.after_disconnect(id)?;
                 }
             }
             ManagerEvent::Error(id, err) => {
@@ -442,6 +416,50 @@ impl App {
                 self.terminal
                     .append_output(&format!("[错误] 连接 {} ({}): {}", display_pos, name, err))?;
             }
+        }
+        Ok(())
+    }
+
+    /// 统一断线后处理：补默认断线原因、记录 [DCN] 日志、按退避排期自动重连。
+    ///
+    /// 供两条断线路径复用：
+    /// - 事件驱动：StateChange(Disconnected)（读任务检测到 EOF/读取错误）
+    /// - 主动断开：心跳超时（app/session.rs 调用 shutdown 后读任务静默退出，
+    ///   不会有 Disconnected 事件到达，必须在此显式排期重连）
+    pub(crate) fn after_disconnect(&mut self, session_id: SessionId) -> io::Result<()> {
+        // 仅在未预设原因时设置默认断线原因（心跳超时等场景已预设）
+        if let Some(session) = self.manager.get_mut_by_id(session_id) {
+            if session.last_disconnect_reason.is_none() {
+                session.set_disconnect_reason("disconnected".to_string());
+            }
+        }
+        let name = self
+            .manager
+            .get_by_id(session_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        let (backoff, auto_reconnect) = self
+            .manager
+            .get_by_id(session_id)
+            .map(|s| (s.current_backoff_secs(), s.auto_reconnect))
+            .unwrap_or((5, false));
+        // 记录断线日志 [DCN]
+        if let Some(session) = self.manager.get_by_id(session_id) {
+            let reason = session
+                .last_disconnect_reason
+                .as_deref()
+                .unwrap_or("unknown");
+            self.logger.log_disconnect(&name, reason, backoff);
+        }
+        if auto_reconnect {
+            self.terminal
+                .append_output(&format!("[系统] {} 秒后尝试重连 {}...", backoff, name))?;
+            // 启动延迟重连任务
+            let tx = self.reconnect_tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(tokio::time::Duration::from_secs(backoff)).await;
+                let _ = tx.send(ReconnectRequest { session_id }).await;
+            });
         }
         Ok(())
     }

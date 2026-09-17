@@ -42,7 +42,8 @@ pub struct SessionInfo {
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
     Data(String),
-    StateChange(SessionState),
+    /// 状态变更（附连接代际号：app 层与当前代际比对，丢弃旧连接残留任务的过期事件）
+    StateChange(SessionState, u64),
     Error(String),
 }
 
@@ -134,6 +135,11 @@ pub struct Session {
     pub last_recv_time: std::time::Instant,
     /// 心跳发送时间（Some = 已发送等待响应）
     pub heartbeat_sent: Option<std::time::Instant>,
+    /// 连接代际号：每次 connect() 递增。读任务发出的 StateChange 携带
+    /// 发起连接时的代际号，app 层与当前值比对即可过滤旧连接残留任务
+    /// 发出的过期事件（重连竞态：旧连接 EOF 的 Disconnected 可能晚于
+    /// 新连接建立才到达，会把健康的新连接误判为断线并触发重复重连）
+    pub connect_generation: u64,
 
     // 发送命令的通道
     pub(crate) send_tx: Option<mpsc::Sender<String>>,
@@ -257,6 +263,7 @@ impl Session {
             heartbeat_timeout_secs: config.heartbeat_timeout_secs,
             last_recv_time: std::time::Instant::now(),
             heartbeat_sent: None,
+            connect_generation: 0,
             send_tx: None,
             send_raw_tx: None,
             cancel_tx: None,
@@ -266,6 +273,17 @@ impl Session {
 
     /// 连接到服务器，返回接收事件通道
     pub async fn connect(&mut self) -> Result<mpsc::Receiver<SessionEvent>, String> {
+        // 重连防护：先取消旧读任务再拨号。否则拨号期间（SOCKS5 最长 10 秒）
+        // 旧读任务仍可能因旧连接 EOF 发出 Disconnected 事件，污染新连接状态
+        // 并触发重复重连（第二次 connect 会静默杀掉第一条新连接）
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+        // 代际号递增：本次连接发出的 StateChange 均携带该值，
+        // app 层丢弃代际落后的过期事件（对上一条取消信号的补充兜底）
+        self.connect_generation = self.connect_generation.wrapping_add(1);
+        let generation = self.connect_generation;
+
         let addr = format!("{}:{}", self.host, self.port);
         self.state = SessionState::Connecting;
 
@@ -335,57 +353,17 @@ impl Session {
             .into_std()
             .map_err(|e| format!("转换 TCP 流失败: {}", e))?;
 
-        // 启用 TCP keepalive，防止断包导致连接静默断开
-        // 用 libc 统一配置（包括 SO_KEEPALIVE 和 Linux 特有参数）
-        #[cfg(target_os = "linux")]
+        // 启用 TCP keepalive，防止断包导致连接静默断开（读任务无 EOF 可感知）。
+        // socket2 跨平台配置（Linux/macOS/Windows）：Windows 走 SIO_KEEPALIVE_VALS /
+        // TCP_KEEP* 选项，填补此前仅 Linux 配置时其他平台空闲断链无法检测的缺口。
+        // 空闲 15 秒后开始探测，间隔 5 秒，3 次失败后断开（最多 15+3*5=30 秒）
         {
-            use std::os::unix::io::AsRawFd;
-            let fd = std_stream.as_raw_fd();
-            let enable: libc::c_int = 1;
-            let idle: libc::c_int = 15; // 空闲 15 秒后开始探测
-            let intvl: libc::c_int = 5; // 探测间隔 5 秒
-            let cnt: libc::c_int = 3; // 3 次失败后断开（最多 15+3*5=30 秒）
-            unsafe {
-                let set_keepalive = libc::setsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_KEEPALIVE,
-                    &enable as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-                if set_keepalive != 0 {
-                    eprintln!("[警告] 设置 SO_KEEPALIVE 失败，TCP keepalive 未启用");
-                }
-                let set_idle = libc::setsockopt(
-                    fd,
-                    libc::SOL_TCP,
-                    libc::TCP_KEEPIDLE,
-                    &idle as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-                if set_idle != 0 {
-                    eprintln!("[警告] 设置 TCP_KEEPIDLE 失败");
-                }
-                let set_intvl = libc::setsockopt(
-                    fd,
-                    libc::SOL_TCP,
-                    libc::TCP_KEEPINTVL,
-                    &intvl as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-                if set_intvl != 0 {
-                    eprintln!("[警告] 设置 TCP_KEEPINTVL 失败");
-                }
-                let set_cnt = libc::setsockopt(
-                    fd,
-                    libc::SOL_TCP,
-                    libc::TCP_KEEPCNT,
-                    &cnt as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                );
-                if set_cnt != 0 {
-                    eprintln!("[警告] 设置 TCP_KEEPCNT 失败");
-                }
+            let keepalive = socket2::TcpKeepalive::new()
+                .with_time(std::time::Duration::from_secs(15))
+                .with_interval(std::time::Duration::from_secs(5))
+                .with_retries(3);
+            if let Err(e) = socket2::SockRef::from(&std_stream).set_tcp_keepalive(&keepalive) {
+                eprintln!("[警告] 设置 TCP keepalive 失败: {}", e);
             }
         }
 
@@ -440,7 +418,10 @@ impl Session {
                                 Ok(0) => {
                                     // 连接关闭
                                     let _ = event_tx_read
-                                        .send(SessionEvent::StateChange(SessionState::Disconnected))
+                                        .send(SessionEvent::StateChange(
+                                            SessionState::Disconnected,
+                                            generation,
+                                        ))
                                         .await;
                                     return;
                                 }
@@ -475,7 +456,10 @@ impl Session {
                                         .send(SessionEvent::Error(format!("读取错误: {}", e)))
                                         .await;
                                     let _ = event_tx_read
-                                        .send(SessionEvent::StateChange(SessionState::Disconnected))
+                                        .send(SessionEvent::StateChange(
+                                            SessionState::Disconnected,
+                                            generation,
+                                        ))
                                         .await;
                                     return;
                                 }
@@ -587,7 +571,10 @@ impl Session {
 
         // 通知连接成功
         let _ = event_tx
-            .send(SessionEvent::StateChange(SessionState::Connected))
+            .send(SessionEvent::StateChange(
+                SessionState::Connected,
+                generation,
+            ))
             .await;
 
         Ok(event_rx)
@@ -1843,7 +1830,7 @@ mod tests {
         let mut got_connected = false;
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while let Some(event) = event_rx.recv().await {
-                if let SessionEvent::StateChange(state) = event {
+                if let SessionEvent::StateChange(state, _) = event {
                     if matches!(state, SessionState::Connected) {
                         got_connected = true;
                         return;
@@ -1942,7 +1929,7 @@ mod tests {
                             return;
                         }
                     }
-                    SessionEvent::StateChange(SessionState::Disconnected) => {
+                    SessionEvent::StateChange(SessionState::Disconnected, _) => {
                         return;
                     }
                     _ => {}
@@ -1953,6 +1940,33 @@ mod tests {
         .expect("timed out waiting for multiple lines");
 
         assert!(received_lines.len() >= 3);
+    }
+
+    #[tokio::test]
+    async fn test_connect_generation_and_old_read_task_cancelled() {
+        // 回归护栏：重连竞态——connect() 必须先取消旧读任务并递增代际号，
+        // 否则旧连接 EOF 的 Disconnected 事件会晚于新连接建立到达，
+        // 把健康的新连接误判为断线并触发重复重连
+        let port = start_echo_server().await;
+        let mut session = Session::new(SessionId(0), &make_test_config("test", port));
+
+        let mut old_event_rx = session.connect().await.unwrap();
+        assert_eq!(session.connect_generation, 1);
+
+        // 第二次 connect()（重连场景）：代际号递增，旧读任务被取消
+        let _new_event_rx = session.connect().await.unwrap();
+        assert_eq!(session.connect_generation, 2);
+
+        // 旧事件通道应随旧读/写任务退出而关闭（recv 返回 None），
+        // 期间最多残留首次连接的 Connected 事件
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while old_event_rx.recv().await.is_some() {}
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "旧事件通道未在 2 秒内关闭，旧读任务可能未被取消"
+        );
     }
 
     #[tokio::test]
@@ -1975,7 +1989,7 @@ mod tests {
         let mut got_disconnect = false;
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             while let Some(event) = event_rx.recv().await {
-                if let SessionEvent::StateChange(SessionState::Disconnected) = event {
+                if let SessionEvent::StateChange(SessionState::Disconnected, _) = event {
                     got_disconnect = true;
                     return;
                 }
