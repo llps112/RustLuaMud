@@ -55,7 +55,7 @@ impl LuaEngine {
         let gbk_line = encoding_rs::GBK.encode(&clean_line).0.into_owned();
 
         // 收集需要触发的
-        let matches: Vec<(usize, String, Vec<String>, Vec<StyleRun>)> = {
+        let matches: Vec<(usize, String, Vec<String>)> = {
             let state = self.state.borrow();
             let mut result = Vec::new();
             for (i, trigger) in state.triggers.iter().enumerate() {
@@ -94,7 +94,7 @@ impl LuaEngine {
                                             cow.into_owned()
                                         })
                                         .collect();
-                                    result.push((i, full_match, caps_list, style_runs.clone()));
+                                    result.push((i, full_match, caps_list));
                                 }
                             }
                         } else {
@@ -113,7 +113,7 @@ impl LuaEngine {
                                         cow.into_owned()
                                     })
                                     .collect();
-                                result.push((i, full_match, caps_list, style_runs.clone()));
+                                result.push((i, full_match, caps_list));
                             }
                         }
                     }
@@ -138,7 +138,7 @@ impl LuaEngine {
                                         .flatten()
                                         .map(|m| m.as_str().to_string())
                                         .collect();
-                                    result.push((i, full_match, caps_list, style_runs.clone()));
+                                    result.push((i, full_match, caps_list));
                                 }
                             }
                         } else {
@@ -150,7 +150,7 @@ impl LuaEngine {
                                     .flatten()
                                     .map(|m| m.as_str().to_string())
                                     .collect();
-                                result.push((i, full_match, caps_list, style_runs.clone()));
+                                result.push((i, full_match, caps_list));
                             }
                         }
                     }
@@ -160,8 +160,12 @@ impl LuaEngine {
         };
 
         // 构建 styles Lua 表（所有回调共享同一行数据）
-        let styles_table: mlua::Value = if style_runs.is_empty() {
-            // 没有样式信息，传 nil
+        //
+        // 仅在有触发器匹配时才构建：它只是回调的第 4 个参数，没有匹配就没人读。
+        // 无条件构建会让每一行都造出「1 个外层表 + 每样式段 1 个表（各 8 次 set）」
+        // 并立刻成为 GC 垃圾（实测 0.8~4.6µs/行，随样式段数增长）。
+        let styles_table: mlua::Value = if matches.is_empty() {
+            // 没有匹配的触发器，没人会读这个参数
             mlua::Value::Nil
         } else if let Ok(t) = self.lua.create_table() {
             for (i, sr) in style_runs.iter().enumerate() {
@@ -195,7 +199,7 @@ impl LuaEngine {
             let state = self.state.borrow();
             matches
                 .iter()
-                .any(|(idx, _, _, _)| state.triggers[*idx].omit_from_output)
+                .any(|(idx, _, _)| state.triggers[*idx].omit_from_output)
         };
 
         // OneShot trigger 匹配后自动删除（MushClient 兼容：trigger_flag.OneShot = 32768）
@@ -204,7 +208,7 @@ impl LuaEngine {
             let state = self.state.borrow();
             matches
                 .iter()
-                .filter_map(|(idx, _, _, _)| {
+                .filter_map(|(idx, _, _)| {
                     let t = &state.triggers[*idx];
                     if t.one_shot {
                         Some(t.name.clone())
@@ -216,7 +220,7 @@ impl LuaEngine {
         };
 
         // 逐个触发
-        for (idx, full_match, caps_list, _sr) in matches {
+        for (idx, full_match, caps_list) in matches {
             let (callback, send_text, trigger_name) = {
                 let state = self.state.borrow();
                 (
