@@ -1,74 +1,13 @@
-//! wait.lua 依赖 / 模块加载机制 / Lua 兼容性补丁 注册
+//! 模块加载机制 注册
 //!
-//! 对应拆分前 `api.rs` 中的「wait.lua 依赖」「模块加载机制」
-//! 「Lua 兼容性补丁」三个分节。
+//! 对应拆分前 `api.rs` 中的「模块加载机制」分节。
 
-use mlua::{Function, Result as LuaResult, Table, Value};
+use mlua::{Function, Result as LuaResult, Table};
 
-use crate::lua::helpers::{convert_pcre_to_rust_regex, fix_lua_escape_sequences, regex_escape};
+use crate::lua::helpers::{convert_pcre_to_rust_regex, fix_lua_escape_sequences};
 use crate::lua::types::{LuaEngine, ScriptEncoding};
 
 impl LuaEngine {
-    pub(super) fn register_wait_api(&mut self) -> LuaResult<()> {
-        let lua = &self.lua;
-        let globals = lua.globals();
-
-        // ============================================================
-        // wait.lua 依赖
-        // ============================================================
-
-        // bit 库
-        let bit_mod = lua.create_table()?;
-        bit_mod.set(
-            "bor",
-            lua.create_function(|_, (a, b): (i64, i64)| Ok(a | b))?,
-        )?;
-        bit_mod.set(
-            "band",
-            lua.create_function(|_, (a, b): (i64, i64)| Ok(a & b))?,
-        )?;
-        bit_mod.set(
-            "bxor",
-            lua.create_function(|_, (a, b): (i64, i64)| Ok(a ^ b))?,
-        )?;
-        bit_mod.set("bnot", lua.create_function(|_, a: i64| Ok(!a))?)?;
-        bit_mod.set(
-            "lshift",
-            lua.create_function(|_, (a, n): (i64, i64)| Ok(a << n))?,
-        )?;
-        bit_mod.set(
-            "rshift",
-            lua.create_function(|_, (a, n): (i64, i64)| Ok(a >> n))?,
-        )?;
-        globals.set("bit", bit_mod)?;
-
-        // MakeRegularExpression(pattern) — 将通配符转为正则
-        let make_re_fn = lua.create_function(move |lua, pattern: String| {
-            let re = regex_escape(&pattern).replace('*', ".*").replace('?', ".");
-            Ok(Value::String(lua.create_string(&re)?))
-        })?;
-        globals.set("MakeRegularExpression", make_re_fn)?;
-
-        // GetPluginID()
-        let get_plugin_id_fn =
-            lua.create_function(move |lua, ()| Ok(Value::String(lua.create_string("")?)))?;
-        globals.set("GetPluginID", get_plugin_id_fn)?;
-
-        // GetPluginInfo(id, code) — MushClient API 兼容
-        // 官方 code: 1=Name, 14=Date modified, 19=Version, 20=Directory
-        let get_plugin_info_fn =
-            lua.create_function(move |lua, (_id, code): (String, i64)| match code {
-                1 => Ok(Value::String(lua.create_string("RustLuaMud")?)),
-                14 => Ok(Value::String(lua.create_string("")?)),
-                19 => Ok(Value::Number(1.0)),
-                20 => Ok(Value::String(lua.create_string("")?)),
-                _ => Ok(Value::Nil),
-            })?;
-        globals.set("GetPluginInfo", get_plugin_info_fn)?;
-
-        Ok(())
-    }
-
     pub(super) fn register_module_loader_api(&mut self) -> LuaResult<()> {
         let lua = &self.lua;
         let globals = lua.globals();
@@ -316,85 +255,6 @@ impl LuaEngine {
         )?;
 
         globals.set("rex", rex_table)?;
-
-        Ok(())
-    }
-
-    pub(super) fn register_compat_api(&mut self) -> LuaResult<()> {
-        let lua = &self.lua;
-        let globals = lua.globals();
-
-        // ============================================================
-        // Lua 兼容性补丁
-        // ============================================================
-
-        // table.getn
-        {
-            let table_mod: Table = globals.get("table")?;
-            table_mod.set(
-                "getn",
-                lua.create_function(|_, t: Table| Ok(t.len().unwrap_or(0)))?,
-            )?;
-        }
-
-        // table.foreachi
-        {
-            let table_mod: Table = globals.get("table")?;
-            table_mod.set(
-                "foreachi",
-                lua.create_function(|_, (t, f): (Table, Function)| {
-                    let len = t.len().unwrap_or(0);
-                    for i in 1..=len {
-                        let val: Value = t.get(i).unwrap_or(Value::Nil);
-                        match f.call::<()>((i, val)) {
-                            Ok(_) => {}
-                            Err(e) => {
-                                return Err(e);
-                            }
-                        }
-                    }
-                    Ok(())
-                })?,
-            )?;
-        }
-
-        // table.foreach
-        {
-            let table_mod: Table = globals.get("table")?;
-            table_mod.set(
-                "foreach",
-                lua.create_function(|_, (t, f): (Table, Function)| {
-                    for pair in t.pairs::<Value, Value>() {
-                        let (k, v) = pair?;
-                        match f.call::<()>((k, v)) {
-                            Ok(_) => {}
-                            Err(e) => {
-                                return Err(e);
-                            }
-                        }
-                    }
-                    Ok(())
-                })?,
-            )?;
-        }
-
-        // math.mod
-        {
-            let math_mod: Table = globals.get("math")?;
-            math_mod.set(
-                "mod",
-                lua.create_function(|_, (a, b): (f64, f64)| Ok(a % b))?,
-            )?;
-        }
-
-        // math.pow
-        {
-            let math_mod: Table = globals.get("math")?;
-            math_mod.set(
-                "pow",
-                lua.create_function(|_, (a, b): (f64, f64)| Ok(a.powf(b)))?,
-            )?;
-        }
 
         Ok(())
     }

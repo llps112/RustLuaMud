@@ -9,21 +9,27 @@
 //! - `output`：输出、ANSI 样式、日志
 //! - `variables`：JSON 序列化桥接、配置、连接状态、变量、数据库
 //! - `trigger_api`：触发器
+//! - `trigger_impl`：触发器注册的通用实现（由 `trigger_api` 调用）
 //! - `alias_api`：别名
 //! - `timer_api`：定时器
-//! - `module_loader`：wait.lua 依赖、模块加载机制、Lua 兼容性补丁
+//! - `wait_api`：wait.lua 依赖
+//! - `module_loader`：模块加载机制
+//! - `compat`：Lua 兼容性补丁
 //! - `constants`：常量表
 //! - `legacy`：原始 API（保留兼容）
 
 mod alias_api;
 mod commands;
+mod compat;
 mod constants;
 mod legacy;
 mod module_loader;
 mod output;
 mod timer_api;
 mod trigger_api;
+mod trigger_impl;
 mod variables;
+mod wait_api;
 
 use mlua::Result as LuaResult;
 
