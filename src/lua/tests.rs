@@ -56,6 +56,26 @@ fn test_watchdog_nested_execution_restores_outer_mark() {
 }
 
 #[test]
+fn test_format_watchdog_timeout_msg_carries_callback_and_elapsed() {
+    // 回归护栏：超时诊断消息必须带上「执行入口名」——执行线程的栈不可采样
+    // （std::backtrace 只能捕获调用线程自身，原先采集到的是 watchdog 线程
+    // 睡在轮询循环里的栈，对定位死循环零价值），入口名是唯一可靠线索；
+    // 同时输出实际耗时，便于区分「刚过阈值」与「严重卡死」。
+    let msg = LuaEngine::format_watchdog_timeout_msg("my_timer", 30, 31);
+    assert!(msg.contains("my_timer"), "应包含执行入口名: {}", msg);
+    assert!(msg.contains("30s"), "应包含配置的超时阈值: {}", msg);
+    assert!(msg.contains("31s"), "应包含实际耗时: {}", msg);
+
+    // 入口名未知时（如脚本加载期卡死，无 timer 名）也应正常输出，不得 panic
+    let unknown = LuaEngine::format_watchdog_timeout_msg("<unknown>", 60, 60);
+    assert!(
+        unknown.contains("<unknown>"),
+        "应能输出未知入口名: {}",
+        unknown
+    );
+}
+
+#[test]
 fn test_i64_to_lua_integer_zero() {
     assert_eq!(i64_to_lua_integer(0), 0);
 }

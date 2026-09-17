@@ -208,6 +208,21 @@ impl LuaEngine {
         }
     }
 
+    /// 构造看门狗超时诊断消息。
+    ///
+    /// 单独抽出以便单元测试：消息里的「执行入口名」是定位死循环脚本的唯一可靠
+    /// 线索（执行线程的栈不可采样，原因见 spawn_watchdog 内注释）。
+    pub(super) fn format_watchdog_timeout_msg(
+        callback: &str,
+        timeout_secs: u64,
+        elapsed_secs: u64,
+    ) -> String {
+        format!(
+            "Lua execution watchdog timeout - callback '{}' exceeded {}s (elapsed {}s), forcing abort",
+            callback, timeout_secs, elapsed_secs
+        )
+    }
+
     /// 启动看门狗线程，监控 Lua exec() 执行是否超时
     fn spawn_watchdog(
         exec_start: Arc<AtomicU64>,
@@ -249,13 +264,15 @@ impl LuaEngine {
                         .clone()
                         .unwrap_or_else(|| "<unknown>".to_string());
 
-                    let panic_msg = format!(
-                        "Lua execution watchdog timeout - callback '{}' exceeded {}s, forcing abort",
-                        timer, timeout_secs
-                    );
+                    let panic_msg =
+                        Self::format_watchdog_timeout_msg(&timer, timeout_secs, elapsed_secs);
                     eprintln!("{}", panic_msg);
 
-                    // 尝试通过全局 PANIC_CONTEXT 写入日志
+                    // 尝试通过全局 PANIC_CONTEXT 写入日志。
+                    // 此处不采集 backtrace：std::backtrace 只能捕获「调用线程自身」的栈，
+                    // 而本线程是 watchdog（此刻正睡在轮询循环里），与卡住的 Lua 执行
+                    // 线程无关，写进日志只会误导排障。std 无法采样其他线程的栈
+                    // （需信号 + libunwind 一类方案），故如实标注该限制。
                     if let Some(ctx) = crate::log::panic_hook::get_context() {
                         let session = ctx
                             .session_name
@@ -267,12 +284,21 @@ impl LuaEngine {
                         } else {
                             &session
                         };
-                        let backtrace = std::backtrace::Backtrace::capture();
-                        ctx.logger
-                            .log_panic(session, &panic_msg, &format!("{}", backtrace));
+                        ctx.logger.log_panic(
+                            session,
+                            &panic_msg,
+                            "（执行线程栈不可采样：std::backtrace 仅能捕获调用线程自身，此处为 watchdog 线程）",
+                        );
                     }
 
-                    // 强制终止进程（确保日志刷新）
+                    // 强制终止进程。必须用 abort 而非 exit：
+                    // - Lua 卡死时很可能正持有 stdout 锁（卡在 print/Note 中途），
+                    //   exit 的 stdio flush 会阻塞于该锁，导致进程永不退出，摧毁
+                    //   看门狗「保证终止」的核心职责；abort 立即发 SIGABRT，不做
+                    //   清理、不碰锁，是确定性终止。
+                    // - 日志落盘不依赖 abort：log_panic 用局部 file 句柄写入，
+                    //   函数返回即 close/flush。
+                    // - systemd 亦可通过 signal=6 (ABRT) 识别并自动拉起。
                     std::process::abort();
                 }
             })
