@@ -602,14 +602,15 @@ scripts/build.sh --arch i686
 
 ## 故障排查
 
-如需调试信息，启动前设置环境变量：
+崩溃堆栈**默认开启**：程序启动时若检测到 `RUST_BACKTRACE` 未设置，会自动补默认值 `1`（无人值守场景下崩溃时人不在现场，默认带栈才能排障）。panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀）。
+
+如需覆盖该默认（程序仅在变量未设置时补默认，显式设置一律尊重）：
 
 ```bash
-export RUST_BACKTRACE=1
+export RUST_BACKTRACE=0      # 关闭堆栈输出（减小日志体积）
+export RUST_BACKTRACE=full   # 输出完整堆栈（含标准库帧）
 ./RustLuaMud
 ```
-
-panic 时会自动打印堆栈并写入对应连接日志文件（`[PNC]` 前缀）。
 
 ### Windows 启动弹窗「由于找不到 VCRUNTIME140.dll，无法继续执行代码」
 

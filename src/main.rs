@@ -1,11 +1,25 @@
+use std::ffi::OsStr;
+
 use rust_lua_mud::app::App;
 use rust_lua_mud::config::AppConfig;
 #[cfg(unix)]
 use rust_lua_mud::daemon;
 
+/// 计算 RUST_BACKTRACE 的默认值：仅当用户未设置时返回 `Some("1")`。
+///
+/// `panic_hook` 依赖 `Backtrace::capture()` 记录崩溃栈，而该 API 在环境变量
+/// 未设置时只返回占位文本。7×24 无人值守场景下崩溃时人不在现场，默认带栈
+/// 是排障所必需的；但控制权应归用户——显式设置 `0`（关闭）或 `full`
+/// （完整栈）时本函数返回 None，不做任何干预。
+fn default_rust_backtrace(current: Option<&OsStr>) -> Option<&'static str> {
+    current.is_none().then_some("1")
+}
+
 fn main() {
-    // TODO(v1.0): 正式发布前必须移除此行，把 RUST_BACKTRACE 控制权交给用户
-    std::env::set_var("RUST_BACKTRACE", "1");
+    // 用户未设置 RUST_BACKTRACE 时补默认值（用户显式设置则完全尊重）
+    if let Some(v) = default_rust_backtrace(std::env::var_os("RUST_BACKTRACE").as_deref()) {
+        std::env::set_var("RUST_BACKTRACE", v);
+    }
 
     // 解析命令行参数
     let args: Vec<String> = std::env::args().collect();
@@ -116,5 +130,21 @@ fn main() {
     #[cfg(unix)]
     if daemon_mode {
         let _ = std::fs::remove_file(&pid_path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_rust_backtrace_respects_user_setting() {
+        // 纯函数测试，不读写真实环境变量，故无并发/顺序依赖。
+        // 用户已设置时不干预——显式关闭（"0"）与完整栈（"full"）都必须尊重
+        assert_eq!(default_rust_backtrace(Some(OsStr::new("0"))), None);
+        assert_eq!(default_rust_backtrace(Some(OsStr::new("full"))), None);
+        assert_eq!(default_rust_backtrace(Some(OsStr::new("1"))), None);
+        // 未设置时补默认 "1"：无人值守场景崩溃时日志需带栈可查
+        assert_eq!(default_rust_backtrace(None), Some("1"));
     }
 }
