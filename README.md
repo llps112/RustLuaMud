@@ -12,6 +12,7 @@
 - 多行触发器、颜色样式回调（`GetStyle`）、模拟输出（`Simulate`）
 - 触发器正则基于 Rust `regex` 引擎（PCRE 语法子集：自动转换 `\Z`/`\z`，不支持反向引用与前后查找，不兼容的模式在注册时即时报错）
 - 参考 `help/api/` 目录查阅完整 API 文档
+- 接口稳定性承诺（哪些冻结、哪些可变、如何弃用）见 [COMPATIBILITY.md](COMPATIBILITY.md)
 
 **脚本引擎**
 - LuaJIT 引擎，协程支持（`wait.make` / `wait.time`）
