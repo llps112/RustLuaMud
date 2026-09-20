@@ -91,11 +91,7 @@ impl App {
     pub fn new(config: AppConfig) -> io::Result<Self> {
         let mut manager = ConnectionManager::new();
 
-        let logger = Logger::new(
-            &config.general.log_dir,
-            config.general.log_rotation_size_mb,
-            config.general.log_rotation_count,
-        );
+        let logger = Logger::new(&config.general.log_dir, config.general.log_rotation_count);
 
         // 加载配置文件中的连接，并设置各角色的日志保留数量
         for conn_config in &config.connections {

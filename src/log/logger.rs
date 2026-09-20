@@ -42,8 +42,6 @@ impl LogCategory {
 /// 日志记录器，按小时分割，最多保留 max_files 个历史文件。
 pub struct Logger {
     log_dir: PathBuf,
-    #[allow(dead_code)]
-    max_size_mb: u64,
     max_files: usize,
     /// 按 session 覆盖的保留数量（session_name -> count）
     per_session_max_files: Mutex<HashMap<String, usize>>,
@@ -56,13 +54,12 @@ pub struct Logger {
 }
 
 impl Logger {
-    pub fn new(log_dir: &str, max_size_mb: u64, max_files: usize) -> Self {
+    pub fn new(log_dir: &str, max_files: usize) -> Self {
         let log_dir = PathBuf::from(log_dir);
         // 确保日志目录存在
         let _ = fs::create_dir_all(&log_dir);
         Self {
             log_dir,
-            max_size_mb,
             max_files,
             per_session_max_files: Mutex::new(HashMap::new()),
             last_cleanup_suffix: Mutex::new(HashMap::new()),
@@ -95,13 +92,24 @@ impl Logger {
 
     /// 判断文件名是否为该 session 的日志文件
     ///
-    /// 命名固定为 `<session>_<YYMMDD_HH>.log`，前缀必须紧跟 `_`，避免
-    /// `sess` 误配到 `sess10_...`。
+    /// 命名固定为 `<session>_<YYMMDD_HH>.log`，前缀必须紧跟 `_`，且 `_` 之后、
+    /// `.log` 之前必须严格是时间戳段（6 位数字 + `_` + 2 位数字）。仅校验「前缀 +
+    /// `_` + 后缀」会让 `mud` 误配到 `mud_alt_260918_10.log`（另一会话 `mud_alt`
+    /// 的日志），进而在清理时把它当自己的旧文件删掉，故这里对时间戳段做精确校验。
     fn is_session_log(file_name: &str, session_name: &str) -> bool {
-        file_name
+        let Some(rest) = file_name
             .strip_prefix(session_name)
-            .and_then(|rest| rest.strip_prefix('_'))
-            .is_some_and(|rest| rest.ends_with(".log"))
+            .and_then(|r| r.strip_prefix('_'))
+            .and_then(|r| r.strip_suffix(".log"))
+        else {
+            return false;
+        };
+        // rest 必须是 `YYMMDD_HH`：恰好 9 字节，第 7 字节为 `_`，其余为 ASCII 数字
+        let bytes = rest.as_bytes();
+        bytes.len() == 9
+            && bytes[..6].iter().all(u8::is_ascii_digit)
+            && bytes[6] == b'_'
+            && bytes[7..].iter().all(u8::is_ascii_digit)
     }
 
     /// 清理同 session 的旧日志文件，只保留最新的 max_files 个
@@ -249,14 +257,14 @@ mod tests {
     fn test_logger_creates_directory() {
         let dir = TempDir::new().unwrap();
         let log_subdir = dir.path().join("test_logs");
-        let _logger = Logger::new(log_subdir.to_str().unwrap(), 10, 5);
+        let _logger = Logger::new(log_subdir.to_str().unwrap(), 5);
         assert!(log_subdir.exists());
     }
 
     #[test]
     fn test_logger_writes_line() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
         logger.log("session1", "hello world");
 
         let log_file = dir.path().join(format!("session1_{}.log", ts()));
@@ -269,7 +277,7 @@ mod tests {
     #[test]
     fn test_logger_appends() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
         logger.log("sess", "line1");
         logger.log("sess", "line2");
 
@@ -282,7 +290,7 @@ mod tests {
     #[test]
     fn test_logger_trims_trailing_whitespace() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
         logger.log("sess", "hello   ");
 
         let log_file = dir.path().join(format!("sess_{}.log", ts()));
@@ -295,7 +303,7 @@ mod tests {
     #[test]
     fn test_logger_timestamp_format() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
         logger.log("sess", "test");
 
         let log_file = dir.path().join(format!("sess_{}.log", ts()));
@@ -308,7 +316,7 @@ mod tests {
     #[test]
     fn test_logger_different_sessions() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
         logger.log("session_a", "msg_a");
         logger.log("session_b", "msg_b");
 
@@ -324,7 +332,7 @@ mod tests {
     #[test]
     fn test_logger_empty_message() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
         logger.log("session", "");
         let file = dir.path().join(format!("session_{}.log", ts()));
         assert!(file.exists());
@@ -333,7 +341,7 @@ mod tests {
     #[test]
     fn test_logger_unicode_message() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
         logger.log("session", "你好世界 🌍");
         let file = dir.path().join(format!("session_{}.log", ts()));
         let content = fs::read_to_string(&file).unwrap();
@@ -343,7 +351,7 @@ mod tests {
     #[test]
     fn test_logger_long_session_name() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
         let long_name = "a".repeat(200);
         logger.log(&long_name, "msg");
         let file = dir
@@ -356,7 +364,7 @@ mod tests {
     fn test_logger_cleanup_old_files() {
         let dir = TempDir::new().unwrap();
         // max_files = 3，保留最近 3 个
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 3);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 3);
 
         // 创建 5 个旧文件模拟不同时间（过去日期 + 不同小时，确保按文件名排序正确）
         let names = [
@@ -391,7 +399,7 @@ mod tests {
     #[test]
     fn test_logger_cleanup_different_sessions_isolated() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 1);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 1);
 
         // session_a 有 3 个旧文件（不同时间）
         let a_names = [
@@ -433,7 +441,7 @@ mod tests {
     #[test]
     fn test_logger_cleanup_when_zero_files() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
         // 首次写入，没有旧文件，不应报错
         logger.log("sess", "first line");
         let log_file = dir.path().join(format!("sess_{}.log", ts()));
@@ -443,7 +451,7 @@ mod tests {
     #[test]
     fn test_log_disconnect_writes_dcn_tag() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
         logger.log_disconnect("mud", "heartbeat_timeout", 60);
 
         let log_file = dir.path().join(format!("mud_{}.log", ts()));
@@ -456,7 +464,7 @@ mod tests {
     #[test]
     fn test_log_reconnect_writes_rcn_tag() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
         logger.log_reconnect("mud", 120);
 
         let log_file = dir.path().join(format!("mud_{}.log", ts()));
@@ -477,12 +485,18 @@ mod tests {
         // 非 .log 后缀不算
         assert!(!Logger::is_session_log("mud_250626_14.log.txt", "mud"));
         assert!(!Logger::is_session_log("mud_", "mud"));
+        // 会话名本身含分隔符（另一会话 `mud_alt`）不得被 `mud` 误配
+        assert!(!Logger::is_session_log("mud_alt_250626_14.log", "mud"));
+        // 时间戳段格式非法（非 6 位数字 + '_' + 2 位数字）不得匹配
+        assert!(!Logger::is_session_log("mud_x250626_14.log", "mud"));
+        assert!(!Logger::is_session_log("mud_250626_1.log", "mud"));
+        assert!(!Logger::is_session_log("mud_25062614.log", "mud"));
     }
 
     #[test]
     fn test_cleanup_runs_once_per_hour_not_per_line() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 1);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 1);
 
         // 首条日志建立该 session 的清理记录
         logger.log("sess", "first");
@@ -495,7 +509,7 @@ mod tests {
         assert!(stale.exists(), "同一小时内的写入不应重复触发目录扫描与清理");
 
         // 新实例（等价于进程重启后的首次写入）应执行一次清理
-        let fresh = Logger::new(dir.path().to_str().unwrap(), 10, 1);
+        let fresh = Logger::new(dir.path().to_str().unwrap(), 1);
         fresh.log("sess", "third");
         assert!(!stale.exists(), "新实例的首条日志应触发一次清理");
     }
@@ -503,7 +517,7 @@ mod tests {
     #[test]
     fn test_cleanup_scope_limited_to_exact_session_prefix() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 1);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 1);
 
         let other_session = dir.path().join("sess10_250101_00.log");
         let not_log = dir.path().join("sess_250101_00.txt");
@@ -514,5 +528,23 @@ mod tests {
 
         assert!(other_session.exists(), "`sess` 不应波及 `sess10_...`");
         assert!(not_log.exists(), "非 .log 文件不应被清理");
+    }
+
+    #[test]
+    fn test_cleanup_does_not_touch_prefixed_session() {
+        // 回归护栏：会话 `mud_alt` 的名字以 `mud_` 开头，`mud` 的清理不得误删其日志
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 1);
+
+        let other_session = dir.path().join("mud_alt_250101_00.log");
+        fs::write(&other_session, "dummy").unwrap();
+
+        // 写 `mud` 触发其清理（max_files=1）
+        logger.log("mud", "line");
+
+        assert!(
+            other_session.exists(),
+            "`mud` 的清理不应波及前缀型会话 `mud_alt` 的日志"
+        );
     }
 }

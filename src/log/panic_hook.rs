@@ -16,9 +16,9 @@ pub fn get_context() -> Option<&'static PanicContext> {
 }
 
 /// 初始化全局 panic 上下文（在 main 开头调用一次）
-pub fn init_panic_hook(log_dir: &str, max_size_mb: u64, max_files: usize) {
+pub fn init_panic_hook(log_dir: &str, max_files: usize) {
     let ctx = PanicContext {
-        logger: Logger::new(log_dir, max_size_mb, max_files),
+        logger: Logger::new(log_dir, max_files),
         session_name: Mutex::new(String::new()),
     };
     let _ = PANIC_CONTEXT.set(ctx);
@@ -89,7 +89,7 @@ mod tests {
     /// OnceLock 只能设置一次，所以使用 OnceLock 内的共享 Logger
     fn ensure_context_initialized() -> &'static PanicContext {
         PANIC_CONTEXT.get_or_init(|| PanicContext {
-            logger: Logger::new(panic_test_log_dir(), 10, 5),
+            logger: Logger::new(panic_test_log_dir(), 5),
             session_name: Mutex::new(String::new()),
         })
     }
@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn test_log_panic_writes_panic_msg_and_backtrace() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
 
         let panic_msg = "test panic message";
         let backtrace = "frame 0\nframe 1\nframe 2";
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn test_log_panic_empty_backtrace() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
 
         logger.log_panic("empty_bt_session", "panic with no bt", "");
 
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn test_log_panic_multiline_backtrace() {
         let dir = TempDir::new().unwrap();
-        let logger = Logger::new(dir.path().to_str().unwrap(), 10, 5);
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
 
         let backtrace = "  0: fn_a\n  1: fn_b\n  2: fn_c\n  3: main";
         logger.log_panic("multi_bt_session", "multi-line bt test", backtrace);
@@ -190,7 +190,7 @@ mod tests {
         // init_panic_hook 应该能安全调用
         // 使用与 test_panic_hook_writes_log_on_panic 相同的路径
         // 避免 OnceLock 被不同路径的 logger 锁定后，后续测试无法使用正确路径
-        init_panic_hook(panic_test_log_dir(), 10, 5);
+        init_panic_hook(panic_test_log_dir(), 5);
 
         // 恢复原来的 panic hook，避免影响其他测试
         std::panic::set_hook(old_hook);
@@ -214,7 +214,7 @@ mod tests {
         let old_hook = std::panic::take_hook();
 
         // 设置自定义 panic hook：标记被调用 + 委托给 init_panic_hook 的逻辑
-        init_panic_hook(panic_test_log_dir(), 10, 5);
+        init_panic_hook(panic_test_log_dir(), 5);
         let composed_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             hook_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);

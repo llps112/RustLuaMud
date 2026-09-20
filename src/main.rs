@@ -104,7 +104,6 @@ fn main() {
     // 初始化 panic hook，将 panic 信息和 backtrace 写入日志文件
     rust_lua_mud::log::panic_hook::init_panic_hook(
         &config.general.log_dir,
-        config.general.log_rotation_size_mb,
         config.general.log_rotation_count,
     );
 

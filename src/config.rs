@@ -12,8 +12,6 @@ pub struct GeneralConfig {
     pub log_dir: String,
     #[serde(default = "default_profile_dir")]
     pub profile_dir: String,
-    #[serde(default = "default_log_rotation_size_mb")]
-    pub log_rotation_size_mb: u64,
     #[serde(default = "default_log_rotation_count")]
     pub log_rotation_count: usize,
 }
@@ -27,9 +25,6 @@ fn default_log_dir() -> String {
 fn default_profile_dir() -> String {
     "profiles".to_string()
 }
-fn default_log_rotation_size_mb() -> u64 {
-    10
-}
 fn default_log_rotation_count() -> usize {
     24
 }
@@ -41,7 +36,6 @@ impl Default for GeneralConfig {
             scroll_buffer: default_scroll_buffer(),
             log_dir: default_log_dir(),
             profile_dir: default_profile_dir(),
-            log_rotation_size_mb: default_log_rotation_size_mb(),
             log_rotation_count: default_log_rotation_count(),
         }
     }
@@ -773,7 +767,6 @@ mod tests {
         assert_eq!(config.scroll_buffer, 5000);
         assert_eq!(config.log_dir, "logs");
         assert_eq!(config.profile_dir, "profiles");
-        assert_eq!(config.log_rotation_size_mb, 10);
         assert_eq!(config.log_rotation_count, 24);
     }
 

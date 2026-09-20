@@ -650,6 +650,11 @@ UCRT（`api-ms-win-crt-*`，Windows 10 起随系统提供），产物也不链 C
 
 ## 版本历史
 
+### v1.0.4 (2026-09-20)
+- 修复日志跨会话误删：`is_session_log` 由「前缀 + `_` + `.log` 后缀」升级为对时间戳段严格校验（6 位数字 + `_` + 2 位数字），杜绝会话名互为前缀时（如 `mud` 误删 `mud_alt_*.log`）的清理越界；新增端到端回归测试
+- 补齐看门狗覆盖：`OnPrompt`（`notify_prompt`）与面板点击回调（`handle_panel_click`）此前裸调 `func.call()` 未纳入超时保护，现按触发器同款「catch_unwind 在外、exec_with_watchdog 在内」包裹，消除 7×24 挂机下脚本死循环冻死客户端的盲区
+- 移除按大小轮转死代码：`Logger` 的 `max_size_mb` 字段与 `GeneralConfig.log_rotation_size_mb` 配置从未参与实际轮转（仅按小时切片 + 数量保留），删除字段/参数/调用点并修正 AGENTS.md 的过度承诺；存量 profile 中该 key 因 serde 忽略未知字段仍向后兼容
+
 ### v1.0.3 (2026-09-20)
 - 新增 OnPrompt「输出落定信号」Phase 1（引擎侧）：连接空闲超过 `prompt_idle_ms`（默认 0 = 禁用，存量配置零影响）时回调全局 `OnPrompt("idle")`，为脚本从「定时盲等」转向「等信号再发下一条命令」提供落定信号；idle 判据抽为 `Session::prompt_should_fire` 纯函数并补单测
 - 回调派发对齐 `OnConnect`/`OnDisconnect` 范式：`notify_prompt` 用 mlua 直接取全局函数传参调用（消除字符串拼接 eval 的注入面），并在派发后排空命令/原始包/日志（避免回调内 `Send` 的命令残留触发 `fire_due_timers` 断言或静默死锁）；闩复位收敛到 `StateChange(Connected)` 唯一漏斗

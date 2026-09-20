@@ -180,9 +180,13 @@ impl LuaEngine {
         };
         let arg = source.to_string();
         let lua_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            if let Err(e) = func.call::<()>(arg) {
-                self.log_error(&format!("OnPrompt() 执行失败: {}", e));
-            }
+            // 看门狗布防：OnPrompt 每个 idle 周期都会触发，脚本侧死循环时中止进程，
+            // 与触发器/别名/定时器链路一致（catch_unwind 在外、exec_with_watchdog 在内）
+            self.exec_with_watchdog("OnPrompt", || {
+                if let Err(e) = func.call::<()>(arg) {
+                    self.log_error(&format!("OnPrompt() 执行失败: {}", e));
+                }
+            });
         }));
         if lua_result.is_err() {
             self.log_error("OnPrompt() 执行中发生 panic，已捕获以防止崩溃");
@@ -292,12 +296,16 @@ impl LuaEngine {
         };
         match callback_opt {
             Some(func) => {
-                if let Err(e) = func.call::<()>((panel_name, action)) {
-                    self.log_error(&format!(
-                        "[Lua] 面板 '{}' 点击回调中发生错误: {}",
-                        panel_name, e
-                    ));
-                }
+                // 看门狗布防：面板回调若进入死循环同样会冻死客户端，纳入统一超时保护
+                let wd_name = format!("panel:{}", panel_name);
+                self.exec_with_watchdog(&wd_name, || {
+                    if let Err(e) = func.call::<()>((panel_name, action)) {
+                        self.log_error(&format!(
+                            "[Lua] 面板 '{}' 点击回调中发生错误: {}",
+                            panel_name, e
+                        ));
+                    }
+                });
             }
             None => {
                 // 未注册回调时记录调试信息，便于排查（不再静默失败）
