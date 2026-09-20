@@ -622,6 +622,45 @@ impl App {
             }
         }
 
+        // OnPrompt idle-settled 检测：连接态下静默超过阈值且本轮未触发过，则回调一次。
+        // 寄生在已有 last_recv_time + 每会话 tick 上，不新增跨重连状态（闩在收到新
+        // Data / 迁入 Connected 时复位）。阈值 0 = 禁用，存量配置零影响。
+        // 关键：OnPrompt 的典型用途是唤醒协程后立即 Send 下一条命令，故必须与
+        // OnConnect/OnDisconnect 一样在回调后排空命令/原始包/日志——否则命令残留到
+        // 下一 tick 触发 fire_due_timers 的 debug_assert（dev panic），release 下若本
+        // 会话再无到期 timer / 服务器静默，则该命令永不发出，脚本与服务器互等死锁。
+        let prompt_fired = {
+            match self.manager.get_mut_by_id(session_id) {
+                // 仅在确有引擎接收时才消耗闩并派发；无引擎（未配脚本/初始化失败）则
+                // 落入 `_ => false`，不置位，留待下一 tick 重试，避免信号「被消耗却无人接收」
+                Some(session)
+                    if session.prompt_should_fire(std::time::Instant::now())
+                        && session.lua_engine.is_some() =>
+                {
+                    session.prompt_settled = true;
+                    if let Some(ref mut engine) = session.lua_engine {
+                        engine.notify_prompt("idle");
+                    }
+                    true
+                }
+                _ => false,
+            }
+        };
+        if prompt_fired {
+            let commands = self
+                .manager
+                .get_by_id(session_id)
+                .and_then(|s| s.lua_engine.as_ref())
+                .map(|engine| engine.drain_commands())
+                .unwrap_or_default();
+            if !commands.is_empty() {
+                self.send_lua_commands(session_id, commands)?;
+            }
+            self.send_lua_raw(session_id)?;
+            self.drain_lua_logs(session_id)?;
+            any_fired = true;
+        }
+
         // 仅在定时器真正触发时才刷新状态栏（避免每 50ms 写终端，破坏鼠标选中）
         if any_fired && session_id == self.manager.foreground_id {
             self.update_status_bar()?;

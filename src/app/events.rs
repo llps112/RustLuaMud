@@ -202,6 +202,8 @@ impl App {
                 if let Some(session) = self.manager.get_mut_by_id(id) {
                     session.last_recv_time = std::time::Instant::now();
                     session.heartbeat_sent = None;
+                    // 又收到数据 = 服务器又忙起来，复位 OnPrompt 闩，重新等待下一次落定
+                    session.prompt_settled = false;
                 }
                 let is_realtime = self
                     .manager
@@ -364,6 +366,13 @@ impl App {
                     return Ok(());
                 }
                 session.state = state.clone();
+                // 迁入连接态是唯一的汇聚漏斗：复位 OnPrompt 闩并刷新静默基准，
+                // 确保新连接（首连 / 手动 /open 复用 / 自动重连）都从零静默期重新判定，
+                // 不会因旧 prompt_settled=true 或停滞的 last_recv_time 在登录握手未完时抢先派发
+                if state == SessionState::Connected {
+                    session.prompt_settled = false;
+                    session.last_recv_time = std::time::Instant::now();
+                }
                 // 同步 Lua 引擎的连接状态（同步到对应 session，不限于前台）
                 if let Some(ref mut engine) = session.lua_engine {
                     if state == SessionState::Connected {

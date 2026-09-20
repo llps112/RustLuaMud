@@ -407,5 +407,66 @@ end -- make
 
 
 
+-- ----------------------------------------------------------
+-- wait.prompt_resume: called by the OnPrompt callback to resume a prompt-waiter.
+-- FIFO: wake the earliest still-waiting coroutine registered by wait.prompt
+-- (pairs() iteration order is unspecified, so an explicit registration queue
+-- is used to guarantee ordering and prevent later waiters starving earlier ones).
+-- Safe no-op when nobody is waiting (OnPrompt fires during handshake / no override).
+-- ----------------------------------------------------------
+local prompt_queue = {}  -- 模块级 FIFO：注册顺序即唤醒顺序
+
+function wait.prompt_resume (source)
+  -- 从队首取第一个仍在等待的协程；已被 timeout 移除的条目（thread 为 nil）直接丢弃
+  while #prompt_queue > 0 do
+    local id = table.remove (prompt_queue, 1)
+    local thread = threads [id]
+    if thread then
+      threads [id] = nil
+      pcall (DeleteTimer, id)  -- cancel the pending timeout fallback, if any
+      local ok, err = coroutine.resume (thread, true, source)
+      if not ok then
+        ColourNote ("deeppink", "black", "Error raised in prompt function (in wait module)")
+        local _, trace = pcall(error, "", 3)
+        ColourNote ("darkorange", "black", string.format("%s\n%s", tostring(err), tostring(trace):gsub("%s+$", "")))
+        error (err)
+      end
+      return
+    end
+  end
+end
+
+-- ----------------------------------------------------------
+-- wait.prompt: suspend until the server's output for this round has settled
+-- (client fires the global OnPrompt). Replaces blind wait.time() with a
+-- deterministic "ready for next command" signal.
+--   timeout_sec (optional): resume anyway after this long -> returns false.
+-- Returns: true, source  when settled;  false  on timeout.
+-- Requires the game script to wire:  OnPrompt = function(s) wait.prompt_resume(s) end
+-- and the client to emit OnPrompt (see prompt_idle_ms config / OnPrompt design doc).
+-- ----------------------------------------------------------
+function wait.prompt (timeout_sec)
+  local id = "wait_prompt_" .. GetUniqueNumber ()
+  threads [id] = assert (coroutine.running (), "Must be in coroutine")
+  prompt_queue [#prompt_queue + 1] = id  -- 入 FIFO 队尾，注册顺序即唤醒顺序
+
+  if timeout_sec and timeout_sec > 0 then
+    local hours, minutes, seconds = convert_seconds (timeout_sec)
+    -- if the timer fires first it resumes this thread with no value -> timeout
+    check (AddTimer (id, hours, minutes, seconds, "",
+                    bit.bor (timer_flag.Enabled,
+                             timer_flag.OneShot,
+                             timer_flag.Temporary,
+                             timer_flag.ActiveWhenClosed,
+                             timer_flag.Replace),
+                     "wait.timer_resume"))
+  end
+
+  -- resumed with (true, source) by OnPrompt, or (nil) by the timeout timer
+  local settled, source = coroutine.yield ()
+  if settled then return true, source else return false end
+end
+
+
 return wait
 

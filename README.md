@@ -650,6 +650,11 @@ UCRT（`api-ms-win-crt-*`，Windows 10 起随系统提供），产物也不链 C
 
 ## 版本历史
 
+### v1.0.3 (2026-09-20)
+- 新增 OnPrompt「输出落定信号」Phase 1（引擎侧）：连接空闲超过 `prompt_idle_ms`（默认 0 = 禁用，存量配置零影响）时回调全局 `OnPrompt("idle")`，为脚本从「定时盲等」转向「等信号再发下一条命令」提供落定信号；idle 判据抽为 `Session::prompt_should_fire` 纯函数并补单测
+- 回调派发对齐 `OnConnect`/`OnDisconnect` 范式：`notify_prompt` 用 mlua 直接取全局函数传参调用（消除字符串拼接 eval 的注入面），并在派发后排空命令/原始包/日志（避免回调内 `Send` 的命令残留触发 `fire_due_timers` 断言或静默死锁）；闩复位收敛到 `StateChange(Connected)` 唯一漏斗
+- 脚本层新增 `wait.prompt()` / `wait.prompt_resume()` 协程原语（FIFO 唤醒，公共库 `wait.lua`）；OnPrompt 默认注册为空函数，脚本未覆盖时安全 no-op
+
 ### v1.0.2 (2026-09-17)
 - 内部重构（均无行为变更）：`src/lua/api.rs` 按 API 族拆分为 `src/lua/api/` 下 12 个子模块；`ConnectionConfig` 的默认值收敛为单一来源（serde 默认函数与 `impl Default` 共用同一批 `default_*()`），并新增对照测试钉住两侧不单侧分叉
 - `/connect` 的动态建连配置由内联字面量抽为 `dynamic_connect_config`，默认值语义由单测锁定

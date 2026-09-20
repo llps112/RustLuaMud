@@ -202,6 +202,11 @@ impl LuaEngine {
         let on_disconnect_fn = lua.create_function(move |_, _reason: String| Ok(()))?;
         globals.set("OnDisconnect", on_disconnect_fn)?;
 
+        // OnPrompt(source) — 输出落定回调，默认空函数，Lua 脚本可覆盖。
+        // source: "idle" | "goahead"，语义：服务器本轮输出已落定、可安全发下一条命令
+        let on_prompt_fn = lua.create_function(move |_, _source: String| Ok(()))?;
+        globals.set("OnPrompt", on_prompt_fn)?;
+
         // SetOption(name, value)
         let set_option_fn = lua.create_function(move |lua, (name, value): (String, Value)| {
             let options: Table = lua.globals().get("_mud_options")?;

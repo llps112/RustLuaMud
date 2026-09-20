@@ -133,6 +133,10 @@ pub struct Session {
     pub heartbeat_timeout_secs: u64,
     /// 最后收到服务器数据的时间
     pub last_recv_time: std::time::Instant,
+    /// OnPrompt 空闲落定阈值（毫秒），0 = 禁用（直接取自 config.prompt_idle_ms）
+    pub prompt_idle_ms: u64,
+    /// 本次静默期是否已触发过 OnPrompt，防同一轮重复回调；收到新 Data 即复位
+    pub prompt_settled: bool,
     /// 心跳发送时间（Some = 已发送等待响应）
     pub heartbeat_sent: Option<std::time::Instant>,
     /// 连接代际号：每次 connect() 递增。读任务发出的 StateChange 携带
@@ -262,6 +266,8 @@ impl Session {
             heartbeat_cmd: config.heartbeat_cmd.clone(),
             heartbeat_timeout_secs: config.heartbeat_timeout_secs,
             last_recv_time: std::time::Instant::now(),
+            prompt_idle_ms: config.prompt_idle_ms,
+            prompt_settled: false,
             heartbeat_sent: None,
             connect_generation: 0,
             send_tx: None,
@@ -269,6 +275,17 @@ impl Session {
             cancel_tx: None,
             timer_cancel_tx: None,
         }
+    }
+
+    /// OnPrompt idle-settled 判据（抽成纯函数便于单测，避免逻辑内联在 tick 里无法覆盖）。
+    /// 四个条件全部满足才应派发：阈值启用（>0，0 为禁用）、处于连接态、本轮静默期
+    /// 尚未派发过（闩未消耗）、距上次收包已静默达阈值。`now` 由调用方传入以便测试注入。
+    pub fn prompt_should_fire(&self, now: std::time::Instant) -> bool {
+        self.prompt_idle_ms > 0
+            && self.state == SessionState::Connected
+            && !self.prompt_settled
+            && now.saturating_duration_since(self.last_recv_time)
+                >= std::time::Duration::from_millis(self.prompt_idle_ms)
     }
 
     /// 连接到服务器，返回接收事件通道
@@ -800,6 +817,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(1), &config);
         assert_eq!(session.name, "test");
@@ -840,6 +858,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         }
     }
 
@@ -895,6 +914,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(1), &config);
         assert_eq!(session.render_interval, 2000);
@@ -933,6 +953,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.send("hello").is_err());
@@ -969,6 +990,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let mut session = Session::new(SessionId(1), &config);
         session.disconnect();
@@ -1006,6 +1028,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(2), &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -1042,6 +1065,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(3), &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -1078,6 +1102,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(5), &config);
         assert_eq!(session.script_path, Some("/path/to/script.lua".to_string()));
@@ -1114,6 +1139,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(6), &config);
         assert_eq!(session.username, Some("player".to_string()));
@@ -1151,6 +1177,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(7), &config);
         assert!(session.auto_connect);
@@ -1189,6 +1216,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(8), &config);
         assert!(matches!(session.encoding, Encoding::Gbk));
@@ -1225,6 +1253,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(9), &config);
         assert!(matches!(session.encoding, Encoding::Utf8));
@@ -1309,6 +1338,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.output_lines.is_empty());
@@ -1345,6 +1375,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.lua_engine.is_none());
@@ -1381,6 +1412,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let mut session = Session::new(SessionId(1), &config);
         session.disconnect();
@@ -1426,6 +1458,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(!session.socks5_enable);
@@ -1464,6 +1497,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1502,6 +1536,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1543,6 +1578,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1581,6 +1617,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         };
         let session = Session::new(SessionId(1), &config);
         assert!(session.socks5_enable);
@@ -1729,6 +1766,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         }
     }
 
@@ -1762,6 +1800,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         }
     }
 
@@ -2050,5 +2089,40 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_millis(500), got_marker.notified())
             .await
             .expect("send_raw 被限速等待阻塞：500ms 内未写出原始包");
+    }
+
+    /// prompt_should_fire 四态：禁用/未连接/静默未达阈值不触发，达阈值触发，闩已消耗不重复
+    #[test]
+    fn test_prompt_should_fire() {
+        use std::time::{Duration, Instant};
+        let base = ConnectionConfig {
+            prompt_idle_ms: 500,
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let mk = |idle_ms: u64, connected: bool, settled: bool, silence: Duration| {
+            let mut s = Session::new(SessionId(1), &base);
+            s.prompt_idle_ms = idle_ms;
+            s.state = if connected {
+                SessionState::Connected
+            } else {
+                SessionState::Disconnected
+            };
+            s.prompt_settled = settled;
+            s.last_recv_time = t0.checked_sub(silence).unwrap_or(t0);
+            s
+        };
+        // 静默超阈值 + 连接 + 未消耗 + 启用 → 触发
+        assert!(mk(500, true, false, Duration::from_millis(600)).prompt_should_fire(t0));
+        // 阈值正好等于静默（>=）→ 触发
+        assert!(mk(500, true, false, Duration::from_millis(500)).prompt_should_fire(t0));
+        // 静默未达阈值 → 不触发
+        assert!(!mk(500, true, false, Duration::from_millis(100)).prompt_should_fire(t0));
+        // 阈值 0 禁用 → 永不触发
+        assert!(!mk(0, true, false, Duration::from_secs(9)).prompt_should_fire(t0));
+        // 未连接 → 不触发
+        assert!(!mk(500, false, false, Duration::from_millis(600)).prompt_should_fire(t0));
+        // 闩已消耗 → 不触发
+        assert!(!mk(500, true, true, Duration::from_millis(600)).prompt_should_fire(t0));
     }
 }

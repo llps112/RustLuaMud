@@ -323,6 +323,7 @@ mod tests {
             idle_timeout_secs: 300,
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: 60,
+            prompt_idle_ms: 0,
         }
     }
 

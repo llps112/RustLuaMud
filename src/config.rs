@@ -133,6 +133,11 @@ pub struct ConnectionConfig {
     /// 心跳响应超时（秒），发送心跳后超过此时间无响应则断连，默认 60
     #[serde(default = "default_heartbeat_timeout_secs")]
     pub heartbeat_timeout_secs: u64,
+    /// OnPrompt 输出落定判定的空闲阈值（毫秒）。0 = 禁用（默认，存量配置零影响）。
+    /// 取正值时：连接态下连续该时长无新数据即视为服务器本轮输出已落定，
+    /// 触发一次全局回调 `OnPrompt("idle")`。严禁配得接近限速/心跳节奏。
+    #[serde(default)]
+    pub prompt_idle_ms: u64,
 }
 
 /// 与上方 serde 的 `#[serde(default = "default_*")]` 共用同一批 `default_*()` 函数，
@@ -172,6 +177,7 @@ impl Default for ConnectionConfig {
             idle_timeout_secs: default_idle_timeout_secs(),
             heartbeat_cmd: String::new(),
             heartbeat_timeout_secs: default_heartbeat_timeout_secs(),
+            prompt_idle_ms: 0,
         }
     }
 }
@@ -915,6 +921,10 @@ mod tests {
             from_toml.heartbeat_timeout_secs, d.heartbeat_timeout_secs,
             "heartbeat_timeout_secs 默认值分叉"
         );
+        assert_eq!(
+            from_toml.prompt_idle_ms, d.prompt_idle_ms,
+            "prompt_idle_ms 默认值分叉"
+        );
     }
 
     #[test]
@@ -1273,6 +1283,30 @@ port = 6000"#
         assert_eq!(config.idle_timeout_secs, 120);
         assert_eq!(config.heartbeat_cmd, "look");
         assert_eq!(config.heartbeat_timeout_secs, 30);
+    }
+
+    #[test]
+    fn test_prompt_idle_ms_default_zero_disabled() {
+        // 缺省即 0（禁用），存量配置零影响
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.prompt_idle_ms, 0);
+    }
+
+    #[test]
+    fn test_prompt_idle_ms_custom() {
+        let toml_str = r#"
+            name = "test"
+            host = "example.com"
+            port = 4000
+            prompt_idle_ms = 200
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.prompt_idle_ms, 200);
     }
 
     #[test]

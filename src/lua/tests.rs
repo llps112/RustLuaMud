@@ -7349,3 +7349,55 @@ fn test_set_connected_sets_connect_time() {
         assert!(engine.state.borrow().connect_time.is_some());
     });
 }
+
+#[test]
+fn test_on_prompt_callback() {
+    with_engine(|engine| {
+        exec(
+            engine,
+            r#"
+            prompt_source = nil
+            OnPrompt = function(source)
+                prompt_source = source
+            end
+            "#,
+        )
+        .unwrap();
+        engine.notify_prompt("idle");
+        let source: String = eval(engine, "return prompt_source").unwrap();
+        assert_eq!(source, "idle");
+    });
+}
+
+#[test]
+fn test_on_prompt_default_noop() {
+    // 脚本未覆盖 OnPrompt 时，默认空函数使 notify_prompt 安全无副作用（不报错）
+    with_engine(|engine| {
+        engine.notify_prompt("goahead");
+    });
+}
+
+#[test]
+fn test_on_prompt_callback_escapes_quote() {
+    // source 含引号/反斜杠时不得注入闭合 Lua 字符串（notify_prompt 用 mlua 传参，
+    // 任何字节序列都作为真实字符串参数原样送达，无拼接 eval 注入面）
+    with_engine(|engine| {
+        exec(
+            engine,
+            r#"
+            prompt_source = nil
+            OnPrompt = function(source)
+                prompt_source = source
+            end
+            "#,
+        )
+        .unwrap();
+        engine.notify_prompt("oi'd");
+        let source: String = eval(engine, "return prompt_source").unwrap();
+        assert_eq!(source, "oi'd");
+        // 反斜杠结尾：旧拼接写法会吞掉闭合引号导致语法错误，现应原样送达
+        engine.notify_prompt("a\\");
+        let source: String = eval(engine, "return prompt_source").unwrap();
+        assert_eq!(source, "a\\");
+    });
+}

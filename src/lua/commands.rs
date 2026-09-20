@@ -162,6 +162,33 @@ impl LuaEngine {
         }
     }
 
+    /// 通知 Lua 引擎服务器本轮输出已落定，调用 OnPrompt(source) 回调。
+    /// source: "idle"（计时兜底）| "goahead"（telnet GA 快速路径，Phase 2）。
+    /// 用 mlua 直接取全局函数传参调用（而非字符串拼接 eval），从根上消除 source
+    /// 含引号/反斜杠时闭合 Lua 字符串的注入面。脚本未覆盖 OnPrompt（默认空函数）或
+    /// 非函数时安全跳过，panic 不崩进程。
+    pub fn notify_prompt(&mut self, source: &str) {
+        // 先把函数句柄取出来（owned Function），避免跨 catch_unwind 持有对 self.lua 的借用
+        let callback = self
+            .lua
+            .globals()
+            .get::<Option<mlua::Function>>("OnPrompt")
+            .ok()
+            .flatten();
+        let Some(func) = callback else {
+            return; // 未定义或非函数（含默认未注册）：安全 no-op
+        };
+        let arg = source.to_string();
+        let lua_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            if let Err(e) = func.call::<()>(arg) {
+                self.log_error(&format!("OnPrompt() 执行失败: {}", e));
+            }
+        }));
+        if lua_result.is_err() {
+            self.log_error("OnPrompt() 执行中发生 panic，已捕获以防止崩溃");
+        }
+    }
+
     /// 从 Session 层同步连接统计数据到 Lua 引擎
     pub fn update_session_stats(
         &mut self,
