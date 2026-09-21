@@ -45,6 +45,8 @@ pub struct Logger {
     max_files: usize,
     /// 按 session 覆盖的保留数量（session_name -> count）
     per_session_max_files: Mutex<HashMap<String, usize>>,
+    /// 按 session 登记的敏感凭据值（session_name -> secrets），写入命令日志前脱敏
+    per_session_secrets: Mutex<HashMap<String, Vec<String>>>,
     /// 上次执行目录清理时的时间后缀（session_name -> `YYMMDD_HH`）
     ///
     /// 旧文件只会在跨小时产生新文件时出现，故清理只需在新小时的首条日志执行一次。
@@ -62,6 +64,7 @@ impl Logger {
             log_dir,
             max_files,
             per_session_max_files: Mutex::new(HashMap::new()),
+            per_session_secrets: Mutex::new(HashMap::new()),
             last_cleanup_suffix: Mutex::new(HashMap::new()),
         }
     }
@@ -76,6 +79,39 @@ impl Logger {
         if let Ok(mut map) = self.per_session_max_files.lock() {
             map.insert(session_name.to_string(), count);
         }
+    }
+
+    /// 登记指定 session 的敏感凭据值（如登录密码、代理密码）。
+    ///
+    /// 写入命令日志（`log_command`）前，这些值会被替换为 `***REDACTED***`，
+    /// 避免脚本 `Send(char_password)` 把明文密码落盘。空串与长度 < 4 的短值
+    /// 被忽略——它们会误伤整篇日志（如把 "1" 到处替换）。
+    pub fn set_session_secrets(&self, session_name: &str, secrets: &[String]) {
+        let filtered: Vec<String> = secrets.iter().filter(|s| s.len() >= 4).cloned().collect();
+        if let Ok(mut map) = self.per_session_secrets.lock() {
+            if filtered.is_empty() {
+                map.remove(session_name);
+            } else {
+                map.insert(session_name.to_string(), filtered);
+            }
+        }
+    }
+
+    /// 对命令文本按该 session 登记的凭据做子串脱敏。无登记时原样返回（快路径）。
+    fn redact(&self, session_name: &str, cmd: &str) -> String {
+        let secrets = match self.per_session_secrets.lock() {
+            Ok(map) => match map.get(session_name) {
+                Some(s) if !s.is_empty() => s.clone(),
+                _ => return cmd.to_string(),
+            },
+            // 锁中毒时不阻塞写入，退化为不脱敏
+            Err(_) => return cmd.to_string(),
+        };
+        let mut out = cmd.to_string();
+        for secret in &secrets {
+            out = out.replace(secret, "***REDACTED***");
+        }
+        out
     }
 
     /// 获取当前时间后缀，格式: YYMMDD_HH，例如 250626_14
@@ -188,8 +224,11 @@ impl Logger {
     }
 
     /// 记录脚本发送的指令
+    ///
+    /// 写入前先按该 session 登记的凭据脱敏，避免登录密码明文落盘。
     pub fn log_command(&self, session_name: &str, cmd: &str) {
-        self.log_cat(session_name, LogCategory::Command, cmd);
+        let redacted = self.redact(session_name, cmd);
+        self.log_cat(session_name, LogCategory::Command, &redacted);
     }
 
     /// 记录 /lua 指令
@@ -546,5 +585,69 @@ mod tests {
             other_session.exists(),
             "`mud` 的清理不应波及前缀型会话 `mud_alt` 的日志"
         );
+    }
+
+    #[test]
+    fn test_log_command_redacts_registered_secret() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
+        logger.set_session_secrets("sess", &["secret123".to_string()]);
+
+        logger.log_command("sess", "login myuser secret123");
+
+        let log_file = dir.path().join(format!("sess_{}.log", ts()));
+        let content = fs::read_to_string(&log_file).unwrap();
+        assert!(
+            content.contains("***REDACTED***"),
+            "密码应被脱敏: {}",
+            content
+        );
+        assert!(
+            !content.contains("secret123"),
+            "明文密码不得落盘: {}",
+            content
+        );
+        // 非密码部分保留
+        assert!(content.contains("login myuser"));
+    }
+
+    #[test]
+    fn test_log_command_redaction_isolated_per_session() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
+        logger.set_session_secrets("a", &["password_a".to_string()]);
+
+        // session b 未登记任何密钥，其命令不受 a 的密钥影响
+        logger.log_command("b", "say password_a");
+
+        let file_b = dir.path().join(format!("b_{}.log", ts()));
+        let content_b = fs::read_to_string(&file_b).unwrap();
+        assert!(
+            content_b.contains("password_a"),
+            "未登记密钥的 session 应原样写入: {}",
+            content_b
+        );
+    }
+
+    #[test]
+    fn test_set_session_secrets_ignores_short_values() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
+        // 空串与长度 < 4 的短值不作为密钥（避免把 "1" 到处替换）
+        logger.set_session_secrets(
+            "sess",
+            &["".to_string(), "1".to_string(), "abc".to_string()],
+        );
+
+        logger.log_command("sess", "count 1 for abc");
+
+        let log_file = dir.path().join(format!("sess_{}.log", ts()));
+        let content = fs::read_to_string(&log_file).unwrap();
+        assert!(
+            content.contains("count 1 for abc"),
+            "短值不应触发脱敏: {}",
+            content
+        );
+        assert!(!content.contains("***REDACTED***"));
     }
 }

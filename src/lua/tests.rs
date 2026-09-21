@@ -3031,7 +3031,7 @@ fn test_get_timer_info_codes() {
         // code 8 = at_time (false for interval timer, true for "at" timer)
         let at: bool = eval(engine, "return GetTimerInfo('t1', 8)").unwrap();
         assert!(!at);
-        // code 14 = temporary (not tracked, default false)
+        // code 14 = temporary（AddTimer 建的定时器非临时，应为 false）
         let tmp: bool = eval(engine, "return GetTimerInfo('t1', 14)").unwrap();
         assert!(!tmp);
         // code 19 = group (empty by default)
@@ -3059,6 +3059,49 @@ fn test_get_timer_info_at_time_and_one_shot() {
         assert!(!os, "should not be one_shot");
         let at: bool = eval(engine, "return GetTimerInfo('every_timer', 8)").unwrap();
         assert!(!at, "should not be at_time");
+    });
+}
+
+#[test]
+fn test_delete_temporary_timers_only_removes_temporary() {
+    with_engine(|engine| {
+        // 普通 AddTimer 建的 OneShot 定时器：temporary=false，不应被 DeleteTemporaryTimers 误删
+        exec(engine, "AddTimer('oneshot', 23, 50, 0, '', 7, 'cb')").unwrap();
+        let tmp: bool = eval(engine, "return GetTimerInfo('oneshot', 14)").unwrap();
+        assert!(!tmp, "AddTimer 建的定时器 temporary 应为 false");
+
+        // DoAfter 建的定时器：temporary=true
+        exec(engine, "DoAfter(5, 'x')").unwrap();
+        let tmp: bool = eval(engine, "return GetTimerInfo('__doafter_1', 14)").unwrap();
+        assert!(tmp, "DoAfter 建的定时器 temporary 应为 true");
+
+        let before = engine.timer_count();
+        exec(engine, "DeleteTemporaryTimers()").unwrap();
+        let after = engine.timer_count();
+        assert_eq!(after, before - 1, "只应删除 DoAfter 建的临时定时器");
+        // OneShot 普通定时器仍在（GetTimerInfo 非 nil 表示存在）
+        let val: Value = eval(engine, "return GetTimerInfo('oneshot', 6)").unwrap();
+        assert!(!val.is_nil(), "AddTimer 建的 OneShot 定时器不应被删除");
+    });
+}
+
+#[test]
+fn test_timer_function_name_callback_special_timer_name() {
+    with_engine(|engine| {
+        // 定时器名含引号/反斜杠：旧实现把 timer_name 拼进 Lua 源码调用回调会破坏语法，
+        // 现以值传参，函数名 send_text 解析后原样收到定时器名
+        exec(
+            engine,
+            r#"
+            got_name = nil
+            function cb(name) got_name = name end
+            AddTimer("w'x\\", 0, 0, 5, '', 1, 'cb')
+            "#,
+        )
+        .unwrap();
+        engine.fire_timer_by_name("w'x\\");
+        let got: String = eval(engine, "return got_name").unwrap();
+        assert_eq!(got, "w'x\\");
     });
 }
 
@@ -7338,6 +7381,31 @@ fn test_on_disconnect_default_noop() {
     with_engine(|engine| {
         engine.notify_disconnect("network_error");
         assert!(engine.state.borrow().last_disconnect_reason.is_some());
+    });
+}
+
+#[test]
+fn test_on_disconnect_callback_escapes_special_chars() {
+    // reason 含单引号/反斜杠时不得注入闭合 Lua 字符串（notify_disconnect 现用
+    // mlua 直接传参，任何字节序列都作为真实字符串参数原样送达，无拼接 eval 注入面）
+    with_engine(|engine| {
+        exec(
+            engine,
+            r#"
+            disconnect_reason = nil
+            OnDisconnect = function(reason)
+                disconnect_reason = reason
+            end
+            "#,
+        )
+        .unwrap();
+        engine.notify_disconnect("oi'd");
+        let reason: String = eval(engine, "return disconnect_reason").unwrap();
+        assert_eq!(reason, "oi'd");
+        // 反斜杠结尾：旧拼接写法会吞掉闭合引号导致语法错误，现应原样送达
+        engine.notify_disconnect("a\\");
+        let reason: String = eval(engine, "return disconnect_reason").unwrap();
+        assert_eq!(reason, "a\\");
     });
 }
 

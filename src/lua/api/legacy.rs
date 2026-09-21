@@ -99,6 +99,7 @@ impl LuaEngine {
                     group: String::new(),
                     one_shot: false,
                     at_time: false,
+                    temporary: false,
                     send_text: String::new(),
                     next_fire: std::time::Instant::now()
                         + std::time::Duration::from_millis(interval_secs * 1000),

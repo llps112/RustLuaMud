@@ -136,7 +136,10 @@ impl LuaEngine {
         self.connect_delay_ms = delay_ms;
     }
 
-    /// 通知 Lua 引擎连接已断开，并调用 OnDisconnect(reason) 回调
+    /// 通知 Lua 引擎连接已断开，并调用 OnDisconnect(reason) 回调。
+    /// 用 mlua 直接取全局函数传参调用（而非字符串拼接 eval），从根上消除 reason
+    /// 含引号/反斜杠时闭合 Lua 字符串的注入面。脚本未定义 OnDisconnect（或非函数）
+    /// 时安全跳过，panic 不崩进程；保留看门狗防死循环（与 notify_prompt 同构）。
     pub fn notify_disconnect(&mut self, reason: &str) {
         {
             let mut state = self.state.borrow_mut();
@@ -147,15 +150,24 @@ impl LuaEngine {
             self.pending_on_connect = None;
             self.delayed_commands.borrow_mut().clear();
         }
-        // 调用 OnDisconnect(reason)
-        let code = format!(
-            "if type(OnDisconnect) == 'function' then OnDisconnect('{}') end",
-            reason.replace('\'', "\\'")
-        );
+        // 先把函数句柄取出来（owned Function），避免跨 catch_unwind 持有对 self.lua 的借用
+        let callback = self
+            .lua
+            .globals()
+            .get::<Option<mlua::Function>>("OnDisconnect")
+            .ok()
+            .flatten();
+        let Some(func) = callback else {
+            return; // 未定义或非函数：安全 no-op
+        };
+        let arg = reason.to_string();
         let lua_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            if let Err(e) = self.eval_code(&code) {
-                self.log_error(&format!("OnDisconnect() 执行失败: {}", e));
-            }
+            // 看门狗布防：原经 eval_code 已受保护，改直接调用后需显式布防
+            self.exec_with_watchdog("OnDisconnect", || {
+                if let Err(e) = func.call::<()>(arg) {
+                    self.log_error(&format!("OnDisconnect() 执行失败: {}", e));
+                }
+            });
         }));
         if lua_result.is_err() {
             self.log_error("OnDisconnect() 执行中发生 panic，已捕获以防止崩溃");
@@ -296,16 +308,26 @@ impl LuaEngine {
         };
         match callback_opt {
             Some(func) => {
-                // 看门狗布防：面板回调若进入死循环同样会冻死客户端，纳入统一超时保护
+                // 看门狗布防：面板回调若进入死循环同样会冻死客户端，纳入统一超时保护；
+                // 外层 catch_unwind 防回调 panic 裸传播到事件循环（与 notify_prompt 同构）
                 let wd_name = format!("panel:{}", panel_name);
-                self.exec_with_watchdog(&wd_name, || {
-                    if let Err(e) = func.call::<()>((panel_name, action)) {
-                        self.log_error(&format!(
-                            "[Lua] 面板 '{}' 点击回调中发生错误: {}",
-                            panel_name, e
-                        ));
-                    }
-                });
+                let panel = panel_name.to_string();
+                let lua_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    self.exec_with_watchdog(&wd_name, || {
+                        if let Err(e) = func.call::<()>((panel.clone(), action)) {
+                            self.log_error(&format!(
+                                "[Lua] 面板 '{}' 点击回调中发生错误: {}",
+                                panel, e
+                            ));
+                        }
+                    });
+                }));
+                if lua_result.is_err() {
+                    self.log_error(&format!(
+                        "[Lua] 面板 '{}' 点击回调中发生 panic，已捕获以防止崩溃",
+                        panel_name
+                    ));
+                }
             }
             None => {
                 // 未注册回调时记录调试信息，便于排查（不再静默失败）

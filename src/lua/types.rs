@@ -87,6 +87,9 @@ pub struct TimerDef {
     pub group: String,
     pub one_shot: bool,
     pub at_time: bool,
+    /// MUSHclient 语义的「临时定时器」：由 DoAfter 系列内部置位（非 AddTimer 标志位），
+    /// 供 DeleteTemporaryTimers 精确删除，与 one_shot 区分。
+    pub temporary: bool,
     pub send_text: String,
     /// 下次触发的绝对时间（MushClient 兼容：tFireTime 模型，无累积漂移）
     pub next_fire: Instant,

@@ -187,6 +187,19 @@ const SERVER_STRIKE_THRESHOLD: u64 = 3 * SERVER_CMDS_PER_TICK;
 const SERVER_TICK_MS: u64 = 2000;
 
 impl ConnectionConfig {
+    /// 收集该连接的敏感凭据值（登录密码、SOCKS5 密码），供日志脱敏登记。
+    ///
+    /// 返回的是已展开 `${ENV_VAR}` 后的真值（凭据在 `from_toml_str*` 阶段已解析）。
+    pub fn credential_secrets(&self) -> Vec<String> {
+        let mut v = Vec::new();
+        if let Some(p) = self.password.as_deref() {
+            v.push(p.to_string());
+        }
+        if let Some(p) = self.socks5_password.as_deref() {
+            v.push(p.to_string());
+        }
+        v
+    }
     /// 从 TOML 文本解析角色配置的统一入口（启动批量加载与运行时 /profile load 均须走此），
     /// 解析成功后对凭据类字段做 `${ENV_VAR}` 占位符展开。
     /// 启动路径专用：展开告警直接 eprintln（此时尚未进入 raw mode，stderr 可见）。

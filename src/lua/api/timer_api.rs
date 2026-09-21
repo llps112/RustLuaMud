@@ -135,6 +135,7 @@ impl LuaEngine {
                 group: String::new(),
                 one_shot,
                 at_time,
+                temporary: false,
                 send_text,
                 next_fire,
             });
@@ -258,7 +259,7 @@ impl LuaEngine {
                         6 => Ok(Value::Boolean(t.enabled)), // enabled
                         7 => Ok(Value::Boolean(t.one_shot)), // one shot
                         8 => Ok(Value::Boolean(t.at_time)), // "At" timer flag
-                        14 => Ok(Value::Boolean(false)),    // temporary flag (not tracked)
+                        14 => Ok(Value::Boolean(t.temporary)), // temporary flag
                         19 => {
                             let group = t.group.clone();
                             Ok(Value::String(lua.create_string(&group)?))

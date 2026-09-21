@@ -13,6 +13,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use mlua::{Function, Lua};
+
 use super::types::LuaEngine;
 
 impl LuaEngine {
@@ -145,8 +147,14 @@ impl LuaEngine {
                         .is_some_and(|c| c.is_alphabetic() || c == '_');
 
                 let result: Result<(), String> = if is_function_name {
-                    let code = format!("{}('{}')", send_text, timer_name.replace('\'', "\\'"));
-                    self.lua.load(&code).exec().map_err(|e| format!("{}", e))
+                    // 直接按点号路径（`foo` 或 `module.func`）解析出函数，再以值传参调用，
+                    // 避免把 timer_name 拼进 Lua 源码（手工转义易漏反斜杠，形成注入面）。
+                    match Self::lookup_lua_function(&self.lua, &send_text) {
+                        Some(func) => func
+                            .call::<()>(timer_name.clone())
+                            .map_err(|e| format!("{}", e)),
+                        None => Err(format!("send_text '{}' 不是可调用的全局函数", send_text)),
+                    }
                 } else {
                     self.lua
                         .load(&send_text)
@@ -167,6 +175,25 @@ impl LuaEngine {
         if one_shot {
             let mut state = self.state.borrow_mut();
             state.delete_timer(&timer_name);
+        }
+    }
+
+    /// 按点号路径（如 `foo` 或 `module.func`）从全局表逐段解析出函数。
+    /// 任一环节缺失或最终值不是函数时返回 None，供调用方以值传参安全调用，
+    /// 从而避免把定时器名拼进 Lua 源码所带来的转义/注入风险。
+    fn lookup_lua_function(lua: &Lua, path: &str) -> Option<Function> {
+        let mut segments = path.split('.');
+        let first = segments.next()?;
+        let mut current: mlua::Value = lua.globals().get(first).ok()?;
+        for seg in segments {
+            current = match current {
+                mlua::Value::Table(t) => t.get(seg).ok()?,
+                _ => return None,
+            };
+        }
+        match current {
+            mlua::Value::Function(f) => Some(f),
+            _ => None,
         }
     }
 

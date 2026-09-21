@@ -221,6 +221,7 @@ impl ScriptState {
             group: String::new(),
             one_shot: true,
             at_time: false,
+            temporary: true,
             send_text,
             next_fire: std::time::Instant::now()
                 + std::time::Duration::from_millis(interval_millis),

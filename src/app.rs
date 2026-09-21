@@ -101,6 +101,8 @@ impl App {
             if let Some(count) = conn_config.log_rotation_count {
                 logger.set_session_max_files(&conn_config.name, count);
             }
+            // 登记凭据（登录密码、SOCKS5 密码），避免脚本发送登录命令时明文落盘
+            logger.set_session_secrets(&conn_config.name, &conn_config.credential_secrets());
         }
 
         let mut terminal = Terminal::new()?;

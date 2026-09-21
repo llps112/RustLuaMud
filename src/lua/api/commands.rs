@@ -277,13 +277,15 @@ impl LuaEngine {
         globals.set("Simulate", simulate_fn)?;
 
         // DeleteTemporaryTimers() — MushClient API: 删除所有临时定时器
+        // 按 temporary 标志过滤（DoAfter 系列置位），而非 one_shot——普通 AddTimer
+        // 建的 OneShot 定时器不属于「临时定时器」，不应被误删。
         let state_rc_dtt = state_rc.clone();
         let delete_temp_timers_fn = lua.create_function_mut(move |_, ()| {
             let mut state = state_rc_dtt.borrow_mut();
             let to_delete: Vec<String> = state
                 .timers
                 .iter()
-                .filter(|t| t.one_shot)
+                .filter(|t| t.temporary)
                 .map(|t| t.name.clone())
                 .collect();
             for name in to_delete {

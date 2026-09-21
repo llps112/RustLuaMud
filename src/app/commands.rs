@@ -733,6 +733,9 @@ impl App {
                     if let Some(count) = conn_config.log_rotation_count {
                         self.logger.set_session_max_files(&conn_config.name, count);
                     }
+                    // 登记凭据，避免脚本发送登录命令时明文落盘
+                    self.logger
+                        .set_session_secrets(&conn_config.name, &conn_config.credential_secrets());
 
                     let loading_msg = format!(
                         "[系统] 正在从配置文件加载角色 '{}' 并连接 ({}:{})",
@@ -844,6 +847,7 @@ impl App {
             return Ok(());
         }
 
+        // 注：新增子命令须同步此白名单与下方分发 match（否则会落到兵底错误分支）。
         let safe = match parts[0] {
             "lua" | "reload" | "disconnect" | "reconnect" => true,
             "load" if parts.len() >= 2 => true,
@@ -1092,7 +1096,12 @@ impl App {
                 }
                 self.update_status_bar()?;
             }
-            _ => unreachable!(),
+            _ => {
+                // 防御性兵底：理论上白名单与上方分发 match 已对齐，不会走到这里；
+                // 万一两侧不同步，给优雅错误提示而非 unreachable!() panic。
+                self.terminal
+                    .append_output(&format!("[错误] /all 不支持的子命令: {}", parts[0]))?;
+            }
         }
         Ok(())
     }

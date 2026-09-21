@@ -9,7 +9,7 @@
 - 令牌桶 + 滑动窗口双重限速保护（burst_size + cmds_per_sec + cmd_interval_ms，叠加 window_limit + window_duration_ms），防反 flood
 - 完整 ANSI SGR 解析、CJK 宽字符对齐、浮动面板 API
 - 日志按小时切片 + 保留数量轮转（`log_rotation_count`，默认 24 个文件）
-- 凭据去明文：四个凭据字段支持 `${ENV_VAR}` 占位符，启动自动加载 `.env`，变量缺失按空处理
+- 凭据去明文：四个凭据字段支持 `${ENV_VAR}` 占位符，启动自动加载 `.env`，变量缺失按空处理；命令日志写入前对已登记凭据值自动脱敏（`***REDACTED***`），防登录密码落盘
 - Lua 执行看门狗：定时器/触发器/别名/脚本加载/命令执行/OnPrompt/面板回调/OnConnect/OnDisconnect 的死循环超时检测（覆盖全部 Lua 入口，支持嵌套）
 - 极低资源占用：J1800 + 2GB 内存即可流畅运行 10 连接
 - 版本：v1.0.4，Rust edition 2021
