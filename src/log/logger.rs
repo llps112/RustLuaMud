@@ -81,35 +81,69 @@ impl Logger {
         }
     }
 
+    /// 广播伪 session 名：`/all <cmd>` 写入命令日志时使用（见 `app::commands`）。
+    /// 它不对应任何真实连接，故无法按名登记密钥，脱敏时回退到所有已登记凭据的并集。
+    pub const BROADCAST_SESSION: &'static str = "all";
+    /// 脱敏占位符；任何为该占位符子串的凭据值不予登记，避免多轮替换把标记本身改碎。
+    const REDACT_MARKER: &'static str = "***REDACTED***";
+
     /// 登记指定 session 的敏感凭据值（如登录密码、代理密码）。
     ///
     /// 写入命令日志（`log_command`）前，这些值会被替换为 `***REDACTED***`，
-    /// 避免脚本 `Send(char_password)` 把明文密码落盘。空串与长度 < 4 的短值
-    /// 被忽略——它们会误伤整篇日志（如把 "1" 到处替换）。
+    /// 避免脚本 `Send(char_password)` 把明文密码落盘。空串与**字符数** < 4 的短值、
+    /// 以及为占位符子串的值被忽略——前者会误伤整篇日志（如把 "1" 到处替换），
+    /// 后者会与占位符相互破坏。阈值按 `chars()`（非字节），避免 CJK 与 ASCII 语义不一致。
+    ///
+    /// 同名 session 多次登记采用追加去重（而非覆盖），避免启动期两个同名连接的后
+    /// 注册者顶掉先前凭据（`ConnectionManager::add_connection` 允许同名并存）。
     pub fn set_session_secrets(&self, session_name: &str, secrets: &[String]) {
-        let filtered: Vec<String> = secrets.iter().filter(|s| s.len() >= 4).cloned().collect();
-        if let Ok(mut map) = self.per_session_secrets.lock() {
-            if filtered.is_empty() {
-                map.remove(session_name);
-            } else {
-                map.insert(session_name.to_string(), filtered);
+        let filtered: Vec<String> = secrets
+            .iter()
+            .filter(|s| s.chars().count() >= 4)
+            .filter(|s| !Self::REDACT_MARKER.contains(s.as_str()))
+            .cloned()
+            .collect();
+        if filtered.is_empty() {
+            return;
+        }
+        let mut map = self
+            .per_session_secrets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = map.entry(session_name.to_string()).or_default();
+        for s in filtered {
+            if !entry.contains(&s) {
+                entry.push(s);
             }
         }
     }
 
     /// 对命令文本按该 session 登记的凭据做子串脱敏。无登记时原样返回（快路径）。
+    ///
+    /// 广播伪 session（[`Self::BROADCAST_SESSION`]）落到独立日志文件、无法按名登记，
+    /// 故回退为「所有已登记凭据的并集」，防止 `/all login u <pwd>` 明文落盘。
+    /// 多凭据按长度降序替换，避免短凭据是长凭据子串时先替换短的会残留长的后缀。
     fn redact(&self, session_name: &str, cmd: &str) -> String {
-        let secrets = match self.per_session_secrets.lock() {
-            Ok(map) => match map.get(session_name) {
-                Some(s) if !s.is_empty() => s.clone(),
-                _ => return cmd.to_string(),
-            },
-            // 锁中毒时不阻塞写入，退化为不脱敏
-            Err(_) => return cmd.to_string(),
+        let map = self
+            .per_session_secrets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut secrets: Vec<String> = if session_name == Self::BROADCAST_SESSION {
+            map.values().flatten().cloned().collect()
+        } else {
+            match map.get(session_name) {
+                Some(s) => s.clone(),
+                None => return cmd.to_string(),
+            }
         };
+        drop(map);
+        if secrets.is_empty() {
+            return cmd.to_string();
+        }
+        secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
         let mut out = cmd.to_string();
         for secret in &secrets {
-            out = out.replace(secret, "***REDACTED***");
+            out = out.replace(secret, Self::REDACT_MARKER);
         }
         out
     }
@@ -649,5 +683,127 @@ mod tests {
             content
         );
         assert!(!content.contains("***REDACTED***"));
+    }
+
+    #[test]
+    fn test_broadcast_session_redacts_all_registered_secrets() {
+        // M1 回归：/all 广播用伪 session "all" 写日志，需对所有已登记凭据脱敏
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
+        logger.set_session_secrets("mud", &["secret123".to_string()]);
+
+        logger.log_command(Logger::BROADCAST_SESSION, "login myuser secret123");
+
+        let file = dir
+            .path()
+            .join(format!("{}_{}.log", Logger::BROADCAST_SESSION, ts()));
+        let content = fs::read_to_string(&file).unwrap();
+        assert!(
+            content.contains("***REDACTED***"),
+            "广播日志应脱敏: {}",
+            content
+        );
+        assert!(
+            !content.contains("secret123"),
+            "广播日志不得泄露已登记密码: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_redact_longer_secret_first_avoids_suffix_leak() {
+        // M2 回归：一密钥是另一密钥的前缀时，长密钥须先替换，否则残留后缀泄密
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
+        logger.set_session_secrets("sess", &["p123".to_string(), "p1234567".to_string()]);
+
+        logger.log_command("sess", "socks5 p1234567");
+
+        let file = dir.path().join(format!("sess_{}.log", ts()));
+        let content = fs::read_to_string(&file).unwrap();
+        assert!(
+            !content.contains("p1234567") && !content.contains("4567"),
+            "长密钥必须被完整脱敏，不得残留后缀: {}",
+            content
+        );
+        assert!(content.contains("***REDACTED***"));
+    }
+
+    #[test]
+    fn test_set_session_secrets_appends_on_same_name() {
+        // M3 回归：同名 session 多次登记应追加去重，而非覆盖丢弃先前凭据
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
+        logger.set_session_secrets("dup", &["aaaa1111".to_string()]);
+        logger.set_session_secrets("dup", &["bbbb2222".to_string()]);
+
+        logger.log_command("dup", "x aaaa1111 y bbbb2222");
+
+        let file = dir.path().join(format!("dup_{}.log", ts()));
+        let content = fs::read_to_string(&file).unwrap();
+        assert!(
+            !content.contains("aaaa1111") && !content.contains("bbbb2222"),
+            "两次登记的凭据都应被脱敏: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_set_session_secrets_threshold_is_chars_not_bytes() {
+        // L2 回归：阈值按字符数而非字节数。3 个 CJK 字符 = 9 字节，旧字节规则会误登记
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
+        logger.set_session_secrets("sess", &["口令词".to_string()]);
+
+        logger.log_command("sess", "use 口令词 now");
+
+        let file = dir.path().join(format!("sess_{}.log", ts()));
+        let content = fs::read_to_string(&file).unwrap();
+        assert!(
+            content.contains("口令词") && !content.contains("***REDACTED***"),
+            "3 个字符（未达 4 字符阈值）不应作为密钥: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_redact_4_char_secret_is_registered() {
+        // 阈值边界：恰好 4 个字符应被登记并脱敏
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
+        logger.set_session_secrets("sess", &["abcd".to_string()]);
+
+        logger.log_command("sess", "send abcd now");
+
+        let file = dir.path().join(format!("sess_{}.log", ts()));
+        let content = fs::read_to_string(&file).unwrap();
+        assert!(
+            !content.contains("abcd") && content.contains("***REDACTED***"),
+            "4 字符密钥应被登记脱敏: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_set_session_secrets_skips_marker_substring() {
+        // L3 回归：密钥为占位符子串（如 "REDACT"）时不登记，避免二次替换把标记改碎
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
+        logger.set_session_secrets("sess", &["password1".to_string(), "REDACT".to_string()]);
+
+        logger.log_command("sess", "login password1 REDACT");
+
+        let file = dir.path().join(format!("sess_{}.log", ts()));
+        let content = fs::read_to_string(&file).unwrap();
+        assert!(
+            !content.contains("password1"),
+            "真实密钥应被脱敏: {}",
+            content
+        );
+        assert!(
+            content.contains("***REDACTED*** REDACT"),
+            "占位符不得被 REDACT 子串二次改写: {}",
+            content
+        );
     }
 }

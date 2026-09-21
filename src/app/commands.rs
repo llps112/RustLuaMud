@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::config::{AppConfig, ConnectionConfig};
 use crate::connection::SessionId;
+use crate::log::Logger;
 
 use super::events::push_session_output_capped;
 use super::parse::{format_lua_error, parse_builtin_command, BuiltinCommand, ProfileSubcommand};
@@ -789,7 +790,7 @@ impl App {
                         "[系统] /all: 已向 {}/{} 个连接发送指令",
                         ok_count, count
                     ))?;
-                    self.logger.log_command("all", &cmd);
+                    self.logger.log_command(Logger::BROADCAST_SESSION, &cmd);
                 }
             }
 
