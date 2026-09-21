@@ -650,6 +650,13 @@ UCRT（`api-ms-win-crt-*`，Windows 10 起随系统提供），产物也不链 C
 
 ## 版本历史
 
+### v1.0.6 (2026-09-21)
+- 凭据脱敏收口（对 v1.0.5 脱敏能力的加固）：
+  - `/all <cmd>` 广播日志改用广播伪 session常量并对**所有已登记凭据的并集**脱敏，堵住 `all_*.log` 绕过脱敏的明文密码落盘
+  - 多凭据按长度降序替换，修正一密钥为另一密钥前缀时先替换短的导致长密钥后缀明文残留的缺陷
+  - 同名 session 多次登记改为**追加去重**（而非覆盖），避免启动期两个同名连接后注册者顶掉先前凭据
+  - 锁中毒时改用 `into_inner` 恢复内层数据继续脱敏（fail-safe，不再静默关闭脱敏）；短值阈值由字节数改为 `chars()` 字符数，修正 CJK 与 ASCII 语义不一致；为占位符子串的凭据值不予登记，避免二次替换把标记改碎
+
 ### v1.0.5 (2026-09-21)
 - 命令日志凭据脱敏：`Logger` 新增按 session 登记的密钥表，`log_command` 写入前将已登记的登录/SOCKS5 密码值替换为 `***REDACTED***`（短于 4 字符的值不参与，避免误伤）；`App::new` 与 `/profile load` 在会话初始化处注册凭据真值，堵住脚本 `Send(password)` 将明文密码落盘的链路
 - `DeleteTemporaryTimers` 语义修正：`TimerDef` 新增 `temporary` 字段，DoAfter 家族构造时置 `true`、`AddTimer` 置 `false`，删除过滤由误用的 `one_shot` 改为 `temporary`，`GetTimerInfo(name, 14)` 返回真实值；消除误删普通一次性定时器、删不掉真临时定时器的缺陷
