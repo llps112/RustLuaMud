@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -118,34 +119,40 @@ impl Logger {
         }
     }
 
-    /// 对命令文本按该 session 登记的凭据做子串脱敏。无登记时原样返回（快路径）。
+    /// 对文本按该 session 登记的凭据做子串脱敏。由 `log_cat`/`log_panic` 统一调用，
+    /// 覆盖命令、/lua、调试、panic、服务器输出、断线/重连全部落盘通道。
     ///
     /// 广播伪 session（[`Self::BROADCAST_SESSION`]）落到独立日志文件、无法按名登记，
     /// 故回退为「所有已登记凭据的并集」，防止 `/all login u <pwd>` 明文落盘。
     /// 多凭据按长度降序替换，避免短凭据是长凭据子串时先替换短的会残留长的后缀。
-    fn redact(&self, session_name: &str, cmd: &str) -> String {
+    /// 整进程无任何登记凭据时零拷贝借用返回，服务器高频输出不受影响。
+    fn redact<'a>(&self, session_name: &str, text: &'a str) -> Cow<'a, str> {
         let map = self
             .per_session_secrets
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // 全局快路径：整进程无任何登记凭据 → 直接借用返回（高频 Output 零开销）
+        if map.is_empty() {
+            return Cow::Borrowed(text);
+        }
         let mut secrets: Vec<String> = if session_name == Self::BROADCAST_SESSION {
             map.values().flatten().cloned().collect()
         } else {
             match map.get(session_name) {
-                Some(s) => s.clone(),
-                None => return cmd.to_string(),
+                Some(s) if !s.is_empty() => s.clone(),
+                _ => return Cow::Borrowed(text),
             }
         };
         drop(map);
         if secrets.is_empty() {
-            return cmd.to_string();
+            return Cow::Borrowed(text);
         }
         secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
-        let mut out = cmd.to_string();
+        let mut out = text.to_string();
         for secret in &secrets {
             out = out.replace(secret, Self::REDACT_MARKER);
         }
-        out
+        Cow::Owned(out)
     }
 
     /// 获取当前时间后缀，格式: YYMMDD_HH，例如 250626_14
@@ -240,7 +247,12 @@ impl Logger {
     }
 
     /// 写入分类日志
+    ///
+    /// 所有文本分类（命令 /lua 调试 panic 服务器输出 断线/重连）统一在此过
+    /// 凭据脱敏（`redact`），避免脚本打印/服务器回显/报错消息从非命令通道明文落盘。
+    /// 未登记任何凭据时 `redact` 零拷贝直接返回，高频输出不受影响。
     pub fn log_cat(&self, session_name: &str, category: LogCategory, line: &str) {
+        let redacted = self.redact(session_name, line);
         let suffix = Self::timestamp_suffix();
         let path = self.log_path(session_name, &suffix);
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
@@ -250,19 +262,16 @@ impl Logger {
                 "[{}] [{}] {}",
                 timestamp,
                 category.tag(),
-                line.trim_end()
+                redacted.trim_end()
             );
         }
         // 跨入新小时时才清理旧文件（而非每条日志都扫描目录）
         self.cleanup_if_rolled_over(session_name, &suffix);
     }
 
-    /// 记录脚本发送的指令
-    ///
-    /// 写入前先按该 session 登记的凭据脱敏，避免登录密码明文落盘。
+    /// 记录脚本发送的指令。脱敏由 `log_cat` 统一施加。
     pub fn log_command(&self, session_name: &str, cmd: &str) {
-        let redacted = self.redact(session_name, cmd);
-        self.log_cat(session_name, LogCategory::Command, &redacted);
+        self.log_cat(session_name, LogCategory::Command, cmd);
     }
 
     /// 记录 /lua 指令
@@ -299,6 +308,8 @@ impl Logger {
     /// 看门狗超时等非 panic 事件传说明文字（那种场景栈不可采样）。
     /// 不执行 cleanup_old_logs，避免在 panic hook 中触发新的 panic
     pub fn log_panic(&self, session_name: &str, panic_msg: &str, detail: &str) {
+        let panic_msg = self.redact(session_name, panic_msg);
+        let detail = self.redact(session_name, detail);
         let path = self.log_path(session_name, &Self::timestamp_suffix());
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
             let timestamp = Local::now().format("%H:%M:%S%.3f");
@@ -803,6 +814,80 @@ mod tests {
         assert!(
             content.contains("***REDACTED*** REDACT"),
             "占位符不得被 REDACT 子串二次改写: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_output_channel_redacts_registered_secret() {
+        // L7 收口回归：服务器输出（OUT）通道现经 log_cat 统一脱敏
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
+        logger.set_session_secrets("sess", &["secret123".to_string()]);
+
+        logger.log("sess", "server echoed: secret123");
+
+        let file = dir.path().join(format!("sess_{}.log", ts()));
+        let content = fs::read_to_string(&file).unwrap();
+        assert!(
+            !content.contains("secret123") && content.contains("***REDACTED***"),
+            "OUT 通道应脱敏: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_lua_channel_redacts_registered_secret() {
+        // L7 收口回归：/lua（LUA）通道脱敏
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
+        logger.set_session_secrets("sess", &["secret123".to_string()]);
+
+        logger.log_lua("sess", "Send(\"login u secret123\")");
+
+        let file = dir.path().join(format!("sess_{}.log", ts()));
+        let content = fs::read_to_string(&file).unwrap();
+        assert!(
+            !content.contains("secret123") && content.contains("***REDACTED***"),
+            "LUA 通道应脱敏: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_panic_channel_redacts_registered_secret() {
+        // L7 收口回归：panic（PNC）通道的消息与详情行均脱敏
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
+        logger.set_session_secrets("sess", &["secret123".to_string()]);
+
+        logger.log_panic("sess", "boom secret123 leaked", "frame secret123 here");
+
+        let file = dir.path().join(format!("sess_{}.log", ts()));
+        let content = fs::read_to_string(&file).unwrap();
+        assert!(
+            !content.contains("secret123"),
+            "PNC 通道消息与详情都应脱敏: {}",
+            content
+        );
+        assert!(
+            content.contains("Rust panic"),
+            "panic 头行应保留: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_no_secrets_writes_through_unchanged() {
+        // 快路径：整进程无任何登记密钥时文本原样落盘（高频输出零拷贝）
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
+        logger.log("sess", "plain output with word password");
+        let file = dir.path().join(format!("sess_{}.log", ts()));
+        let content = fs::read_to_string(&file).unwrap();
+        assert!(
+            content.contains("plain output with word password"),
+            "无密钥 session 应原样写入: {}",
             content
         );
     }
