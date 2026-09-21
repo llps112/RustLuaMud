@@ -650,6 +650,13 @@ UCRT（`api-ms-win-crt-*`，Windows 10 起随系统提供），产物也不链 C
 
 ## 版本历史
 
+### v1.0.5 (2026-09-21)
+- 命令日志凭据脱敏：`Logger` 新增按 session 登记的密钥表，`log_command` 写入前将已登记的登录/SOCKS5 密码值替换为 `***REDACTED***`（短于 4 字符的值不参与，避免误伤）；`App::new` 与 `/profile load` 在会话初始化处注册凭据真值，堵住脚本 `Send(password)` 将明文密码落盘的链路
+- `DeleteTemporaryTimers` 语义修正：`TimerDef` 新增 `temporary` 字段，DoAfter 家族构造时置 `true`、`AddTimer` 置 `false`，删除过滤由误用的 `one_shot` 改为 `temporary`，`GetTimerInfo(name, 14)` 返回真实值；消除误删普通一次性定时器、删不掉真临时定时器的缺陷
+- 消除字符串拼接注入面：`notify_disconnect` 与定时器 `send_text` 函数名分支均改为 mlua 直接取全局函数以值传参调用（定时器侧支持 `module.func` 点号路径逐段解析），不再把 `reason`/`timer_name` 拼进 Lua 源码，避免手工转义漏反斜杠时破坏生成代码
+- 面板回调异常隔离：`handle_panel_click` 的看门狗执行外层补 `catch_unwind`，与 `notify_prompt` 同构，回调 panic 不再裸传播到事件循环
+- `/all` 分发去 panic 面：子命令分发 match 的 `_` 兵底由 `unreachable!()` 改为优雅错误提示，消除白名单与分表白名单不同步时的崩溃风险
+
 ### v1.0.4 (2026-09-20)
 - 修复日志跨会话误删：`is_session_log` 由「前缀 + `_` + `.log` 后缀」升级为对时间戳段严格校验（6 位数字 + `_` + 2 位数字），杜绝会话名互为前缀时（如 `mud` 误删 `mud_alt_*.log`）的清理越界；新增端到端回归测试
 - 补齐看门狗覆盖：`OnPrompt`（`notify_prompt`）与面板点击回调（`handle_panel_click`）此前裸调 `func.call()` 未纳入超时保护，现按触发器同款「catch_unwind 在外、exec_with_watchdog 在内」包裹，消除 7×24 挂机下脚本死循环冻死客户端的盲区
