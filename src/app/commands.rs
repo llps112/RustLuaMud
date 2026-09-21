@@ -214,6 +214,18 @@ impl App {
 
                 match self.manager.remove_session(session_id) {
                     Ok(name) => {
+                        // L8 回收：仅当无其它同名 session 存活时清除按名登记，
+                        // 避免 M3 允许的同名并存下误删仍在用 session 的脱敏凭据
+                        let name_still_used =
+                            self.manager.ordered_session_ids().iter().any(|&id| {
+                                self.manager
+                                    .get_by_id(id)
+                                    .map(|s| s.name == name)
+                                    .unwrap_or(false)
+                            });
+                        if !name_still_used {
+                            self.logger.forget_session(&name);
+                        }
                         self.update_status_bar()?;
                         if self.manager.session_count() > 0 {
                             self.switch_foreground(self.manager.foreground_id)?;

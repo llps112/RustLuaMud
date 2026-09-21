@@ -119,6 +119,23 @@ impl Logger {
         }
     }
 
+    /// 清除指定 session 的全部按名登记（凭据、保留数量、清理游标），供连接关闭时调用，
+    /// 防止 7×24 长跑 + 频繁 `/profile load` + `/close` 下按 session 名的映射只增不减。
+    pub fn forget_session(&self, session_name: &str) {
+        self.per_session_secrets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_name);
+        self.per_session_max_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_name);
+        self.last_cleanup_suffix
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_name);
+    }
+
     /// 对文本按该 session 登记的凭据做子串脱敏。由 `log_cat`/`log_panic` 统一调用，
     /// 覆盖命令、/lua、调试、panic、服务器输出、断线/重连全部落盘通道。
     ///
@@ -888,6 +905,31 @@ mod tests {
         assert!(
             content.contains("plain output with word password"),
             "无密钥 session 应原样写入: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_forget_session_clears_secrets() {
+        // L8 回归：forget_session 清除该 session 的凭据登记，后续命令不再脱敏
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path().to_str().unwrap(), 5);
+        logger.set_session_secrets("sess", &["secret123".to_string()]);
+        logger.log_command("sess", "first secret123");
+
+        logger.forget_session("sess");
+        logger.log_command("sess", "second secret123");
+
+        let file = dir.path().join(format!("sess_{}.log", ts()));
+        let content = fs::read_to_string(&file).unwrap();
+        assert!(
+            content.contains("first ***REDACTED***"),
+            "forget 前首行应脱敏: {}",
+            content
+        );
+        assert!(
+            content.contains("second secret123"),
+            "forget 后应原样写入: {}",
             content
         );
     }

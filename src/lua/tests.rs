@@ -3106,6 +3106,69 @@ fn test_timer_function_name_callback_special_timer_name() {
 }
 
 #[test]
+fn test_timer_send_text_supports_call_metatable() {
+    with_engine(|engine| {
+        // L4 回归：send_text 指向带 __call 元方法的表时，应走 Lua 调用协议触发 __call，
+        // 首参为表本身、次参为定时器名（旧实现只认原生 function 会误判为不可调用）
+        exec(
+            engine,
+            r#"
+            got = nil
+            callable = setmetatable({}, {__call = function(self, name) got = name end})
+            AddTimer('mt_t', 0, 0, 5, '', 1, 'callable')
+            "#,
+        )
+        .unwrap();
+        engine.fire_timer_by_name("mt_t");
+        let got: String = eval(engine, "return got").unwrap();
+        assert_eq!(got, "mt_t");
+    });
+}
+
+#[test]
+fn test_timer_send_text_dotted_function_path() {
+    with_engine(|engine| {
+        // L4 辅助回归：点号路径 module.func 解析为真函数并以值传参
+        exec(
+            engine,
+            r#"
+            got = nil
+            ns = {}
+            function ns.cb(name) got = name end
+            AddTimer('dot_t', 0, 0, 5, '', 1, 'ns.cb')
+            "#,
+        )
+        .unwrap();
+        engine.fire_timer_by_name("dot_t");
+        let got: String = eval(engine, "return got").unwrap();
+        assert_eq!(got, "dot_t");
+    });
+}
+
+#[test]
+fn test_timer_send_text_non_callable_global_logs_error() {
+    with_engine(|engine| {
+        // 目标全局存在但不可调用（整数）：记录错误、不 panic、不崩引擎
+        exec(
+            engine,
+            r#"
+            answer = 42
+            AddTimer('nc_t', 0, 0, 5, '', 1, 'answer')
+            "#,
+        )
+        .unwrap();
+        engine.fire_timer_by_name("nc_t");
+        let logs = engine.drain_logs();
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("不可调用") || l.contains("send_text")),
+            "不可调用目标应记录错误: {:?}",
+            logs
+        );
+    });
+}
+
+#[test]
 fn test_get_info_56() {
     with_engine(|engine| {
         // GetInfo(56) = MUSHclient application path name
