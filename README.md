@@ -650,6 +650,9 @@ UCRT（`api-ms-win-crt-*`，Windows 10 起随系统提供），产物也不链 C
 
 ## 版本历史
 
+### v1.0.8 (2026-10-09)
+- 修复节流（非实时）渲染下切换前台连接时最近行重复插回渲染队尾的时序错乱：根因是服务器行同时驻留 `output_lines`（到达即写，切换时 `replace_output` 整表铺屏）与 `pending_data`（每 `render_interval` 刷终端后清空）两份重叠缓冲，旧 `switch_foreground` 在铺屏后又将 `pending_data` `append_output` 一遍导致重复。新增 `buffer_throttle_line` 统一节流入档，确立并锁定不变量「凡进 `pending_data` 的行必已在 `output_lines` 有副本」（服务器行与两条 `[Lua]` 节流分支共享同一实现），`switch_foreground` 据此改为直接丢弃 pending；同步修复节流模式 `[Lua]` 日志只入 `pending_data` 未入存档、切换前台后丢失的缺口。附 4 项针对入档不变量的单元测试
+
 ### v1.0.7 (2026-09-21)
 - 凭据脱敏上移全落盘通道（v1.0.6 review 收口 L7）：脱敏由 `log_command` 单点提到 `log_cat` 统一施加，OUT/LUA/DBG/PNC/DCN/RCN 全部文本分类写入前都过滤，`log_panic` 的消息与详情亦单独脱敏，堵住服务器回显、脚本 `Note`、报错消息等非命令通道的明文凭据落盘；`redact` 改返回 `Cow<str>`，整进程无登记凭据时借用原串零拷贝返回，高频服务器输出不承担 `String` 分配
 - 定时器回调支持 `__call` 可调用表（L4）：`send_text` 指向的回调从只认原生 `function` 扩展为任意可调用值，带 `__call` 元方法的表按其元方法调用（首参为表本身，同 Lua 语义），非可调用值记录错误不 panic；全程值传参不拼源码

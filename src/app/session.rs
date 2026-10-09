@@ -766,6 +766,8 @@ impl App {
                 .get_by_id(session_id)
                 .map(|s| s.realtime)
                 .unwrap_or(false);
+        // 预取 cap：下面对 self.manager 可变借用期间不能再读 self.config 字段，先取出为局部量
+        let cap = self.config.general.scroll_buffer;
         for msg in logs {
             // 日志写入文件（剥离 ANSI 码），根据前缀分类
             let clean = crate::ui::AnsiParser::strip_ansi(&msg);
@@ -780,9 +782,14 @@ impl App {
             // 如果是前台连接，也在终端显示（保留 ANSI 码以显示颜色）
             if is_foreground {
                 if buffer {
+                    // 节流：与服务器行一致，同时入 output_lines 存档 + pending_data 待刷，
+                    // 保证「pending ⊆ output_lines」不变量，使切换前台时可安全丢弃 pending。
                     if let Some(s) = self.manager.get_mut_by_id(session_id) {
-                        s.pending_data.push(format!("\x1b[36m[Lua] {}\x1b[0m", msg));
-                        s.render_dirty = true;
+                        super::events::buffer_throttle_line(
+                            s,
+                            format!("\x1b[36m[Lua] {}\x1b[0m", msg),
+                            cap,
+                        );
                     }
                 } else {
                     // 保存到 session 的 output_lines，切换 session 时不会丢失
@@ -945,5 +952,67 @@ mod tests {
         // sid_a 已展示，sid_b 仍是首次失败：应输出
         assert!(!update_send_err_state(&mut shown, sid_a, false));
         assert!(update_send_err_state(&mut shown, sid_b, false));
+    }
+
+    /// 构造一个默认配置的 Session，供缓冲不变量测试使用
+    fn new_test_session() -> crate::connection::session::Session {
+        crate::connection::session::Session::new(
+            crate::connection::session::SessionId(0),
+            &crate::config::ConnectionConfig::default(),
+        )
+    }
+
+    /// buffer_throttle_line 必须同时写 output_lines 与 pending_data，并置 render_dirty
+    #[test]
+    fn test_buffer_throttle_line_writes_both_buffers() {
+        let mut s = new_test_session();
+        super::super::events::buffer_throttle_line(&mut s, "服务器行 A".to_string(), 5000);
+        super::super::events::buffer_throttle_line(&mut s, "[Lua] 消息 B".to_string(), 5000);
+        // 不变量：pending_data 的每一条都能在 output_lines 找到副本
+        assert_eq!(s.pending_data, vec!["服务器行 A", "[Lua] 消息 B"]);
+        assert_eq!(s.output_lines, vec!["服务器行 A", "[Lua] 消息 B"]);
+        assert!(s.render_dirty, "缓冲后必须标脏以待渲染 tick 刷新");
+    }
+
+    /// 切换前台语义（丢弃 pending）后，output_lines 仍完整持有全部行——证明「丢弃不丢数据」
+    #[test]
+    fn test_discard_pending_on_switch_keeps_output_lines() {
+        let mut s = new_test_session();
+        for i in 0..3 {
+            super::super::events::buffer_throttle_line(&mut s, format!("行{}", i), 5000);
+        }
+        // 模拟 switch_foreground 新逻辑：replace_output 后直接丢弃 pending
+        s.pending_data.clear();
+        s.render_dirty = false;
+        assert!(s.pending_data.is_empty());
+        assert!(!s.render_dirty);
+        // 数据未丢：output_lines 仍是 replace_output 铺屏的完整来源
+        assert_eq!(s.output_lines, vec!["行0", "行1", "行2"]);
+    }
+
+    /// 超出 cap 时 output_lines 从头部裁剪保留最新；pending_data 不受 cap 影响（仅短暂缓冲）
+    #[test]
+    fn test_buffer_throttle_line_caps_output_lines() {
+        let mut s = new_test_session();
+        for i in 0..5 {
+            super::super::events::buffer_throttle_line(&mut s, format!("l{}", i), 3);
+        }
+        assert_eq!(
+            s.output_lines,
+            vec!["l2", "l3", "l4"],
+            "存档按 cap 头部裁剪"
+        );
+        assert_eq!(s.pending_data.len(), 5, "pending 保留未刷新的全部行");
+    }
+
+    /// 多行文本：output_lines 经 push_session_output_capped 拆分去空行去 \r，与既有裁剪口径一致
+    #[test]
+    fn test_buffer_throttle_line_splits_multiline_in_output_lines() {
+        let mut s = new_test_session();
+        super::super::events::buffer_throttle_line(&mut s, "a\nb\n\r\n".to_string(), 5000);
+        // 存档不含空行、不残留 \r
+        assert_eq!(s.output_lines, vec!["a", "b"]);
+        // pending 原样保留单条（与服务器行为一致，刷新时再经 push_output 拆分）
+        assert_eq!(s.pending_data, vec!["a\nb\n\r\n"]);
     }
 }

@@ -270,21 +270,24 @@ impl App {
                     // 服务端可能下发 ESC[2J（conhost 执行为整屏上滚）等危险转义序列，
                     // 原样渲染会物理顶出状态栏造成布局永久错位；入回看缓冲/渲染前过滤（保留 SGR 颜色）
                     let safe = crate::ui::terminal::strip_unsafe_escapes(trimmed);
-                    // 滚动回看缓冲（所有 session）
-                    if let Some(session) = self.manager.get_mut_by_id(id) {
-                        session.output_lines.push(safe.clone());
-                    }
-                    // 仅渲染前台连接的数据
-                    if id == self.manager.foreground_id {
-                        if is_realtime {
-                            // 实时渲染模式：逐行追加（支持逐行 omit）
+                    // 路由：
+                    //  - 前台节流：走 buffer_throttle_line，与 [Lua] 节流共用同一入档实现，
+                    //    从结构上保证不变量「凡进 pending_data 必已在 output_lines 有副本」——
+                    //    这正是 switch_foreground 可安全丢弃 pending 的前提。单测锁定该 helper。
+                    //  - 其余（后台任意模式 / 前台实时）：仅入 output_lines；前台实时额外立即渲染。
+                    let is_fg = id == self.manager.foreground_id;
+                    if is_fg && !is_realtime {
+                        if let Some(session) = self.manager.get_mut_by_id(id) {
+                            buffer_throttle_line(session, safe, max_lines);
+                        }
+                    } else {
+                        // 滚动回看缓冲
+                        if let Some(session) = self.manager.get_mut_by_id(id) {
+                            session.output_lines.push(safe.clone());
+                        }
+                        // 仅前台实时逐行追加（支持逐行 omit）
+                        if is_fg {
                             self.terminal.append_output(&safe)?;
-                        } else {
-                            // 节流渲染模式：缓冲数据，等待定时器刷新
-                            if let Some(session) = self.manager.get_mut_by_id(id) {
-                                session.pending_data.push(safe);
-                                session.render_dirty = true;
-                            }
                         }
                     }
                 }
@@ -306,13 +309,13 @@ impl App {
                 // 节流模式下缓冲到 pending_data，实时模式直接输出
                 if !pending_lua_logs.is_empty() && id == self.manager.foreground_id {
                     if !is_realtime {
-                        if let Some(session) = self.manager.get_mut_by_id(id) {
-                            for msg in pending_lua_logs {
-                                session
-                                    .pending_data
-                                    .push(format!("\x1b[36m[Lua] {}\x1b[0m", msg));
+                        // 节流：与服务器行一致，同时入 output_lines 存档 + pending_data 待刷，
+                        // 保证「pending ⊆ output_lines」不变量，使切换前台时可安全丢弃 pending。
+                        for msg in pending_lua_logs {
+                            let formatted = format!("\x1b[36m[Lua] {}\x1b[0m", msg);
+                            if let Some(session) = self.manager.get_mut_by_id(id) {
+                                buffer_throttle_line(session, formatted, max_lines);
                             }
-                            session.render_dirty = true;
                         }
                     } else {
                         for msg in pending_lua_logs {
@@ -561,24 +564,14 @@ impl App {
         self.logger
             .log_debug(log_name, &AnsiParser::strip_ansi(&switch_msg));
 
-        // 立即排空新前台 session 的 pending_data，避免切换后显示延迟
-        let pending = self
-            .manager
-            .get_mut_by_id(session_id)
-            .map(|s| {
-                s.render_dirty = false;
-                std::mem::take(&mut s.pending_data)
-            })
-            .unwrap_or_default();
-        if !pending.is_empty() {
-            let mut combined = String::new();
-            for line in &pending {
-                combined.push_str(line);
-                combined.push('\n');
-            }
-            if !combined.is_empty() {
-                self.terminal.append_output(&combined)?;
-            }
+        // 切换后直接丢弃新前台 session 的 pending_data，**不再 append_output**。
+        // 依据不变量「凡进 pending_data 的行必已在 output_lines 有副本」（服务器行、[Lua] 行
+        // 均满足，见 buffer_throttle_line）：上面的 replace_output(output_lines) 已把这些未刷新
+        // 的最近行整表铺屏。若再 append_output 一遍，最近行会既被铺屏显示又被追加，重复插回
+        // 渲染队尾（本次修复的 bug）。clear 同时防止后续周期性 handle_render_tick 二次刷入。
+        if let Some(s) = self.manager.get_mut_by_id(session_id) {
+            s.pending_data.clear();
+            s.render_dirty = false;
         }
 
         Ok(())
@@ -642,6 +635,26 @@ pub(super) fn push_session_output_capped(lines: &mut Vec<String>, text: &str, ca
         let drain_count = lines.len() - cap;
         lines.drain(..drain_count);
     }
+}
+
+/// 节流模式：把一行前台输出**同时**写入回看存档 `output_lines`（自带裁剪）
+/// 与待渲染队列 `pending_data`，并置 `render_dirty`。
+///
+/// 建立并固化关键不变量：**凡进入 `pending_data` 的行，必然已在 `output_lines` 中有副本**。
+/// `switch_foreground` 依赖该不变量——它用 `replace_output(output_lines)` 整体铺屏后即可
+/// 直接丢弃 `pending_data`（`clear`），无需再 `append_output`；否则尚未刷新的最近行会既在
+/// `output_lines` 里被铺屏显示一次、又被 `append_output` 追加一次，重复插回渲染队尾。
+///
+/// 服务器下行行（`handle_manager_event`）与 `[Lua]` 日志两条节流分支都统一改走本函数，
+/// 三处 `pending_data` 写入共享同一入档实现，不变量由结构保证、并由本模块单测锁定。
+pub(super) fn buffer_throttle_line(
+    session: &mut crate::connection::session::Session,
+    line: String,
+    cap: usize,
+) {
+    push_session_output_capped(&mut session.output_lines, &line, cap);
+    session.pending_data.push(line);
+    session.render_dirty = true;
 }
 
 #[cfg(test)]
