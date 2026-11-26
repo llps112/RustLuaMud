@@ -387,25 +387,29 @@ impl App {
                 // / 开头的命令作为 Lua 代码执行
                 // 去掉前导 /
                 self.logger.log_lua(&name, lua_code);
-                if let Some(engine) = self
+                // 先在不可变借用内完成 eval + drain，产出 owned 结果后立即释放 engine 借用，
+                // 再在借用外发送/报错：send_cmd_checked / report_send_err 需 &mut self，
+                // 不能与 engine 对 self.manager 的借用共存。
+                let eval_outcome = self
                     .manager
                     .get_by_id(session_id)
                     .and_then(|s| s.lua_engine.as_ref())
-                {
-                    match engine.eval_code(lua_code) {
-                        Ok(_) => {
-                            let sub_commands = engine.drain_commands();
-                            for sub_cmd in sub_commands {
-                                self.logger.log_command(&name, &sub_cmd);
-                                if let Err(e) = self.manager.send_to(session_id, &sub_cmd) {
-                                    self.terminal.append_output(&format!("[Lua 错误] {}", e))?;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            self.terminal.append_output(&format!("[Lua 错误] {}", e))?;
+                    .map(|engine| match engine.eval_code(lua_code) {
+                        Ok(_) => Ok(engine.drain_commands()),
+                        Err(e) => Err(e),
+                    });
+                match eval_outcome {
+                    Some(Ok(sub_commands)) => {
+                        for sub_cmd in sub_commands {
+                            self.logger.log_command(&name, &sub_cmd);
+                            // 发送失败统一走带去重 + 角色标签 + 会话隔离的出口，杜绝后台串台
+                            self.send_cmd_checked(session_id, &sub_cmd)?;
                         }
                     }
+                    Some(Err(e)) => {
+                        self.report_send_err(session_id, "Lua 错误", &e)?;
+                    }
+                    None => {}
                 }
             } else if depth < max_depth {
                 // 非 / 开头的命令：先尝试别名匹配（与 MUSHclient Execute 行为一致）
@@ -463,7 +467,7 @@ impl App {
         let result = self.manager.send_to(session_id, cmd);
         if update_send_err_state(&mut self.cmd_send_err_shown, session_id, result.is_ok()) {
             if let Err(e) = result {
-                self.terminal.append_output(&format!("[发送错误] {}", e))?;
+                self.report_send_err(session_id, "发送错误", &e)?;
             }
         }
         Ok(())
@@ -485,11 +489,38 @@ impl App {
             let result = self.manager.send_raw(session_id, data);
             if update_send_err_state(&mut self.raw_send_err_shown, session_id, result.is_ok()) {
                 if let Err(e) = result {
-                    self.terminal
-                        .append_output(&format!("[发送原始数据错误] {}", e))?;
+                    self.report_send_err(session_id, "发送原始数据错误", &e)?;
                 }
             }
         }
+        Ok(())
+    }
+
+    /// 输出发送错误：带 `连接 N (角色名)` 标签，且只落**肇事 session 自己**的回看缓冲与日志，
+    /// 仅当它就是当前前台时才写终端——杜绝后台角色的发送错误串到玩家正在看的其它窗口。
+    ///
+    /// 修复前：裸 `terminal.append_output("[发送错误] {e}")` 既无角色标签、又无条件写共享前台
+    /// 终端，导致 10 开场景下任一后台角色发送失败都会污染当前前台视图，且无法归因。
+    fn report_send_err(&mut self, session_id: SessionId, kind: &str, err: &str) -> io::Result<()> {
+        let pos = self.manager.display_number_of(session_id);
+        let cap = self.config.general.scroll_buffer;
+        let is_fg = should_show_send_err(session_id, self.manager.foreground_id);
+        let log_name = self
+            .manager
+            .get_by_id(session_id)
+            .map(|s| s.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "system".to_string());
+        // 优先写入肇事 session 自己的回看缓冲（切换过去时可见）；session 已移除时兜底仅格式化
+        let (msg, show_in_terminal) = match self.manager.get_mut_by_id(session_id) {
+            Some(session) => buffer_send_err(session, kind, pos, err, cap, is_fg),
+            None => (format_send_err(kind, pos, &log_name, err), is_fg),
+        };
+        if show_in_terminal {
+            self.terminal.append_output(&msg)?;
+        }
+        self.logger
+            .log_debug(&log_name, &crate::ui::AnsiParser::strip_ansi(&msg));
         Ok(())
     }
 
@@ -905,6 +936,35 @@ fn update_send_err_state(
     }
 }
 
+/// 构造带角色标签的发送错误消息：`[kind] 连接 N (角色名): err`。
+/// 纯函数，便于单测锁定「无标签无法归因」修复。
+fn format_send_err(kind: &str, display_pos: usize, name: &str, err: &str) -> String {
+    format!("[{}] 连接 {} ({}): {}", kind, display_pos, name, err)
+}
+
+/// 发送错误是否应写前台终端：仅当肇事 session 就是当前前台。
+/// 抽成纯函数以锁定「后台角色错误不串前台」这一核心门控（避免同义反复测试）。
+fn should_show_send_err(err_session: SessionId, foreground: SessionId) -> bool {
+    err_session == foreground
+}
+
+/// 发送错误的会话级落档（纯函数，脱离 App 单测）：
+/// - 把带标签的消息写入**肇事 session 自己**的回看缓冲（按 cap 裁剪），切换过去时可见；
+/// - 返回 (消息, 是否应写前台终端)。终端写入仅当肇事 session 就是当前前台，
+///   避免后台角色的发送错误串到玩家正在看的其它窗口（「串台」修复的核心判据）。
+fn buffer_send_err(
+    session: &mut crate::connection::session::Session,
+    kind: &str,
+    display_pos: usize,
+    err: &str,
+    cap: usize,
+    is_foreground: bool,
+) -> (String, bool) {
+    let msg = format_send_err(kind, display_pos, &session.name, err);
+    super::events::push_session_output_capped(&mut session.output_lines, &msg, cap);
+    (msg, is_foreground)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1014,5 +1074,83 @@ mod tests {
         assert_eq!(s.output_lines, vec!["a", "b"]);
         // pending 原样保留单条（与服务器行为一致，刷新时再经 push_output 拆分）
         assert_eq!(s.pending_data, vec!["a\nb\n\r\n"]);
+    }
+
+    /// 发送错误消息必须带角色标签（连接编号 + 角色名），修复「无标签无法归因」
+    #[test]
+    fn test_format_send_err_carries_role_label() {
+        let msg = format_send_err(
+            "发送错误",
+            3,
+            "fcriar",
+            "发送队列满或已关闭: no available capacity",
+        );
+        assert_eq!(
+            msg,
+            "[发送错误] 连接 3 (fcriar): 发送队列满或已关闭: no available capacity"
+        );
+    }
+
+    /// 原始数据发送错误同样带标签，kind 前缀保留供 grep
+    #[test]
+    fn test_format_send_err_raw_kind() {
+        let msg = format_send_err("发送原始数据错误", 10, "zorro", "closed");
+        assert!(msg.starts_with("[发送原始数据错误] 连接 10 (zorro): "));
+        assert!(msg.ends_with("closed"));
+    }
+
+    /// 肇事 session 的错误必须落进它自己的回看缓冲（切换过去时可见），并带标签
+    #[test]
+    fn test_buffer_send_err_persists_to_owning_session() {
+        let mut s = new_test_session();
+        s.name = "fcriar".to_string();
+        let (msg, _show) =
+            buffer_send_err(&mut s, "发送错误", 3, "no available capacity", 5000, false);
+        assert_eq!(s.output_lines, vec![msg.clone()]);
+        assert!(msg.contains("连接 3 (fcriar)"));
+    }
+
+    /// 串台修复核心：后台肇事 session（非前台）不得写前台终端，但仍落自己的缓冲
+    #[test]
+    fn test_buffer_send_err_background_not_shown_in_foreground() {
+        let mut s = new_test_session();
+        s.name = "bg".to_string();
+        let (_msg, show) = buffer_send_err(&mut s, "发送错误", 2, "full", 5000, false);
+        assert!(!show, "后台角色错误不得串到前台终端");
+        assert_eq!(s.output_lines.len(), 1, "仍须落肇事 session 自己的回看缓冲");
+    }
+
+    /// 前台肇事 session：既写终端又落自己缓冲
+    #[test]
+    fn test_buffer_send_err_foreground_shown() {
+        let mut s = new_test_session();
+        s.name = "fg".to_string();
+        let (_msg, show) = buffer_send_err(&mut s, "发送错误", 1, "full", 5000, true);
+        assert!(show, "前台角色错误应当场可见");
+        assert_eq!(s.output_lines.len(), 1);
+    }
+
+    /// 回看缓冲按 cap 头部裁剪，与既有 push_session_output_capped 口径一致
+    #[test]
+    fn test_buffer_send_err_caps_output_lines() {
+        let mut s = new_test_session();
+        s.name = "c".to_string();
+        for i in 0..5 {
+            buffer_send_err(&mut s, "发送错误", 1, &format!("e{}", i), 3, false);
+        }
+        assert_eq!(s.output_lines.len(), 3);
+        assert!(s.output_lines.last().unwrap().ends_with("e4"));
+    }
+
+    /// 门控纯函数：肇事 session 是当前前台时才写终端
+    #[test]
+    fn test_should_show_send_err_foreground_only() {
+        assert!(should_show_send_err(SessionId(3), SessionId(3)));
+    }
+
+    /// 门控纯函数：后台肇事 session 不得写前台终端（串台修复核心判据）
+    #[test]
+    fn test_should_show_send_err_background_suppressed() {
+        assert!(!should_show_send_err(SessionId(2), SessionId(5)));
     }
 }
