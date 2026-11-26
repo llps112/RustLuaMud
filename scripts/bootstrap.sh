@@ -2,6 +2,9 @@
 # RustLuaMud 一键初始化脚本
 # 在 ~/RustLuaMud/ 下创建数据目录，下载预编译二进制，生成示例配置
 #
+# 适用平台：Linux x86_64 / i686、macOS Apple Silicon（arm64）
+#          Windows 请用 bootstrap.ps1；Intel Mac 与 ARM64 Linux 无预编译，需源码编译
+#
 # 用法：
 #   bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh)
 #   bash <(curl -Ls ...) --nightly              # 下载 nightly 版
@@ -27,6 +30,8 @@ done
 DATA_DIR="$HOME/RustLuaMud"
 
 # 自动检测架构（产物名带 OS 前缀，需先看 uname -s 再看 uname -m）
+# 注意：本函数以 ARCH=$(detect_arch) 调用，stdout 会被命令替换捕获，
+# 所以错误提示必须走 >&2，否则用户只看到脚本静默退出、拿不到任何原因。
 detect_arch() {
     local kernel=$(uname -s)
     local machine=$(uname -m)
@@ -35,7 +40,7 @@ detect_arch() {
             case "$machine" in
                 arm64|aarch64) echo "macos-arm64" ;;
                 *)
-                    echo "!! macOS 仅预编译 Apple Silicon(arm64)，Intel($machine) 请从源码编译"
+                    echo "!! macOS 仅预编译 Apple Silicon(arm64)，Intel($machine) 请从源码编译" >&2
                     exit 1
                     ;;
             esac
@@ -47,18 +52,18 @@ detect_arch() {
                 aarch64|arm64)
                     # CI 从未构建过 linux-aarch64 产物，原先返回该名会拼出
                     # 一个不存在的下载 URL，用户只看到 curl 404。改为明示。
-                    echo "!! ARM64 Linux 暂无预编译产物，请从源码编译：cargo build --release"
+                    echo "!! ARM64 Linux 暂无预编译产物，请从源码编译：cargo build --release" >&2
                     exit 1
                     ;;
                 *)
-                    echo "!! 不支持的架构: $machine"
-                    echo "   预编译支持: Linux x86_64 / i686、macOS arm64"
+                    echo "!! 不支持的架构: $machine" >&2
+                    echo "   预编译支持: Linux x86_64 / i686、macOS arm64" >&2
                     exit 1
                     ;;
             esac
             ;;
         *)
-            echo "!! 不支持的系统: $kernel（Windows 请用 bootstrap.ps1）"
+            echo "!! 不支持的系统: $kernel（Windows 请用 bootstrap.ps1）" >&2
             exit 1
             ;;
     esac

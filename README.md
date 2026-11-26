@@ -66,7 +66,7 @@
 
 > **Windows 说明**：Windows 平台已提供预编译 `RustLuaMud-windows-x86_64.zip`（stable 与 nightly 均附带），**仅支持 64 位系统**，暂不支持 32 位与 ARM64。本项目的 ANSI 样式、CJK 对齐与浮动面板依赖现代终端的 VT/ANSI 支持，启动时还会切换到备用屏幕缓冲区（`CSI ?1049h`）：**最低 Windows 10 version 1607 / Windows Server 2016**（同为 build 14393，已在 Server 2016 实机连续运行验证），**推荐 1809 及以上**（体验完整）；更早的 1511 只有 VT 基础开关、解析不了备用屏序列，Win7/8/XP 连开关都没有，均不支持。终端推荐使用 Windows Terminal（传统 conhost 已做宽度自适应，但滚动条等固有缺陷无法完全消除）。
 
-> **macOS 说明**：Apple Silicon（M1 及以上）已提供预编译 `RustLuaMud-macos-arm64.tar.gz`（stable 与 nightly 均附带），构建时钉了 `MACOSX_DEPLOYMENT_TARGET=11.0`，最低 macOS 11；Intel Mac 暂无预编译，请从源码编译。产物只做了 ad-hoc 签名，未走 Apple 公证，从浏览器下载后双击可能被 Gatekeeper 拦下报「已损坏，无法打开」，执行 `xattr -d com.apple.quarantine ./RustLuaMud` 清除隔离标记即可（`bootstrap.sh` 已自动处理）。终端用 macOS 自带的 Terminal.app 即可，推荐 iTerm2（真彩色与字号表现更好）。
+> **macOS 说明**：Apple Silicon（M1 及以上）已提供预编译 `RustLuaMud-macos-arm64.tar.gz`（stable 与 nightly 均附带），构建时钉了 `MACOSX_DEPLOYMENT_TARGET=11.0`，最低 macOS 11；Intel Mac 暂无预编译，请从源码编译。产物只做了 ad-hoc 签名，未走 Apple 公证，从浏览器下载后双击可能被 Gatekeeper 拦下报「已损坏，无法打开」，执行 `xattr -d com.apple.quarantine ./RustLuaMud` 清除隔离标记即可（`bootstrap.sh` 已自动处理）。终端用 macOS 自带的 Terminal.app 即可，推荐 iTerm2（真彩色与字号表现更好）。一键部署用 `--nightly --gitee` 可免装任何前置；若走 `--gitee` 的**稳定版**路径，需 `python3` 解析最新 tag，macOS 默认不带（装 Command Line Tools 即有）。
 
 > **国内镜像加速**：`--gitee` 参数从 Gitee 下载，支持稳定版和 Nightly 两种版本：
 > ```bash
@@ -80,6 +80,8 @@
 ### 方式一：下载预编译二进制
 
 一键初始化脚本，自动创建目录、下载二进制、生成示例配置：
+
+> 适用 **Linux（x86_64 / i686）与 macOS（Apple Silicon）**；Windows 请用下文的 `bootstrap.ps1`。脚本按 `uname -s` / `uname -m` 自动选对应产物，macOS 上还会自动清除 quarantine 隔离标记，无需手动 `xattr`。Intel Mac 与 ARM64 Linux 无预编译产物，脚本会直接提示转源码编译。
 
 ```bash
 # 稳定版（推荐）
