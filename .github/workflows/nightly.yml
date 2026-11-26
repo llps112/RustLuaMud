@@ -82,9 +82,48 @@ jobs:
           name: rust-lua-mud-nightly-windows-x86_64
           path: release/RustLuaMud-windows-x86_64.zip
 
+  build-macos:
+    name: Build (arm64-macos)
+    # 与 release.yml 同理：只能用 GitHub 的 macOS 原生 runner，且必须钉死
+    # MACOSX_DEPLOYMENT_TARGET，否则产物只在新于构建机的 macOS 上能跑。
+    # macos-14 已于 2026-11-02 退役，不可再用；macos-15 同为 arm64。
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Smoke test binary
+        # 同 release.yml：--version 不碰终端即可退出，验证产物能加载。
+        # 失败会让 build-macos 变红，由 needs 挡住 nightly 发布。
+        run: |
+          BIN=target/aarch64-apple-darwin/release/RustLuaMud
+          file "$BIN"
+          lipo -archs "$BIN" | grep -q arm64
+          "./$BIN" --version
+
+      - name: Package binary
+        run: |
+          mkdir -p release
+          cp target/aarch64-apple-darwin/release/RustLuaMud release/
+          tar czf release/RustLuaMud-macos-arm64.tar.gz -C release RustLuaMud
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-lua-mud-nightly-macos-arm64
+          path: release/RustLuaMud-macos-arm64.tar.gz
+
   release:
     name: Upload to Nightly Release
-    needs: [build, build-windows]
+    needs: [build, build-windows, build-macos]
     runs-on: ubuntu-22.04
     steps:
       - name: Download all artifacts
@@ -98,7 +137,7 @@ jobs:
         with:
           tag: nightly
           name: Nightly Build
-          body: "自动构建于 main 分支最新提交。\n\n```\n# x86_64\ncurl -L https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-linux-x86_64.tar.gz | tar xz\n\n# i686 (32-bit)\ncurl -L https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-linux-i686.tar.gz | tar xz\n\n# windows x64 (PowerShell)\niwr https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-windows-x86_64.zip -OutFile RustLuaMud-windows.zip\nExpand-Archive RustLuaMud-windows.zip -DestinationPath .\n```"
+          body: "自动构建于 main 分支最新提交。\n\n```\n# x86_64\ncurl -L https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-linux-x86_64.tar.gz | tar xz\n\n# i686 (32-bit)\ncurl -L https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-linux-i686.tar.gz | tar xz\n\n# windows x64 (PowerShell)\niwr https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-windows-x86_64.zip -OutFile RustLuaMud-windows.zip\nExpand-Archive RustLuaMud-windows.zip -DestinationPath .\n\n# macOS Apple Silicon (M1/M2/...)\ncurl -L https://github.com/llps112/RustLuaMud/releases/download/nightly/RustLuaMud-macos-arm64.tar.gz | tar xz\nxattr -d com.apple.quarantine ./RustLuaMud   # 未签名产物，清掉隔离标记才能运行\n```"
           prerelease: true
           allowUpdates: true
           replacesArtifacts: true
@@ -153,7 +192,7 @@ jobs:
               'tag_name': '${TAG}',
               'target_commitish': 'main',
               'name': 'Nightly Build',
-              'body': '自动构建于 main 分支最新提交。\n\n下载地址：\n\`\`\`\n# x86_64\ncurl -L https://gitee.com/${OWNER}/${REPO}/releases/download/${TAG}/RustLuaMud-linux-x86_64.tar.gz | tar xz\n\n# i686 (32-bit)\ncurl -L https://gitee.com/${OWNER}/${REPO}/releases/download/${TAG}/RustLuaMud-linux-i686.tar.gz | tar xz\n\n# windows x64 (PowerShell)\niwr https://gitee.com/${OWNER}/${REPO}/releases/download/${TAG}/RustLuaMud-windows-x86_64.zip -OutFile RustLuaMud-windows.zip\nExpand-Archive RustLuaMud-windows.zip -DestinationPath .\n\`\`\`',
+              'body': '自动构建于 main 分支最新提交。\n\n下载地址：\n\`\`\`\n# x86_64\ncurl -L https://gitee.com/${OWNER}/${REPO}/releases/download/${TAG}/RustLuaMud-linux-x86_64.tar.gz | tar xz\n\n# i686 (32-bit)\ncurl -L https://gitee.com/${OWNER}/${REPO}/releases/download/${TAG}/RustLuaMud-linux-i686.tar.gz | tar xz\n\n# windows x64 (PowerShell)\niwr https://gitee.com/${OWNER}/${REPO}/releases/download/${TAG}/RustLuaMud-windows-x86_64.zip -OutFile RustLuaMud-windows.zip\nExpand-Archive RustLuaMud-windows.zip -DestinationPath .\n\n# macOS Apple Silicon (M1/M2/...)\ncurl -L https://gitee.com/${OWNER}/${REPO}/releases/download/${TAG}/RustLuaMud-macos-arm64.tar.gz | tar xz\nxattr -d com.apple.quarantine ./RustLuaMud   # 未签名产物，清掉隔离标记才能运行\n\`\`\`',
               'prerelease': True,
           }
           print(json.dumps(payload))

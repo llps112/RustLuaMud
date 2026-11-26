@@ -45,6 +45,23 @@ jobs:
       - name: Run tests
         run: cargo nextest run --test-threads=3
 
+  test-macos:
+    name: Test (macOS arm64)
+    # Darwin 侧靠人肉推断覆盖不到的主要是 vendored LuaJIT：arm64 的整数语义、
+    # GC 时机、字符串边界处理与 x86_64 Linux 可能有差异，公开仓库的 macOS runner
+    # 免费，跑一遍完整套件比买二手 Mac 划算。
+    # macos-14 已于 2026-11-02 退役，写它会找不到 runner；macos-15 同为 arm64。
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2.87.1
+        with:
+          tool: cargo-nextest
+      - name: Run tests
+        run: cargo nextest run --test-threads=3
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

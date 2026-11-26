@@ -77,9 +77,53 @@ jobs:
           name: rust-lua-mud-windows-x86_64
           path: release/RustLuaMud-windows-x86_64.zip
 
+  build-macos:
+    name: Build (arm64-macos)
+    # Apple Silicon（M1 及以上）原生 runner。macOS 产物无法在 Linux runner 上
+    # 交叉编译：Darwin SDK 与链接器不可自由再分发，只能用 GitHub 的 macOS runner。
+    # 不用 macos-14：该镜像已于 2026-11-02 退役（官方 changelog 2026-10-01），
+    # 写它会直接找不到 runner。macos-15 同为 arm64，且其 SDK 支持把部署目标
+    # 钉到 11.0；macos-latest 当前映射 macos-26，SDK 太新反而可能抬高部署下限。
+    runs-on: macos-15
+    env:
+      # 不指定时 ld 按构建机 OS 版本写 LC_BUILD_VERSION 的 minos，产物会强要求
+      # 不低于构建机的 macOS 版本；11.0 是 arm64 的原生下限，可覆盖全部 M 系列机器。
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Smoke test binary
+        # --version 分支不碰终端就 exit，能在无 TTY 的 CI 环下跑；真跑不起来
+        # （缺 dylib 符号、minos 写错、错架构）都会在这一步暴露，而不是到用户手里。
+        # 本步失败会让 build-macos 变红，由 needs 挡住 release，不会发残包。
+        run: |
+          BIN=target/aarch64-apple-darwin/release/RustLuaMud
+          file "$BIN"
+          lipo -archs "$BIN" | grep -q arm64
+          "./$BIN" --version
+
+      - name: Package binary
+        run: |
+          mkdir -p release
+          cp target/aarch64-apple-darwin/release/RustLuaMud release/
+          tar czf release/RustLuaMud-macos-arm64.tar.gz -C release RustLuaMud
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-lua-mud-macos-arm64
+          path: release/RustLuaMud-macos-arm64.tar.gz
+
   release:
     name: Create Release
-    needs: [build, build-windows]
+    needs: [build, build-windows, build-macos]
     runs-on: ubuntu-22.04
     steps:
       # 必须全量拉取历史与 tag：默认浅克隆(depth=1)下 `git describe --tags HEAD^`
@@ -132,6 +176,7 @@ jobs:
             release/RustLuaMud-linux-x86_64.tar.gz
             release/RustLuaMud-linux-i686.tar.gz
             release/RustLuaMud-windows-x86_64.zip
+            release/RustLuaMud-macos-arm64.tar.gz
 
       - name: Sync to Gitee Release
         env:

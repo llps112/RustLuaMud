@@ -60,10 +60,13 @@
 | 场景 | 推荐 |
 |------|------|
 | x86_64 / i686 Linux，即下即用 | [预编译二进制](#方式一下载预编译二进制) |
+| Apple Silicon Mac（M 系列），即下即用 | [预编译二进制](#方式一下载预编译二进制) |
 | Windows 10/11 64 位，即下即用 | [Windows 一键部署](#windows-一键部署) |
-| ARM64 / 需要改客户端代码 | [从源码编译](#方式二从源码编译) |
+| ARM64 Linux / 需要改客户端代码 | [从源码编译](#方式二从源码编译) |
 
 > **Windows 说明**：Windows 平台已提供预编译 `RustLuaMud-windows-x86_64.zip`（stable 与 nightly 均附带），**仅支持 64 位系统**，暂不支持 32 位与 ARM64。本项目的 ANSI 样式、CJK 对齐与浮动面板依赖现代终端的 VT/ANSI 支持，启动时还会切换到备用屏幕缓冲区（`CSI ?1049h`）：**最低 Windows 10 version 1607 / Windows Server 2016**（同为 build 14393，已在 Server 2016 实机连续运行验证），**推荐 1809 及以上**（体验完整）；更早的 1511 只有 VT 基础开关、解析不了备用屏序列，Win7/8/XP 连开关都没有，均不支持。终端推荐使用 Windows Terminal（传统 conhost 已做宽度自适应，但滚动条等固有缺陷无法完全消除）。
+
+> **macOS 说明**：Apple Silicon（M1 及以上）已提供预编译 `RustLuaMud-macos-arm64.tar.gz`（stable 与 nightly 均附带），构建时钉了 `MACOSX_DEPLOYMENT_TARGET=11.0`，最低 macOS 11；Intel Mac 暂无预编译，请从源码编译。产物只做了 ad-hoc 签名，未走 Apple 公证，从浏览器下载后双击可能被 Gatekeeper 拦下报「已损坏，无法打开」，执行 `xattr -d com.apple.quarantine ./RustLuaMud` 清除隔离标记即可（`bootstrap.sh` 已自动处理）。终端用 macOS 自带的 Terminal.app 即可，推荐 iTerm2（真彩色与字号表现更好）。
 
 > **国内镜像加速**：`--gitee` 参数从 Gitee 下载，支持稳定版和 Nightly 两种版本：
 > ```bash
@@ -170,7 +173,7 @@ Unblock-File bootstrap.ps1
 ```bash
 # 国内镜像安装（清华源）
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
-sed -i 's|static.rust-lang.org/rustup|mirrors.tuna.tsinghua.edu.cn/rustup/rustup|' rustup-init.sh
+sed -i.bak 's|static.rust-lang.org/rustup|mirrors.tuna.tsinghua.edu.cn/rustup/rustup|' rustup-init.sh
 RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup sh rustup-init.sh -y
 source $HOME/.cargo/env
 
@@ -179,7 +182,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source $HOME/.cargo/env
 ```
 
-> 编译需要 C 编译器：`sudo apt install build-essential`（Debian/Ubuntu）或 `sudo dnf groupinstall "Development Tools"`（Fedora/CentOS）。
+> 编译需要 C 编译器：`sudo apt install build-essential`（Debian/Ubuntu）、`sudo dnf groupinstall "Development Tools"`（Fedora/CentOS）或 `xcode-select --install`（macOS，vendored LuaJIT 与 bundled SQLite 都要用它）。
+>
+> 上面的 `sed -i.bak` 不能写成 `sed -i`：macOS 自带的是 BSD sed，`-i` 必须带备份后缀，写成 `sed -i 's|...|'` 会把脚本当成后缀、把文件名当成脚本，直接报错。`-i.bak` 在 GNU/BSD 两边都合法。
 
 #### 配置依赖镜像（国内）
 
@@ -581,7 +586,7 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 
 | 项目 | 要求 |
 |------|------|
-| 操作系统 | Linux（已测试）/ macOS / Windows 10 1607+ 或 Windows Server 2016+（仅 64 位，推荐 1809+） |
+| 操作系统 | Linux（已测试）/ macOS 11+（Apple Silicon 有预编译，Intel 需源码编译）/ Windows 10 1607+ 或 Windows Server 2016+（仅 64 位，推荐 1809+） |
 | CPU | x86_64、i686（仅 Linux）或 aarch64 |
 | 内存 | 最低 512MB，推荐 2GB（10 连接） |
 | 终端 | 支持 UTF-8 + ANSI 转义序列；Windows 推荐 Windows Terminal |

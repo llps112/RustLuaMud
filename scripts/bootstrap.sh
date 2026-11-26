@@ -26,16 +26,39 @@ done
 
 DATA_DIR="$HOME/RustLuaMud"
 
-# 自动检测架构
+# 自动检测架构（产物名带 OS 前缀，需先看 uname -s 再看 uname -m）
 detect_arch() {
+    local kernel=$(uname -s)
     local machine=$(uname -m)
-    case "$machine" in
-        x86_64|amd64)   echo "linux-x86_64" ;;
-        i686|i386)      echo "linux-i686" ;;
-        aarch64|arm64)  echo "linux-aarch64" ;;
+    case "$kernel" in
+        Darwin)
+            case "$machine" in
+                arm64|aarch64) echo "macos-arm64" ;;
+                *)
+                    echo "!! macOS 仅预编译 Apple Silicon(arm64)，Intel($machine) 请从源码编译"
+                    exit 1
+                    ;;
+            esac
+            ;;
+        Linux)
+            case "$machine" in
+                x86_64|amd64)   echo "linux-x86_64" ;;
+                i686|i386)      echo "linux-i686" ;;
+                aarch64|arm64)
+                    # CI 从未构建过 linux-aarch64 产物，原先返回该名会拼出
+                    # 一个不存在的下载 URL，用户只看到 curl 404。改为明示。
+                    echo "!! ARM64 Linux 暂无预编译产物，请从源码编译：cargo build --release"
+                    exit 1
+                    ;;
+                *)
+                    echo "!! 不支持的架构: $machine"
+                    echo "   预编译支持: Linux x86_64 / i686、macOS arm64"
+                    exit 1
+                    ;;
+            esac
+            ;;
         *)
-            echo "!! 不支持的架构: $machine"
-            echo "   支持的架构: x86_64, i686, aarch64"
+            echo "!! 不支持的系统: $kernel（Windows 请用 bootstrap.ps1）"
             exit 1
             ;;
     esac
@@ -104,6 +127,11 @@ fi
 rm -f "$DATA_DIR/RustLuaMud"
 tar xzf "$TMP_TAR" -C "$DATA_DIR"
 rm -f "$TMP_TAR"
+# macOS：浏览器/curl 下载的可执行文件带 com.apple.quarantine 隔离标记，未签名
+# 产物会被 Gatekeeper 拦下并报「已损坏，无法打开」，这里提前清除
+if [ "$(uname -s)" = "Darwin" ]; then
+    xattr -d com.apple.quarantine "$DATA_DIR/RustLuaMud" 2>/dev/null || true
+fi
 echo "    ✓ 解压完成"
 
 # ---- 3. 创建示例角色配置 ----
