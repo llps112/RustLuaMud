@@ -12,7 +12,7 @@
 - 凭据去明文：四个凭据字段支持 `${ENV_VAR}` 占位符，启动自动加载 `.env`，变量缺失按空处理；全部落盘日志（命令/输出/lua/调试/panic）写入前对已登记凭据值统一脱敏（`***REDACTED***`），防登录密码明文落盘；未登记凭据时零拷贝快路径，高频输出不受影响
 - Lua 执行看门狗：定时器/触发器/别名/脚本加载/命令执行/OnPrompt/面板回调/OnConnect/OnDisconnect 的死循环超时检测（覆盖全部 Lua 入口，支持嵌套）
 - 极低资源占用：J1800 + 2GB 内存即可流畅运行 10 连接
-- 版本：v1.0.8，Rust edition 2021
+- 版本：v1.0.9，Rust edition 2021
 
 ### 技术栈
 
@@ -140,7 +140,6 @@ iconv -f UTF-8 -t GBK scripts/class-utf8/<file> > scripts/class/<file>
 - `scripts/bootstrap.sh` — 一键环境搭建（支持 GitHub / Gitee 下载源）
 - `tools/check_ns_leak.py` — Lua 命名空间泄漏检测
 - `githooks/post-checkout` / `githooks/post-merge` — Git 钩子（自动同步 UTF-8 → GBK 文件）
-- `scripts/build.sh` — 多架构构建脚本（支持 `--arch i686`）
 
 ## 路线图摘要
 

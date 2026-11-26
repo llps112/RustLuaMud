@@ -599,7 +599,9 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 
 ```bash
 sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install gcc-multilib g++-multilib
-scripts/build.sh --arch i686
+rustup target add i686-unknown-linux-gnu
+cargo build --release --target i686-unknown-linux-gnu
+# 产物：target/i686-unknown-linux-gnu/release/RustLuaMud
 ```
 
 > 32 位 LuaJIT 整数上限 2^31，MUD 脚本中的经验值、HP 等数值不受影响。
