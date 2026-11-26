@@ -63,19 +63,19 @@
 | Windows 10/11 64 位，即下即用 | [一键部署（PowerShell 脚本）](#一键部署windows) |
 | Intel Mac、ARM64 Linux，或需要改客户端代码（含 Windows） | [从源码编译](#从源码编译) |
 
-**预编译产物一览**（stable 与 nightly 均附带，GitHub 与 Gitee 同步）：
+**预编译产物一览**（GitHub 与 Gitee 同步；nightly 四个齐全，macOS 产物进 stable 通道要等下一次发版）：
 
 | 产物 | 平台 | 运行要求 |
 |------|------|---------|
 | `RustLuaMud-linux-x86_64.tar.gz` | Linux x86_64 | 无额外依赖 |
 | `RustLuaMud-linux-i686.tar.gz` | Linux i686（32 位） | 需 32 位运行库 |
 | `RustLuaMud-windows-x86_64.zip` | Windows x64 | VC++ 2015-2022 运行库，见[故障排查](#故障排查) |
-| `RustLuaMud-macos-arm64.tar.gz` | macOS Apple Silicon | macOS 11+，未签名需清 quarantine |
+| `RustLuaMud-macos-arm64.tar.gz` | macOS Apple Silicon | macOS 11+，未签名需清 quarantine；**当前仅 nightly 提供** |
 
 > **平台细节**
 >
 > - **Windows**：仅支持 64 位（暂无 32 位与 ARM64）。ANSI 样式、CJK 对齐与浮动面板依赖现代终端的 VT/ANSI 支持，启动时还会切换到备用屏幕缓冲区（`CSI ?1049h`）：**最低 Windows 10 version 1607 / Windows Server 2016**（同为 build 14393，已在 Server 2016 实机连续运行验证），**推荐 1809 及以上**（体验完整）；更早的 1511 解析不了备用屏序列，Win7/8/XP 均不支持。终端推荐 Windows Terminal（传统 conhost 已做宽度自适应，但滚动条等固有缺陷无法完全消除）。
-> - **macOS**：仅 Apple Silicon 有预编译，Intel Mac 请从源码编译。产物只做了 ad-hoc 签名、未走 Apple 公证，从浏览器下载后可能被 Gatekeeper 拦下报「已损坏，无法打开」，执行 `xattr -d com.apple.quarantine ./RustLuaMud` 清除隔离标记即可（一键脚本已自动处理）。终端用 macOS 自带的 Terminal.app 即可，推荐 iTerm2（真彩色与字号表现更好）。
+> - **macOS**：仅 Apple Silicon 有预编译，Intel Mac 请从源码编译。**一键部署当前请加 `--nightly`**（最新 stable 发布在 macOS 支持之前，不含 macOS 产物）。产物只做了 ad-hoc 签名、未走 Apple 公证，从浏览器下载后可能被 Gatekeeper 拦下报「已损坏，无法打开」，执行 `xattr -d com.apple.quarantine ./RustLuaMud` 清除隔离标记即可（一键脚本已自动处理）。终端用 macOS 自带的 Terminal.app 即可，推荐 iTerm2（真彩色与字号表现更好）。
 > - **ARM64 Linux**：暂无预编译，请从源码编译。
 >
 > 完整的系统与终端要求见[系统要求](#系统要求)章节。
@@ -91,6 +91,8 @@ bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/script
 # Nightly 版（main 分支最新构建，可能不稳定）
 bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh) --nightly
 ```
+
+> **macOS 用户当前请加 `--nightly`**：最新 stable 发布在 macOS 支持之前，不含 macOS 产物，不加参数会下载失败（脚本已会提示改用 nightly）。下一次发版后 stable 即含 macOS 产物。
 
 > **国内镜像加速**：加 `--gitee` 从 Gitee 下载。
 > ```bash
@@ -174,7 +176,7 @@ Unblock-File bootstrap.ps1
 
 #### 环境准备
 
-**C 编译器**（先装它：macOS 上 Rust 安装器会检查 Command Line Tools，缺失时会中断）
+**C 编译器**（先装它：macOS 上没有 Command Line Tools 时，Rust 安装器会先提示安装）
 
 vendored LuaJIT 与 bundled SQLite 都要用它：
 
@@ -183,13 +185,13 @@ vendored LuaJIT 与 bundled SQLite 都要用它：
 | Debian/Ubuntu | `sudo apt install build-essential git` |
 | Fedora/CentOS | `sudo dnf groupinstall "Development Tools"`，另需 `sudo dnf install git` |
 | macOS | `xcode-select --install`（含 clang、make、git） |
-| Windows | 装 [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)，勾选「使用 C++ 的桌面开发」工作负载；需 Windows 10 19041+ / Server 2016+，磁盘约 15GB |
+| Windows | 装 [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)，勾选「使用 C++ 的桌面开发」工作负载；需 Windows 10 19041+ / Server 2016+（比运行要求的 1607 高，这是 Build Tools 自己的限制），磁盘约 15GB |
 
 Windows 另需 [Git for Windows](https://git-scm.com/download/win)（下文 `git clone` 用），安装时选中把 `git` 加进 PATH。
 
 **Rust 工具链：1.88 或更高**
 
-低于该版本 `cargo build` 会直接报 `requires rustc 1.88.0 or newer`（`mlua 0.12` 与 `encoding_rs` 声明的下限）。装最新 stable 即可，版本不够时先 `rustup update stable`。
+低于该版本 `cargo build` 会失败并提示 `requires rustc 1.88 or newer`（`mlua 0.12` 与 `encoding_rs 0.8` 声明的下限）。装最新 stable 即可；已装过 rustup 的机器先 `rustup update stable`。
 
 Linux / macOS（下面两种装法**二选一**）：
 
@@ -650,7 +652,7 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 | Windows 运行库 | **需 [VC++ 2015-2022 可再发行组件 x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)**：预编译 exe 动态链接 MSVC CRT，缺失时启动弹窗报「由于找不到 VCRUNTIME140.dll，无法继续执行代码」 |
 | Rust 编译 | 1.88+（`mlua 0.12` 声明的下限，低版本会在编译时报错） |
 
-> i686 预编译产物需 32 位运行库，Debian/Ubuntu 上装一次：`sudo dpkg --add-architecture i386 && sudo apt install libc6:i386 libstdc++6:i386`。自行编译见[32 位 Linux（i686）编译](#32-位-linuxi686编译)。
+> i686 预编译产物需 32 位运行库（实测导入表只依赖 `libc`、`libm`、`libgcc_s`，不需 `libstdc++`），Debian/Ubuntu 上装一次：`sudo dpkg --add-architecture i386 && sudo apt install libc6:i386`（会自动带上 `libgcc-s1:i386`）。自行编译见[32 位 Linux（i686）编译](#32-位-linuxi686编译)。
 
 ---
 
@@ -694,9 +696,9 @@ UCRT（`api-ms-win-crt-*`，Windows 10 起随系统提供），产物也不链 C
 
 项目使用 GitHub Actions 实现自动化：
 
-- **CI** — 每次 push/PR 自动运行测试、clippy、fmt 检查
-- **Release** — 打 tag 自动构建 GitHub Release
-- **Nightly** — 每次 push main 自动构建并同步到 [GitHub](https://github.com/llps112/RustLuaMud/releases/tag/nightly) 和 [Gitee](https://gitee.com/bai-yifei180/RustLuaMud/releases) Release
+- **CI** — push/PR 且改动了 Rust 源码、依赖清单或 bootstrap 脚本时，自动运行测试、clippy、fmt 检查（纯文档提交不触发）
+- **Release** — 打 tag 自动构建，发布到 GitHub Release 并同步到 Gitee Release
+- **Nightly** — push main 且改动了 Rust 源码或依赖时自动构建，同步到 [GitHub](https://github.com/llps112/RustLuaMud/releases/tag/nightly) 和 [Gitee](https://gitee.com/bai-yifei180/RustLuaMud/releases) Release
 - **Audit** — 每周自动依赖安全审计
 
 ---

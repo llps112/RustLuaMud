@@ -124,8 +124,15 @@ echo "==> 下载 $CHANNEL_LABEL 版二进制..."
 echo "    地址: $BINARY_URL"
 TMP_TAR=$(mktemp)
 if ! curl -fsSL --http1.1 --retry 3 -o "$TMP_TAR" "$BINARY_URL"; then
-    echo "!! 下载失败，请检查网络连接或确认 Release 是否存在"
     rm -f "$TMP_TAR"
+    # macOS 产物加入构建矩阵比 Linux/Windows 晚，早于它的 stable tag 里没有该文件。
+    # 这种 404 会被当成网络问题排查半天，所以单独给出可执行的下一步。
+    if [ "$ARCH" = "macos-arm64" ] && [ "$RELEASE_CHANNEL" != "nightly" ]; then
+        echo "!! 下载失败：该 stable 版本可能不含 macOS 产物" >&2
+        echo "   在刚才的命令后加 --nightly 重试（Gitee 源再加 --gitee）" >&2
+    else
+        echo "!! 下载失败，请检查网络连接或确认该 Release 是否含此产物" >&2
+    fi
     exit 1
 fi
 # 先删除旧二进制（运行中可删，Linux 仅 unlink 目录项，inode 保持打开）
