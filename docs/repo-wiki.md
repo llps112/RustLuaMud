@@ -201,7 +201,7 @@ git -C scripts/private config core.hooksPath hooks
 | CPU | x86_64、i686 或 aarch64 |
 | 内存 | 最低 512MB，推荐 2GB（10 连接） |
 | 终端 | 支持 UTF-8 + ANSI 转义序列 |
-| Rust | 1.70+（edition 2021） |
+| Rust | 1.88+（`mlua 0.12` 声明的下限） |
 | C 编译器 | gcc/g++（用于编译 rusqlite 等原生依赖） |
 
 ### 5.2 从源码编译

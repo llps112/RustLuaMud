@@ -61,7 +61,7 @@
 |------|---------|
 | Linux x86_64 / i686、Apple Silicon Mac，即下即用 | [一键部署（shell 脚本）](#一键部署linuxmacos) |
 | Windows 10/11 64 位，即下即用 | [一键部署（PowerShell 脚本）](#一键部署windows) |
-| Intel Mac、ARM64 Linux，或需要改客户端代码 | [从源码编译](#从源码编译) |
+| Intel Mac、ARM64 Linux，或需要改客户端代码（含 Windows） | [从源码编译](#从源码编译) |
 
 **预编译产物一览**（stable 与 nightly 均附带，GitHub 与 Gitee 同步）：
 
@@ -170,9 +170,28 @@ Unblock-File bootstrap.ps1
 
 ### 从源码编译
 
+适用于 Intel Mac、ARM64 Linux、需要改客户端代码，以及想自己控制编译参数的场景。Windows 同样可以编译，只是前置工具与 Linux/macOS 不同，下文按平台分别标注。
+
 #### 环境准备
 
-**Rust 工具链**
+**C 编译器**（先装它：macOS 上 Rust 安装器会检查 Command Line Tools，缺失时会中断）
+
+vendored LuaJIT 与 bundled SQLite 都要用它：
+
+| 平台 | 安装方式 |
+|------|---------|
+| Debian/Ubuntu | `sudo apt install build-essential git` |
+| Fedora/CentOS | `sudo dnf groupinstall "Development Tools"`，另需 `sudo dnf install git` |
+| macOS | `xcode-select --install`（含 clang、make、git） |
+| Windows | 装 [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)，勾选「使用 C++ 的桌面开发」工作负载；需 Windows 10 19041+ / Server 2016+，磁盘约 15GB |
+
+Windows 另需 [Git for Windows](https://git-scm.com/download/win)（下文 `git clone` 用），安装时选中把 `git` 加进 PATH。
+
+**Rust 工具链：1.88 或更高**
+
+低于该版本 `cargo build` 会直接报 `requires rustc 1.88.0 or newer`（`mlua 0.12` 与 `encoding_rs` 声明的下限）。装最新 stable 即可，版本不够时先 `rustup update stable`。
+
+Linux / macOS（下面两种装法**二选一**）：
 
 ```bash
 # 国内镜像安装（清华源）
@@ -188,17 +207,15 @@ source $HOME/.cargo/env
 
 > 上面的 `sed -i.bak` 不能写成 `sed -i`：macOS 自带的是 BSD sed，`-i` 必须带备份后缀，写成 `sed -i 's|...|'` 会把脚本当成后缀、把文件名当成脚本，直接报错。`-i.bak` 在 GNU/BSD 两边都合法。
 
-**C 编译器**
+Windows：从 [rustup.rs](https://rustup.rs) 下载 `rustup-init.exe` 运行，工具链保持默认的 `x86_64-pc-windows-msvc`。需要国内镜像时，安装前先设环境变量：
 
-vendored LuaJIT 与 bundled SQLite 都要用它：
-
-- Debian/Ubuntu：`sudo apt install build-essential`
-- Fedora/CentOS：`sudo dnf groupinstall "Development Tools"`
-- macOS：`xcode-select --install`
+```powershell
+$env:RUSTUP_DIST_SERVER = 'https://mirrors.tuna.tsinghua.edu.cn/rustup'
+```
 
 **依赖镜像（国内，可选）**
 
-写入 `~/.cargo/config.toml`：
+写入 `~/.cargo/config.toml`（Windows 为 `%USERPROFILE%\.cargo\config.toml`）：
 
 ```toml
 [build]
@@ -215,6 +232,8 @@ registry = "sparse+https://mirrors.sjtug.sjtu.edu.cn/crates.io-index/"
 
 #### 编译与运行
 
+Linux / macOS（ARM64 就是本机编译，不需要交叉编译参数）：
+
 ```bash
 git clone https://github.com/llps112/RustLuaMud.git   # 或 Gitee: https://gitee.com/bai-yifei180/RustLuaMud.git
 cd RustLuaMud
@@ -222,9 +241,20 @@ cargo build --release
 ./target/release/RustLuaMud
 ```
 
-#### 32 位（i686）编译
+Windows（PowerShell；Build Tools 装好后 `cargo` 会自动找到 `link.exe`）：
 
-预编译产物已覆盖 i686；自行编译需安装 32 位工具链：
+```powershell
+git clone https://github.com/llps112/RustLuaMud.git
+cd RustLuaMud
+cargo build --release
+.\target\release\RustLuaMud.exe
+```
+
+> 首次启动前把仓库自带的 `profiles/example.toml` 复制成自己的角色配置（与一键部署生成的那份相同）；游戏脚本放 `scripts/` 目录（自带 `example.lua`），配置项见[配置](#配置)。
+
+#### 32 位 Linux（i686）编译
+
+预编译产物已覆盖 i686；自行编译需安装 32 位工具链（以 Debian/Ubuntu 为例）：
 
 ```bash
 sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install gcc-multilib g++-multilib
@@ -618,9 +648,9 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 | 内存 | 最低 512MB，推荐 2GB（10 连接） |
 | 终端 | 支持 UTF-8 + ANSI 转义序列；Windows 推荐 Windows Terminal |
 | Windows 运行库 | **需 [VC++ 2015-2022 可再发行组件 x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)**：预编译 exe 动态链接 MSVC CRT，缺失时启动弹窗报「由于找不到 VCRUNTIME140.dll，无法继续执行代码」 |
-| Rust 编译 | 1.70+（edition 2021） |
+| Rust 编译 | 1.88+（`mlua 0.12` 声明的下限，低版本会在编译时报错） |
 
-> i686 预编译产物需 32 位运行库，Debian/Ubuntu 上装一次：`sudo dpkg --add-architecture i386 && sudo apt install libc6:i386 libstdc++6:i386`。自行编译见[32 位（i686）编译](#32-位i686编译)。
+> i686 预编译产物需 32 位运行库，Debian/Ubuntu 上装一次：`sudo dpkg --add-architecture i386 && sudo apt install libc6:i386 libstdc++6:i386`。自行编译见[32 位 Linux（i686）编译](#32-位-linuxi686编译)。
 
 ---
 
