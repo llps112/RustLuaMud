@@ -55,33 +55,34 @@
 
 ## 快速开始
 
-两种安装方式：
+### 选择安装方式
 
-| 场景 | 推荐 |
-|------|------|
-| x86_64 / i686 Linux，即下即用 | [预编译二进制](#方式一下载预编译二进制) |
-| Apple Silicon Mac（M 系列），即下即用 | [预编译二进制](#方式一下载预编译二进制) |
-| Windows 10/11 64 位，即下即用 | [Windows 一键部署](#windows-一键部署) |
-| ARM64 Linux / 需要改客户端代码 | [从源码编译](#方式二从源码编译) |
+| 场景 | 安装方式 |
+|------|---------|
+| Linux x86_64 / i686、Apple Silicon Mac，即下即用 | [一键部署（shell 脚本）](#一键部署linuxmacos) |
+| Windows 10/11 64 位，即下即用 | [一键部署（PowerShell 脚本）](#一键部署windows) |
+| Intel Mac、ARM64 Linux，或需要改客户端代码 | [从源码编译](#从源码编译) |
 
-> **Windows 说明**：Windows 平台已提供预编译 `RustLuaMud-windows-x86_64.zip`（stable 与 nightly 均附带），**仅支持 64 位系统**，暂不支持 32 位与 ARM64。本项目的 ANSI 样式、CJK 对齐与浮动面板依赖现代终端的 VT/ANSI 支持，启动时还会切换到备用屏幕缓冲区（`CSI ?1049h`）：**最低 Windows 10 version 1607 / Windows Server 2016**（同为 build 14393，已在 Server 2016 实机连续运行验证），**推荐 1809 及以上**（体验完整）；更早的 1511 只有 VT 基础开关、解析不了备用屏序列，Win7/8/XP 连开关都没有，均不支持。终端推荐使用 Windows Terminal（传统 conhost 已做宽度自适应，但滚动条等固有缺陷无法完全消除）。
+**预编译产物一览**（stable 与 nightly 均附带，GitHub 与 Gitee 同步）：
 
-> **macOS 说明**：Apple Silicon（M1 及以上）已提供预编译 `RustLuaMud-macos-arm64.tar.gz`（stable 与 nightly 均附带），构建时钉了 `MACOSX_DEPLOYMENT_TARGET=11.0`，最低 macOS 11；Intel Mac 暂无预编译，请从源码编译。产物只做了 ad-hoc 签名，未走 Apple 公证，从浏览器下载后双击可能被 Gatekeeper 拦下报「已损坏，无法打开」，执行 `xattr -d com.apple.quarantine ./RustLuaMud` 清除隔离标记即可（`bootstrap.sh` 已自动处理）。终端用 macOS 自带的 Terminal.app 即可，推荐 iTerm2（真彩色与字号表现更好）。一键部署用 `--nightly --gitee` 可免装任何前置；若走 `--gitee` 的**稳定版**路径，需 `python3` 解析最新 tag，macOS 默认不带（装 Command Line Tools 即有）。
+| 产物 | 平台 | 运行要求 |
+|------|------|---------|
+| `RustLuaMud-linux-x86_64.tar.gz` | Linux x86_64 | 无额外依赖 |
+| `RustLuaMud-linux-i686.tar.gz` | Linux i686（32 位） | 需 32 位运行库 |
+| `RustLuaMud-windows-x86_64.zip` | Windows x64 | VC++ 2015-2022 运行库，见[故障排查](#故障排查) |
+| `RustLuaMud-macos-arm64.tar.gz` | macOS Apple Silicon | macOS 11+，未签名需清 quarantine |
 
-> **国内镜像加速**：`--gitee` 参数从 Gitee 下载，支持稳定版和 Nightly 两种版本：
-> ```bash
-> # 稳定版（推荐）
-> bash <(curl -Ls https://gitee.com/bai-yifei180/RustLuaMud/raw/main/scripts/bootstrap.sh) --gitee
+> **平台细节**
 >
-> # Nightly 版
-> bash <(curl -Ls https://gitee.com/bai-yifei180/RustLuaMud/raw/main/scripts/bootstrap.sh) --nightly --gitee
-> ```
+> - **Windows**：仅支持 64 位（暂无 32 位与 ARM64）。ANSI 样式、CJK 对齐与浮动面板依赖现代终端的 VT/ANSI 支持，启动时还会切换到备用屏幕缓冲区（`CSI ?1049h`）：**最低 Windows 10 version 1607 / Windows Server 2016**（同为 build 14393，已在 Server 2016 实机连续运行验证），**推荐 1809 及以上**（体验完整）；更早的 1511 解析不了备用屏序列，Win7/8/XP 均不支持。终端推荐 Windows Terminal（传统 conhost 已做宽度自适应，但滚动条等固有缺陷无法完全消除）。
+> - **macOS**：仅 Apple Silicon 有预编译，Intel Mac 请从源码编译。产物只做了 ad-hoc 签名、未走 Apple 公证，从浏览器下载后可能被 Gatekeeper 拦下报「已损坏，无法打开」，执行 `xattr -d com.apple.quarantine ./RustLuaMud` 清除隔离标记即可（一键脚本已自动处理）。终端用 macOS 自带的 Terminal.app 即可，推荐 iTerm2（真彩色与字号表现更好）。
+> - **ARM64 Linux**：暂无预编译，请从源码编译。
+>
+> 完整的系统与终端要求见[系统要求](#系统要求)章节。
 
-### 方式一：下载预编译二进制
+### 一键部署：Linux/macOS
 
-一键初始化脚本，自动创建目录、下载二进制、生成示例配置：
-
-> 适用 **Linux（x86_64 / i686）与 macOS（Apple Silicon）**；Windows 请用下文的 `bootstrap.ps1`。脚本按 `uname -s` / `uname -m` 自动选对应产物，macOS 上还会自动清除 quarantine 隔离标记，无需手动 `xattr`。Intel Mac 与 ARM64 Linux 无预编译产物，脚本会直接提示转源码编译。
+`bootstrap.sh` 按 `uname -s` / `uname -m` 自动选对应产物，创建目录、下载二进制、生成示例配置：
 
 ```bash
 # 稳定版（推荐）
@@ -90,6 +91,13 @@ bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/script
 # Nightly 版（main 分支最新构建，可能不稳定）
 bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh) --nightly
 ```
+
+> **国内镜像加速**：加 `--gitee` 从 Gitee 下载。
+> ```bash
+> bash <(curl -Ls https://gitee.com/bai-yifei180/RustLuaMud/raw/main/scripts/bootstrap.sh) --gitee            # 稳定版
+> bash <(curl -Ls https://gitee.com/bai-yifei180/RustLuaMud/raw/main/scripts/bootstrap.sh) --nightly --gitee  # Nightly
+> ```
+> `--nightly --gitee` 无需任何前置组件；若走 `--gitee` 的**稳定版**路径，脚本需 `python3` 解析最新 tag，macOS 默认不带（装 Command Line Tools 即有）。
 
 初始化后目录结构：
 
@@ -113,6 +121,8 @@ vim profiles/mychar.toml
 ./RustLuaMud
 ```
 
+配置项说明见[配置](#配置)章节。
+
 > 示例配置与凭据模板**只在文件不存在时创建**，重跑初始化脚本不会覆盖你改过的配置。
 > 如果升级后想参考新增的配置项，删掉这两个文件重跑脚本，或直接从仓库拉取新版：
 >
@@ -128,9 +138,7 @@ vim profiles/mychar.toml
 >
 > Gitee 侧代码与 GitHub 同步，两个源均可拉到最新模板（已实测）。
 
-配置项说明见[配置](#配置)章节。
-
-#### Windows 一键部署
+### 一键部署：Windows
 
 在 PowerShell 中执行（默认安装到 `%USERPROFILE%\RustLuaMud`，免管理员权限）：
 
@@ -148,29 +156,23 @@ Unblock-File bootstrap.ps1
 .\bootstrap.ps1 D:\Games\RustLuaMud  # 自定义安装目录
 ```
 
-> 装完首次启动若弹窗「由于找不到 VCRUNTIME140.dll，无法继续执行代码」，不是下载损坏，是系统缺 VC++ 运行库：
-> 见下方「故障排查」小节，装一次即可。
+> 装完首次启动若弹窗「由于找不到 VCRUNTIME140.dll，无法继续执行代码」，不是下载损坏，是系统缺 VC++ 运行库，见[故障排查](#故障排查)装一次即可。
 
-初始化后目录结构：
+初始化后目录结构与 Linux/macOS 一致（`profiles\`、`scripts\`、`logs\` 相同），只多一个启动器、可执行文件带 `.exe` 后缀：
 
 ```
 %USERPROFILE%\RustLuaMud\
-├── RustLuaMud.exe         # 主程序
-├── start_mud.bat          # 双击启动器（自动钉死工作目录）
-├── profiles\              # 角色 TOML 配置文件
-│   └── example.toml       # 示例配置
-├── scripts\               # Lua 脚本（放入你自己的游戏脚本）
-│   └── example.lua        # 示例脚本
-└── logs\                  # 日志文件自动生成
+├── RustLuaMud.exe         # 主程序（对应 Linux/macOS 的 RustLuaMud）
+└── start_mud.bat          # 双击启动器（自动钉死工作目录）
 ```
 
 编辑 `profiles\` 下的角色配置后，双击 `start_mud.bat` 或在安装目录运行 `.\RustLuaMud.exe` 启动。游戏脚本不随安装包分发，放入 `scripts\` 目录并在配置中用 `script = "scripts/xxx.lua"` 引用即可。
 
-> Nightly 版由 [nightly.yml](.github/workflows/nightly.yml) 自动构建，每次 push main 分支后自动更新。构建完成后自动同步到 [Gitee Release](https://gitee.com/bai-yifei180/RustLuaMud/releases)。支持 Linux x86_64 / i686 与 Windows x86_64 三种产物。
+### 从源码编译
 
-### 方式二：从源码编译
+#### 环境准备
 
-#### 安装 Rust
+**Rust 工具链**
 
 ```bash
 # 国内镜像安装（清华源）
@@ -184,11 +186,17 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source $HOME/.cargo/env
 ```
 
-> 编译需要 C 编译器：`sudo apt install build-essential`（Debian/Ubuntu）、`sudo dnf groupinstall "Development Tools"`（Fedora/CentOS）或 `xcode-select --install`（macOS，vendored LuaJIT 与 bundled SQLite 都要用它）。
->
 > 上面的 `sed -i.bak` 不能写成 `sed -i`：macOS 自带的是 BSD sed，`-i` 必须带备份后缀，写成 `sed -i 's|...|'` 会把脚本当成后缀、把文件名当成脚本，直接报错。`-i.bak` 在 GNU/BSD 两边都合法。
 
-#### 配置依赖镜像（国内）
+**C 编译器**
+
+vendored LuaJIT 与 bundled SQLite 都要用它：
+
+- Debian/Ubuntu：`sudo apt install build-essential`
+- Fedora/CentOS：`sudo dnf groupinstall "Development Tools"`
+- macOS：`xcode-select --install`
+
+**依赖镜像（国内，可选）**
 
 写入 `~/.cargo/config.toml`：
 
@@ -214,25 +222,42 @@ cargo build --release
 ./target/release/RustLuaMud
 ```
 
+#### 32 位（i686）编译
+
+预编译产物已覆盖 i686；自行编译需安装 32 位工具链：
+
+```bash
+sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install gcc-multilib g++-multilib
+rustup target add i686-unknown-linux-gnu
+cargo build --release --target i686-unknown-linux-gnu
+# 产物：target/i686-unknown-linux-gnu/release/RustLuaMud
+```
+
+> 32 位 LuaJIT 整数上限 2^31，MUD 脚本中的经验值、HP 等数值不受影响。
+
+### 运行：多实例与守护进程
+
+三种安装方式装出来的是同一个程序，运行方式完全一致。下文 `./RustLuaMud` 指可执行文件本身：源码编译在 `target/release/` 下，一键部署在 `~/RustLuaMud/` 下（Windows 为 `RustLuaMud.exe`）。
+
 #### 多实例运行
 
 ```bash
 # 实例一（默认 profiles/ 目录）
-./target/release/RustLuaMud
+./RustLuaMud
 
 # 实例二（使用不同配置目录）
-./target/release/RustLuaMud --profiles profiles2
+./RustLuaMud --profiles profiles2
 ```
 
 #### 守护进程模式
 
 ```bash
 # 启动守护进程（fork + setsid，ssh 断开不中断，适合 7x24 挂机）
-./target/release/RustLuaMud --daemon
+./RustLuaMud --daemon
 
 # 查询状态 / 停止（PID 文件位于 profiles 目录）
-./target/release/RustLuaMud --daemon status
-./target/release/RustLuaMud --daemon stop
+./RustLuaMud --daemon status
+./RustLuaMud --daemon stop
 ```
 
 > daemon 模式同样支持 `--profiles`，每个配置目录独立一个守护进程（各自的 `daemon.pid`）。
@@ -595,18 +620,7 @@ SetPanel("stat", -70, 0, 70, 10, stat_text, {
 | Windows 运行库 | **需 [VC++ 2015-2022 可再发行组件 x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)**：预编译 exe 动态链接 MSVC CRT，缺失时启动弹窗报「由于找不到 VCRUNTIME140.dll，无法继续执行代码」 |
 | Rust 编译 | 1.70+（edition 2021） |
 
-### 32 位平台（i686）
-
-预编译二进制已支持。从源码编译需安装 32 位工具链：
-
-```bash
-sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install gcc-multilib g++-multilib
-rustup target add i686-unknown-linux-gnu
-cargo build --release --target i686-unknown-linux-gnu
-# 产物：target/i686-unknown-linux-gnu/release/RustLuaMud
-```
-
-> 32 位 LuaJIT 整数上限 2^31，MUD 脚本中的经验值、HP 等数值不受影响。
+> i686 预编译产物需 32 位运行库，Debian/Ubuntu 上装一次：`sudo dpkg --add-architecture i386 && sudo apt install libc6:i386 libstdc++6:i386`。自行编译见[32 位（i686）编译](#32-位i686编译)。
 
 ---
 
