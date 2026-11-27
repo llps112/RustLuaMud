@@ -63,19 +63,19 @@
 | Windows 10/11 64 位，即下即用 | [一键部署（PowerShell 脚本）](#一键部署windows) |
 | Intel Mac、ARM64 Linux，或需要改客户端代码（含 Windows） | [从源码编译](#从源码编译) |
 
-**预编译产物一览**（GitHub 与 Gitee 同步；nightly 四个齐全，macOS 产物进 stable 通道要等下一次发版）：
+**预编译产物一览**（GitHub 与 Gitee 同步；四个产物自 v1.0.10 起 stable 与 nightly 均齐全，更早的 tag 不含 macOS 包）：
 
 | 产物 | 平台 | 运行要求 |
 |------|------|---------|
 | `RustLuaMud-linux-x86_64.tar.gz` | Linux x86_64 | 无额外依赖 |
 | `RustLuaMud-linux-i686.tar.gz` | Linux i686（32 位） | 需 32 位运行库 |
 | `RustLuaMud-windows-x86_64.zip` | Windows x64 | VC++ 2015-2022 运行库，见[故障排查](#故障排查) |
-| `RustLuaMud-macos-arm64.tar.gz` | macOS Apple Silicon | macOS 11+，未签名需清 quarantine；**当前仅 nightly 提供** |
+| `RustLuaMud-macos-arm64.tar.gz` | macOS Apple Silicon | macOS 11+，未签名需清 quarantine |
 
 > **平台细节**
 >
 > - **Windows**：仅支持 64 位（暂无 32 位与 ARM64）。ANSI 样式、CJK 对齐与浮动面板依赖现代终端的 VT/ANSI 支持，启动时还会切换到备用屏幕缓冲区（`CSI ?1049h`）：**最低 Windows 10 version 1607 / Windows Server 2016**（同为 build 14393，已在 Server 2016 实机连续运行验证），**推荐 1809 及以上**（体验完整）；更早的 1511 解析不了备用屏序列，Win7/8/XP 均不支持。终端推荐 Windows Terminal（传统 conhost 已做宽度自适应，但滚动条等固有缺陷无法完全消除）。
-> - **macOS**：仅 Apple Silicon 有预编译，Intel Mac 请从源码编译。**一键部署当前请加 `--nightly`**（最新 stable 发布在 macOS 支持之前，不含 macOS 产物）。产物只做了 ad-hoc 签名、未走 Apple 公证，从浏览器下载后可能被 Gatekeeper 拦下报「已损坏，无法打开」，执行 `xattr -d com.apple.quarantine ./RustLuaMud` 清除隔离标记即可（一键脚本已自动处理）。终端用 macOS 自带的 Terminal.app 即可，推荐 iTerm2（真彩色与字号表现更好）。
+> - **macOS**：仅 Apple Silicon 有预编译，Intel Mac 请从源码编译。产物只做了 ad-hoc 签名、未走 Apple 公证，从浏览器下载后可能被 Gatekeeper 拦下报「已损坏，无法打开」，执行 `xattr -d com.apple.quarantine ./RustLuaMud` 清除隔离标记即可（一键脚本已自动处理）。终端用 macOS 自带的 Terminal.app 即可，推荐 iTerm2（真彩色与字号表现更好）。
 > - **ARM64 Linux**：暂无预编译，请从源码编译。
 >
 > 完整的系统与终端要求见[系统要求](#系统要求)章节。
@@ -91,8 +91,6 @@ bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/script
 # Nightly 版（main 分支最新构建，可能不稳定）
 bash <(curl -Ls https://raw.githubusercontent.com/llps112/RustLuaMud/main/scripts/bootstrap.sh) --nightly
 ```
-
-> **macOS 用户当前请加 `--nightly`**：最新 stable 发布在 macOS 支持之前，不含 macOS 产物，不加参数会下载失败（脚本已会提示改用 nightly）。下一次发版后 stable 即含 macOS 产物。
 
 > **国内镜像加速**：加 `--gitee` 从 Gitee 下载。
 > ```bash
