@@ -705,6 +705,14 @@ UCRT（`api-ms-win-crt-*`，Windows 10 起随系统提供），产物也不链 C
 
 ## 版本历史
 
+### v1.0.10 (2026-11-27)
+- 新增 macOS Apple Silicon 预编译产物 `RustLuaMud-macos-arm64.tar.gz`（`aarch64-apple-darwin`），nightly 与 stable 双通道、GitHub 与 Gitee 同步。Darwin SDK 与链接器不可自由再分发，只能在 `macos-15` 原生 runner 上构建；显式钉 `MACOSX_DEPLOYMENT_TARGET=11.0`，否则 `ld` 按构建机系统版本写 `minos` 抬高运行下限。发布前用 `file`/`lipo -archs`/实跑 `--version` 做 smoke 校验，失败由 `needs` 挡住发版；`ci.yml` 增 `test-macos` job，完整测试套件在 Darwin arm64 跑通。产物为 ad-hoc 签名、未走 Apple 公证，浏览器下载后需清除 `com.apple.quarantine`（最低 macOS 11；Intel Mac 无预编译，需源码编译）
+- `bootstrap.sh` 平台检测修正：`detect_arch` 从只看 `uname -m` 改为先 `uname -s` 再 `uname -m`，此前 Apple Silicon 上会拼出 `linux-aarch64` 的不存在 URL；不支持的平台（Intel Mac、ARM64 Linux、未知系统）错误提示改走 `>&2`——原 `echo` 走 stdout 被 `ARCH=$(detect_arch)` 的命令替换吞掉，只剩静默 `exit 1`；macOS 解压后自动清除隔离标记；下载失败时若为 macOS 且非 nightly，提示该 stable 版本可能不含 macOS 产物并指引改用 `--nightly`
+- 文档：「快速开始」按三条安装途径对称重排（Windows 一键部署不再从属于「下载预编译二进制」，多实例/守护进程从「从源码编译」移出）；「从源码编译」补齐 Windows 差异（VS 2022 Build Tools 的 C++ 工作负载、`rustup-init.exe` 与 msvc 工具链、`target\release\RustLuaMud.exe`）；Rust 版本下限由错误的 1.70 更正为 **1.88**（`mlua 0.12`、`mlua-sys 0.12`、`encoding_rs 0.8` 声明值）；`sed -i` 改 `sed -i.bak`（BSD sed 不兼容）；移除对不存在的 `scripts/build.sh` 的引用
+
+### v1.0.9 (2026-11-26)
+- 修复 10 开场景下的发送错误串台：后台角色 TCP 半死致发送队列满时，`[发送错误]`/`[发送原始数据错误]` 裸写共享前台终端，既无角色名无法归因，又串到玩家正在看的窗口。新增 `report_send_err` 统一出口：带「连接 N (角色名)」标签，总是写肇事 session 自己的 `output_lines` 并落该角色日志，仅当它是当前前台时才写终端；`send_cmd_checked`/`send_lua_raw` 错误分支改走该出口（去重逻辑不变）；`/lua eval` 发送失败改走 `send_cmd_checked` 获得标签与隔离，并先释放 engine 借用再发送以避免借用冲突；门控抽为纯函数 `should_show_send_err`，附 8 项单元测试（标签/自身缓冲落档/cap 裁剪/前台后台门控）
+
 ### v1.0.8 (2026-10-09)
 - 修复节流（非实时）渲染下切换前台连接时最近行重复插回渲染队尾的时序错乱：根因是服务器行同时驻留 `output_lines`（到达即写，切换时 `replace_output` 整表铺屏）与 `pending_data`（每 `render_interval` 刷终端后清空）两份重叠缓冲，旧 `switch_foreground` 在铺屏后又将 `pending_data` `append_output` 一遍导致重复。新增 `buffer_throttle_line` 统一节流入档，确立并锁定不变量「凡进 `pending_data` 的行必已在 `output_lines` 有副本」（服务器行与两条 `[Lua]` 节流分支共享同一实现），`switch_foreground` 据此改为直接丢弃 pending；同步修复节流模式 `[Lua]` 日志只入 `pending_data` 未入存档、切换前台后丢失的缺口。附 4 项针对入档不变量的单元测试
 
